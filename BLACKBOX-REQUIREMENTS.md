@@ -1,6 +1,6 @@
 # Self-contained high-availability application platform
 
-Status: Working draft, revised after twenty-three requirements discussions. Open questions are not accepted requirements. Audit records require replicated persistence, like SQL data.
+Status: Working draft, revised after twenty-five requirements discussions. Open questions are not accepted requirements. Applications must be written specifically for the platform's contracts.
 
 ## Purpose and scope
 
@@ -8,7 +8,19 @@ Define the externally observable behavior of a self-contained application platfo
 
 A developer should be able to supply application business logic and its configuration without separately assembling or operating these foundational services. The application may perform extensive asynchronous processing and implement network services beyond HTTP, including MQTT or an email server. The specification imposes no programming-language choice.
 
-This specification describes what users, clients, and operators can observe and rely on. It does not prescribe programming languages, internal architecture, storage engines, packaging, or deployment mechanisms.
+This specification describes what users, clients, and operators can observe and rely on. It does not prescribe programming languages, internal architecture, storage engines, or a particular supported build or module-release mechanism. The explicit application compatibility and deployment exclusions below apply regardless of implementation choices.
+
+## Mandatory application model and explicit exclusions
+
+**This platform is NOT a replacement for Kubernetes, a general-purpose container orchestrator, or a drop-in hosting environment for existing applications.**
+
+Applications MUST be written specifically to comply with the platform's application-facing contracts, including its native state services, explicit unified commits, storage scopes, asynchronous execution, replication requirements, and external-side-effect boundaries. Application code that does not follow those contracts cannot be expected to function correctly and is outside the supported application model.
+
+Existing applications that do not comply MUST be rewritten for this model. Merely packaging, uploading, or configuring an existing application is not sufficient to make it compliant or give it the platform's transaction and HA guarantees.
+
+**The platform MUST NOT accept Dockerfiles, container images, Docker Compose definitions, or Kubernetes manifests as application deployment inputs.** Running an arbitrary existing container or server workload is outside the required capabilities. Freedom to choose the application programming language does not remove the requirement to use the platform's application model.
+
+These exclusions define what application developers may deploy. They do not prescribe the platform's internal implementation. Supported compliant applications may still be released as complete builds or modules, as stated elsewhere in this specification.
 
 ## Confirmed requirements
 
@@ -53,7 +65,7 @@ The platform must provide:
 - A mandatory unified transaction capability with explicit application commit across integrated data services, as defined below.
 - Application file storage and retrieval.
 - A message queue for asynchronous application work.
-- Key-value storage with configurable time-to-live (TTL) for cache use. TTL may be configured per key or per collection/bucket; neither granularity is prescribed.
+- Key-value storage in explicitly selected replicated or local temporary modes, with configurable TTL. TTL may be configured per key or per collection/bucket; neither granularity is prescribed.
 - Execution of asynchronous background work and scheduled tasks.
 - Publish/subscribe events for multiple independent subscribers.
 - Integrated application configuration and secrets management.
@@ -68,7 +80,7 @@ The platform must provide:
 
 The platform must distinguish foundational capabilities from higher-level features that use them, without requiring a particular module layout or implementation language.
 
-Traffic and resource limits may be delivered as plugins using lower-level facilities such as cache. Operational status and health views may be derived from metrics and other platform state. These features do not have to reside in the core runtime. Their failure behavior must account for the guarantees of their underlying capabilities; an eventually convergent cache is not, by itself, a strict global limit.
+Traffic and resource limits may be delivered as plugins using lower-level facilities such as key-value storage. Operational status and health views may be derived from metrics and other platform state. These features do not have to reside in the core runtime. Their failure behavior must account for the guarantees of their underlying capabilities; local temporary storage does not provide application-wide coordination or a strict global limit.
 
 Cron scheduling may also be delivered as a higher-level capability using the native queue service. It does not require a separate core execution engine. A system scheduling request such as "enqueue this work every minute" is an acceptable intended interface. Each cron definition must have its own logically separate system-managed queue. The specification does not prescribe the internal scheduling mechanism or physical queue storage layout.
 
@@ -172,7 +184,7 @@ A successful commit response MUST mean that every participating change has commi
 
 The same transaction-facing application code MUST work in single-machine development and HA operation. The explicit local durability exception in development mode remains in force. Atomicity does not upgrade a `persistent server` or `temporary server` file into replicated data; visibility and failure semantics for transactions mixing different file scopes remain to be finalized.
 
-In the one-member degraded state, a transaction containing any prohibited SQL write, replicated-file write, or audit append MUST NOT partially commit its permitted cache changes. Transactions containing only permitted operations must retain all-or-nothing commit behavior locally. Later merging of disconnected cache changes remains subject to the separately agreed convergence semantics.
+In the one-member degraded state, a transaction containing any prohibited SQL write, replicated-file write, replicated key-value write, or audit append MUST NOT partially commit its permitted local temporary changes. Transactions containing only permitted operations must retain all-or-nothing commit behavior locally. Local temporary key-value entries are not merged or replicated after connectivity returns.
 
 This requirement covers platform-managed data operations, including transactional pub/sub publication. External S3 operations are outside the atomic commit guarantee; runtime logs are independent of it, and transaction-associated metric updates follow the post-commit policy below. The boundary for configuration and secret changes remains open. Direct actions in external systems, such as sending an email, issuing an HTTP response, or charging a payment, do not acquire an agreed atomic rollback guarantee merely because application code performs them inside a transaction.
 
@@ -202,23 +214,28 @@ External S3 operations do not participate in the platform's all-or-nothing trans
 
 Other required file operations and upload interruption behavior remain to be specified. All-or-nothing transactions spanning SQL, files, key-value entries, audit appends, and queued work are mandatory as defined above.
 
-### Key-value expiration
+### Key-value storage policies and expiration
 
-Key-value storage must support configurable TTL so that ordinary cache entries expire. Expiration is intentional removal, rather than a durability failure. Behavior without TTL, expiration timing, cache eviction before TTL, and the supported persistent versus disposable storage policies remain to be defined.
+Applications must explicitly select one of two key-value storage scopes:
 
-TTL cache writes must remain available when only one member of a three-VPS deployment is reachable. Such writes may be acknowledged locally without the SQL or replicated-file durability guarantee. After communication is restored, cache values must converge using a last-write-wins policy for each key: a later write supersedes an earlier write.
+| Scope | Required behavior |
+| --- | --- |
+| Replicated | Entries follow the same replicated persistence, unified transaction, and acknowledgement guarantees as SQL data. A committed write survives one VPS failure. Writes cannot succeed in the one-member HA state. |
+| Local temporary | Entries exist only on the current server and may be lost. They are not shared, replicated, or merged with another server's entries. Writes remain available on an isolated server under their local contract, like temporary server files. |
 
-The externally observable meaning of "later" must be specified, including concurrent writes, equal ordering values, and clock differences between servers. Delete, expiry, and TTL replacement semantics remain open. This policy must not be described as an atomic shared lock, counter, or transaction guarantee.
+Both scopes must support configurable TTL for cache use. TTL governs expiration and does not determine replication policy. Expiration is intentional removal, rather than a durability failure. Behavior without TTL, expiration timing, TTL replacement, and early eviction remain to be defined. Replicated key-value storage uses the single-machine development durability exception just like SQL and replicated files.
+
+There is no disconnected multi-writer cache with last-write-wins reconciliation in the current requirements. A local temporary value must not be presented as shared application state. The application-facing way to select a scope remains to be defined without prescribing a language or storage engine.
 
 ### Application data correctness
 
-Once a client receives a successful acknowledgement of an application data write covered by the HA persistence contract, that write must survive the failure of any one VPS in a multiple-VPS deployment. It must not silently disappear as a consequence of that failure. SQL writes and `replica` file writes carry this contract. Explicitly server-local files and disposable data carry their separately declared weaker guarantees.
+Once a client receives a successful acknowledgement of an application data write covered by the HA persistence contract, that write must survive the failure of any one VPS in a multiple-VPS deployment. It must not silently disappear as a consequence of that failure. SQL writes, `replica` file writes, replicated key-value writes, and audit appends carry this contract. Explicitly server-local files and disposable data carry their separately declared weaker guarantees.
 
-For any operation carrying the platform's replicated persistence guarantee, success must not be acknowledged until the data is stored on more than one machine. This applies to SQL, replicated files, audit records, and other capabilities when they promise that guarantee. Single-machine development and TTL cache writes have the explicit exceptions defined in this document. Mere acceptance into a local processing queue is not equivalent to confirmed replicated persistence.
+For any operation carrying the platform's replicated persistence guarantee, success must not be acknowledged until the data is stored on more than one machine. This applies to SQL, replicated files, replicated key-value entries, audit records, and other capabilities when they promise that guarantee. Single-machine development has the explicit local exception defined in this document. Local temporary entries do not promise replicated persistence. Mere acceptance into a local processing queue is not equivalent to confirmed replicated persistence.
 
 Configured single-machine development mode is an explicit exception to multi-machine acknowledgement: persistence operations must be usable without another machine, and `replica` file writes are confirmed after local durable storage. This mode does not promise survival of the loss of that machine, and must not require changes to application code.
 
-When only one member of a three-VPS HA deployment is reachable, SQL writes, replicated-file writes, and audit appends must not be committed or acknowledged as successful. Reading remains a supported operation, and TTL cache writes are explicitly permitted as described separately. There is no automatic downgrade of SQL, replicated-file, or audit durability to local storage.
+When only one member of a three-VPS HA deployment is reachable, SQL writes, replicated-file writes, replicated key-value writes, and audit appends must not be committed or acknowledged as successful. Reading remains a supported operation, and local temporary key-value writes are explicitly permitted. There is no automatic downgrade of replicated storage to local storage.
 
 A complete replica may lack recent changes committed by the other two members. Application code decides which operations may use degraded reads, including authentication and authorization. A supported local read must not silently claim to reflect the latest global state.
 
@@ -234,7 +251,7 @@ Passing the guard must not bypass the platform's write or commit requirements. T
 
 Internal retries used to preserve request continuity must not cause the same logical operation to be applied twice. For example, retrying request processing after a failure must not create a second order for the original request. Guarantees for independently repeated client requests and external side effects remain to be defined.
 
-Application data durability is distinct from the weaker loss allowances for diagnostic logs, degraded-mode cache writes, and the separately defined audit record guarantees. Recovery of acknowledged data after destruction of multiple VPS instances remains to be specified; a complete copy does not imply that every acknowledged change had already reached every replica.
+Application data durability is distinct from the weaker loss allowances for diagnostic logs and local temporary key-value entries. Recovery of acknowledged data after destruction of multiple VPS instances remains to be specified; a complete copy does not imply that every acknowledged change had already reached every replica.
 
 ### Integrated logs
 
@@ -317,9 +334,9 @@ In a multiple-VPS deployment, the system as a whole must continue providing its 
 
 The network-disconnection case must be covered even if the disconnected VPS remains running. The behavior of requests reaching that VPS and the required data guarantees during disconnection remain to be specified.
 
-The application must also remain operational when only one VPS survives, including the case where two out of three VPS instances stop. The survivor supports reads and TTL cache writes, while SQL writes, replicated-file writes, and audit appends are unavailable. Application-defined replica-status guards may further restrict sensitive operations. Full write availability is not required. Response delays greater than five seconds are acceptable in this degraded state.
+The application must also remain operational when only one VPS survives, including the case where two out of three VPS instances stop. The survivor supports reads and local temporary key-value writes, while SQL writes, replicated-file writes, replicated key-value writes, and audit appends are unavailable. Application-defined replica-status guards may further restrict sensitive operations. Full write availability is not required. Response delays greater than five seconds are acceptable in this degraded state.
 
-The same restrictions apply to an isolated one-member side of a network partition. TTL cache writes may be accepted there even if the other two VPS instances remain running, and must reconcile after reconnection. SQL, audit, and replicated-file write behavior on the two-member side, degraded background-job and queue behavior, and availability of server-local file writes still require a complete contract. Behavior during a release combined with a VPS failure also remains to be defined.
+The same restrictions apply to an isolated one-member side of a network partition. Local temporary key-value writes may be accepted there even if the other two VPS instances remain running; they remain local after reconnection. SQL, audit, replicated key-value, and replicated-file write behavior on the two-member side, degraded background-job and queue behavior, and availability of server-local file writes still require a complete contract. Behavior during a release combined with a VPS failure also remains to be defined.
 
 ### Availability during updates
 
@@ -339,7 +356,7 @@ This guarantee covers both requests already in progress and requests arriving du
 
 This availability guarantee concerns errors caused by updates or covered failures. It does not require invalid requests or application-level failures to return successful responses.
 
-The one-member degraded state explicitly excludes successful completion of operations requiring SQL writes, replicated-file writes, or committed audit records, and operations rejected by an application replica-status guard. Such operations must not be falsely acknowledged; their client-visible unavailable or deferred outcome remains to be defined. The general no-failed-request guarantee must be interpreted within the supported operations of each availability state.
+The one-member degraded state explicitly excludes successful completion of operations requiring SQL writes, replicated-file writes, replicated key-value writes, or committed audit records, and operations rejected by an application replica-status guard. Such operations must not be falsely acknowledged; their client-visible unavailable or deferred outcome remains to be defined. The general no-failed-request guarantee must be interpreted within the supported operations of each availability state.
 
 Persistent data changes required by a release must be included in the final update contract.
 
@@ -349,7 +366,7 @@ Persistent data changes required by a release must be included in the final upda
 
 1. What condition must the replica-status guard require: enough connected replicas, confirmed synchronization and read freshness, or a selectable requirement? How does it behave in single-machine development mode?
 2. What token revocation and cache-miss behavior is required? What acknowledgement threshold and multiple-failure loss policy apply to audit records?
-3. What ordering, delete, expiry, and TTL replacement semantics define last-write-wins cache convergence?
+3. What TTL defaults, expiration timing, early eviction, and local temporary lifetime rules are required?
 
 ### Subsequent discussion
 
@@ -363,7 +380,7 @@ Persistent data changes required by a release must be included in the final upda
 - Must configuration and secrets participate in application transactions? Can audit records about an aborted operation be deliberately appended outside that operation's transaction?
 - What retry and duplicate-update policy applies to best-effort post-commit metrics?
 - What concurrent-read isolation, read-your-own-writes, TTL start time, caller-disconnection outcomes, and transaction-size or duration limits are required?
-- What atomicity and convergence guarantees apply to transactions changing multiple cache keys while disconnected?
+- What transaction and lifetime guarantees apply to local temporary entries, particularly when mixed with replicated data?
 - What configuration activation, secret access, rotation, backup, and degraded-mode guarantees are required?
 - What platform-administration access controls are required, and should any application identity capability be included?
 - What tracing interfaces, limit scopes, dashboard views and actions, alert thresholds, notification channels, and monitoring availability guarantees are required? Which derived capabilities are supplied by default?
@@ -389,11 +406,12 @@ The following scenarios capture the confirmed direction. Workload limits, data g
 | --- | --- | --- |
 | Complete single-VPS installation | Run the application on one VPS within the resource baseline. | HTTP/WebSocket serving, custom network services, business logic, SQL, files, messaging, key-value storage, tasks, logs, and metrics are available without separately operated services for those capabilities. Single-machine durability semantics remain to be specified. |
 | Same application code | Run the same application code locally, on one development machine, and across multiple VPS instances. | The application uses the same operations without an alternate implementation. Configured development mode acknowledges persistence locally; HA mode requires multi-machine durability. |
+| Unsupported application deployment | Attempt to deploy an existing non-compliant application through a Dockerfile, container image, Docker Compose definition, or Kubernetes manifest. | These are unsupported application deployment inputs. The application must be rewritten to comply with the platform's contracts; packaging alone does not confer compatibility or HA guarantees. |
 | Application-defined network service | Supply application code implementing a non-HTTP service using TCP or UDP on a configured port. | Standard clients for that protocol can use the service, and the application can use the integrated platform capabilities. Security and session-continuity requirements remain to be specified. |
 | Compatible update | Apply a correctly prepared release on one machine or multiple VPS instances while clients send valid requests. | Otherwise fast requests, including in-flight requests, complete successfully within five seconds, without client retries or update-induced errors or timeouts. |
 | One VPS stops | Unexpectedly stop any one VPS in a multiple-VPS deployment while clients send valid requests. | Otherwise fast requests complete successfully within five seconds without client retries or failure-induced errors or timeouts, except where the one-survivor degraded-state allowance applies. |
 | One VPS loses peer connectivity | Disconnect any one VPS from the other instances while it remains running. | The system continues serving the application; client routing and data correctness requirements during disconnection still need to be specified. |
-| Only one VPS survives | Stop two VPS instances in a three-VPS deployment. | Reads and TTL cache writes remain supported. SQL writes, replicated-file writes, and audit appends are not committed or acknowledged as successful. Application guards may restrict sensitive reads. Response times may exceed five seconds. |
+| Only one VPS survives | Stop two VPS instances in a three-VPS deployment. | Reads and local temporary key-value writes remain supported. SQL writes, replicated-file writes, replicated key-value writes, and audit appends are not committed or acknowledged as successful. Application guards may restrict sensitive reads. Response times may exceed five seconds. |
 | Replica-status guard | Call the application guard while its required replica condition is not satisfied. | The guard returns failure or raises an error so the protected application operation does not proceed. Its precise predicate and development-mode behavior remain to be specified. |
 | Audited degraded-mode login | Attempt login on an isolated VPS where the application requires a committed audit record before returning success. | Login is not falsely reported successful while its mandatory audit append cannot commit. Its client-visible unavailable outcome remains to be specified. |
 | Acknowledged HA application write | Receive a successful response for an HA-persistent write, then lose any one VPS. | The acknowledged change remains part of application state. Explicitly server-local files are outside this guarantee. |
@@ -401,6 +419,7 @@ The following scenarios capture the confirmed direction. Workload limits, data g
 | Single-machine development write | Write to `replica` in configured single-machine development mode with no peers available. | The write is confirmed after local durable storage, without waiting for peers and without changes to application code. |
 | File survival | Complete writes to `replica` and `persistent server`, restart the receiving server with intact storage, then destroy that server and its storage. | Both files survive the intact-storage restart. The replicated file also survives destruction of that one server; the server-local persistent file may be lost. Temporary file cleanup remains to be defined. |
 | Key-value TTL | Store a cache entry with a configured TTL. | The platform supports expiration of that entry; exact timing and early-eviction rules remain to be specified. |
+| Key-value scope | Write one replicated entry and one local temporary entry, then lose the receiving VPS. | The committed replicated entry survives that one VPS failure. The local temporary entry may be lost and is not reconstructed by merging copies. |
 | Default metrics collection | Report application metrics in a standard installation. | The platform collects the metrics without a separately operated monitoring stack; query, visualization, retention, and failure behavior remain to be specified. |
 | Configuration and secrets | Run the same application in development and HA environments with different settings and credentials. | Application code obtains configuration and secrets through the platform without embedding environment-specific values in code. Access and update rules remain to be specified. |
 | Automatic HTTPS | Configure a publicly validatable domain, obtain a certificate, and reach its renewal period. | The platform provisions and renews HTTPS certificates without a separately operated certificate-management service; activation does not interrupt request service. Issuance prerequisites and failure outcomes remain to be specified. |
@@ -413,7 +432,7 @@ The following scenarios capture the confirmed direction. Workload limits, data g
 | Metric failure after successful commit | Commit an order, then interrupt or fail its post-commit metric update. | The order remains committed. The counter increment may be missing; no rollback or transaction failure is caused by metric delivery failure. |
 | External S3 compensation | Perform an external S3 operation with an associated compensation action, then definitively fail the platform transaction. | External S3 is outside atomicity. If the desired helper is provided, it attempts compensation; failure of that action may leave residual external effects without guaranteed automatic recovery. |
 | Interrupted unified commit | Stop a VPS during commit of a cross-service transaction. | Platform recovery does not leave a permanent partial commit or duplicate effects from internal retries. Ordinary application code does not need separate service-recovery steps or a mandatory commit-status API call. Caller-disconnection outcomes remain to be specified. |
-| Degraded mixed transaction | On the one-member side, prepare a TTL cache change together with a prohibited SQL write, replicated-file write, or audit append, then request commit. | The transaction does not partially commit the cache change while rejecting the prohibited operation. The exact unavailable outcome remains to be specified. |
+| Degraded mixed transaction | On the one-member side, prepare a local temporary key-value change together with a prohibited SQL write, replicated-file write, replicated key-value write, or audit append, then request commit. | The transaction does not partially commit the local temporary change while rejecting the prohibited operation. The exact unavailable outcome remains to be specified. |
 | Internal retry | Interrupt request processing so that the platform retries the same logical operation. | The operation completes without duplicate application effects, such as a second order. |
 | Background work survives transition | Accept background work, then apply a compatible update or lose one VPS. | Accepted work is not lost and remains processable; retry, completion, and external-effect semantics remain to be specified. |
 | Scheduled-task scope | Define a task with default scope, then define one with explicit per-server scope in a multiple-VPS deployment. | Default execution is once per application deployment; per-server execution schedules work independently on each participating server. Partition and recovery guarantees remain to be specified. |
