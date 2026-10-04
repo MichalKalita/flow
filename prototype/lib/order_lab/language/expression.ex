@@ -44,6 +44,13 @@ defmodule OrderLab.Language.Expression do
   defp prefix([{:symbol, ":", _, _}, {:word, name, _, _} | rest], _),
     do: {{:variable, name}, rest}
 
+  defp prefix([{:word, "IF", _, _} | tokens], file) do
+    {condition, tokens} = parse(tokens, file)
+    {positive, tokens} = expect(tokens, "THEN", file) |> parse(file)
+    {negative, tokens} = expect(tokens, "ELSE", file) |> parse(file)
+    {{:conditional, condition, positive, negative}, tokens}
+  end
+
   defp prefix([{:word, "NOT", _, _} | rest], file) do
     {value, rest} = expr(rest, 25, file)
     {{:unary, "NOT", value}, rest}
@@ -147,10 +154,32 @@ defmodule OrderLab.Language.Expression do
       alias: alias_name,
       cardinality: cardinality,
       where: [],
+      joins: [],
       select: nil,
       order: [],
       limit: nil
     })
+  end
+
+  def join_clause(tokens, file) do
+    {kind, tokens} =
+      case text(tokens) do
+        "LEFT" -> {:left, expect(tl(tokens), "JOIN", file)}
+        "INNER" -> {:inner, expect(tl(tokens), "JOIN", file)}
+        "JOIN" -> {:inner, tl(tokens)}
+        _ -> fail!("Expected JOIN or LEFT JOIN", tokens, file)
+      end
+
+    {source, tokens} = expr(tokens, 60, file)
+    {name, tokens} = expect(tokens, "AS", file) |> identifier(file)
+    {condition, tokens} = expect(tokens, "ON", file) |> parse(file)
+    {%{kind: kind, source: source, alias: name, condition: condition, guard: nil}, tokens}
+  end
+
+  defp query_clauses([{:word, kind, _, _} | _] = tokens, file, query)
+       when kind in ["JOIN", "INNER", "LEFT"] do
+    {join, rest} = join_clause(tokens, file)
+    query_clauses(rest, file, %{query | joins: query.joins ++ [join]})
   end
 
   defp query_clauses([{:word, "WHERE", _, _} | rest], file, query) do

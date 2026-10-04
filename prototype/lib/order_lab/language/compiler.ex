@@ -117,19 +117,22 @@ defmodule OrderLab.Language.Compiler do
             do: fail("HTTP path parameters require INPUT declarations")
         end
 
+        endpoint = %{endpoint | body: resolve_annotations(endpoint.body, definitions)}
+
         local =
           Enum.reduce(inputs, env, fn input, env ->
             if Map.has_key?(env, input.name),
               do: fail("Input shadows existing name #{input.name}")
 
             if input.default != :missing,
-              do: Checker.expect!(Checker.infer(input.default, env), input.type)
+              do: Checker.expect_expr!(input.default, input.type, env)
 
             Map.put(env, input.name, input.type)
           end)
 
         state = %{
           env: local,
+          returns: [],
           transaction: false,
           committed: false,
           loop: false,
@@ -155,7 +158,17 @@ defmodule OrderLab.Language.Compiler do
 
   defp check(node, state) do
     try do
-      check_node(node, state)
+      result = check_node(node, state)
+
+      if Map.has_key?(node, :annotation) do
+        name = if node.kind == :let, do: node.name, else: node.binding
+        actual = Map.fetch!(result.env, name)
+        Checker.expect!(actual, node.annotation)
+        if node.kind == :let, do: Checker.expect_expr!(node.value, node.annotation, state.env)
+        %{result | env: Map.put(result.env, name, node.annotation)}
+      else
+        result
+      end
     rescue
       error in Error -> reraise %{error | file: node.file, line: node.line}, __STACKTRACE__
     end
@@ -183,30 +196,33 @@ defmodule OrderLab.Language.Compiler do
     if s.transaction and not s.committed and not s.loop,
       do: fail("Response cannot leave an uncommitted transaction")
 
-    Checker.infer(n.value, s.env)
-    s
+    %{s | returns: s.returns ++ [Checker.infer(n.value, s.env)]}
   end
 
   defp check_node(%{kind: :when} = n, s) do
     Checker.expect!(Checker.infer(n.condition, s.env), {:named, "Bool"})
     left = check_block(n.body, %{s | env: Checker.narrow(n.condition, s.env)})
-    right = check_block(n.otherwise, s)
+    right = check_block(n.otherwise, %{s | env: Checker.narrow_false(n.condition, s.env)})
 
     unless left.committed == right.committed,
       do: fail("Conditional COMMIT must occur on both paths")
 
-    %{s | committed: left.committed}
+    %{s | committed: left.committed, returns: Enum.uniq(left.returns ++ right.returns)}
   end
 
   defp check_node(%{kind: :each} = n, s) do
     type = Checker.element!(Checker.infer(n.source, s.env))
-    child = check_block(n.body, %{s | env: Map.put(s.env, n.name, type), loop: true})
+    child = check_block(n.body, %{s | env: Map.put(s.env, n.name, type), loop: true, returns: []})
 
     if n.binding do
       unless returns?(n.body), do: fail("Bound iteration requires RETURN on every path")
-      results = return_types(n.body, child.env)
-      type = List.first(results) || {:named, "JSON"}
-      Enum.each(results, &Checker.expect!(&1, type))
+      results = child.returns
+
+      type =
+        if results == [],
+          do: {:named, "JSON"},
+          else: Enum.reduce(tl(results), hd(results), &Checker.common!/2)
+
       bind(s, n.binding, {:list, type})
     else
       s
@@ -239,15 +255,19 @@ defmodule OrderLab.Language.Compiler do
          "details" => {:named, "JSON"}
        }}
 
-    check_block(n.handler, %{s | catching: true, env: Map.put(s.env, n.error_name, error)})
+    handler =
+      check_block(n.handler, %{s | catching: true, env: Map.put(s.env, n.error_name, error)})
+
     # Success-only bindings cannot escape a handler that continues.
-    if returns?(n.handler), do: %{result | catching: s.catching}, else: s
+    if returns?(n.handler),
+      do: %{result | catching: s.catching, returns: Enum.uniq(result.returns ++ handler.returns)},
+      else: %{s | returns: Enum.uniq(result.returns ++ handler.returns)}
   end
 
   defp check_node(%{kind: kind} = n, s) when kind in [:call, :queue] do
     effect!(s, kind == :queue)
     op = Map.get(s.operations, n.operation) || fail("Unknown registered operation #{n.operation}")
-    Checker.expect!(Checker.infer(n.input, s.env), op.input)
+    Checker.expect_expr!(n.input, op.input, s.env)
 
     if kind == :queue do
       unless is_integer(n.attempts) and n.attempts in 1..100 and is_integer(n.delay) and
@@ -263,7 +283,7 @@ defmodule OrderLab.Language.Compiler do
   defp check_node(%{kind: :insert} = n, s) do
     effect!(s, true)
     type = Map.get(s.tables, n.table) || fail("Unknown table #{n.table}")
-    Checker.expect!(Checker.infer(n.value, s.env), type)
+    Checker.expect_expr!(n.value, type, s.env)
     bind(s, n.binding, type)
   end
 
@@ -279,7 +299,20 @@ defmodule OrderLab.Language.Compiler do
       if Map.has_key?(changed, "id"), do: fail("UPDATE cannot change id")
 
       Enum.each(changed, fn {key, value} ->
-        Checker.expect!(value, Map.get(fields, key) || fail("Unknown field #{key}"))
+        expected = Map.get(fields, key) || fail("Unknown field #{key}")
+        Checker.expect!(value, expected)
+
+        case n.value do
+          {:record, values} ->
+            Checker.expect_expr!(
+              Enum.find_value(values, fn {name, expr} -> if name == key, do: expr end),
+              expected,
+              local
+            )
+
+          _ ->
+            :ok
+        end
       end)
     end
 
@@ -316,16 +349,24 @@ defmodule OrderLab.Language.Compiler do
         _ -> false
       end)
 
-  defp return_types(nodes, env),
-    do:
-      Enum.flat_map(nodes, fn
-        %{kind: :return, value: value} -> [Checker.infer(value, env)]
-        %{kind: :when, body: a, otherwise: b} -> return_types(a ++ b, env)
-        _ -> []
+  defp resolve_annotations(nodes, definitions) do
+    Enum.map(nodes, fn node ->
+      node =
+        if Map.has_key?(node, :annotation),
+          do: %{node | annotation: Types.resolve!(node.annotation, definitions)},
+          else: node
+
+      Enum.reduce([:body, :otherwise, :handler], node, fn key, node ->
+        if Map.has_key?(node, key),
+          do: Map.update!(node, key, &resolve_annotations(&1, definitions)),
+          else: node
       end)
+    end)
+  end
 
   defp check_type({:refined, type, predicate}) do
     check_type(type)
+    Checker.pure_refinement!(predicate)
     Checker.expect!(Checker.infer(predicate, %{"value" => type}), {:named, "Bool"})
   end
 

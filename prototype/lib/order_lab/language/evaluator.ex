@@ -30,6 +30,12 @@ defmodule OrderLab.Language.Evaluator do
   def eval({:record, fields}, env, sources),
     do: Map.new(fields, fn {key, value} -> {key, eval(value, env, sources)} end)
 
+  def eval({:conditional, condition, positive, negative}, env, sources) do
+    if boolean!(eval(condition, env, sources)),
+      do: eval(positive, env, sources),
+      else: eval(negative, env, sources)
+  end
+
   def eval({:present, value}, env, sources), do: not is_nil(eval(value, env, sources))
   def eval({:unary, "NOT", value}, env, sources), do: not boolean!(eval(value, env, sources))
   def eval({:unary, "-", value}, env, sources), do: -number!(eval(value, env, sources))
@@ -64,25 +70,40 @@ defmodule OrderLab.Language.Evaluator do
   end
 
   def eval({:query, query}, env, sources) do
-    rows = list!(eval(query.source, env, sources))
+    rows = eval(query.source, env, sources) |> list!() |> Enum.map(&Map.put(env, query.alias, &1))
 
     rows =
-      Enum.filter(rows, fn row ->
-        row_env = Map.put(env, query.alias, row)
+      Enum.reduce(query.joins, rows, fn join, rows ->
+        Enum.flat_map(rows, fn row_env ->
+          if join.guard && not boolean!(eval(join.guard, env, sources)) do
+            [Map.put(row_env, join.alias, nil)]
+          else
+            matches =
+              eval(join.source, row_env, sources)
+              |> list!()
+              |> Enum.map(&Map.put(row_env, join.alias, &1))
+              |> Enum.filter(&boolean!(eval(join.condition, &1, sources)))
 
-        Enum.all?(query.where, fn
-          {:guard, guard, condition} ->
-            not boolean!(eval(guard, env, sources)) or boolean!(eval(condition, row_env, sources))
-
-          condition ->
-            boolean!(eval(condition, row_env, sources))
+            if matches == [] and join.kind == :left,
+              do: [Map.put(row_env, join.alias, nil)],
+              else: matches
+          end
         end)
       end)
 
     rows =
-      if query.order == [],
-        do: rows,
-        else: Enum.sort(rows, &ordered?(&1, &2, query, env, sources))
+      Enum.filter(rows, fn row_env ->
+        Enum.all?(query.where, fn
+          {:guard, guard, predicate} ->
+            not boolean!(eval(guard, env, sources)) or boolean!(eval(predicate, row_env, sources))
+
+          predicate ->
+            boolean!(eval(predicate, row_env, sources))
+        end)
+      end)
+
+    rows =
+      if query.order == [], do: rows, else: Enum.sort(rows, &ordered?(&1, &2, query, sources))
 
     rows =
       if query.limit do
@@ -94,9 +115,11 @@ defmodule OrderLab.Language.Evaluator do
       end
 
     rows =
-      if query.select,
-        do: Enum.map(rows, &eval(query.select, Map.put(env, query.alias, &1), sources)),
-        else: rows
+      Enum.map(rows, fn row_env ->
+        if query.select,
+          do: eval(query.select, row_env, sources),
+          else: Map.fetch!(row_env, query.alias)
+      end)
 
     case query.cardinality do
       "MANY" ->
@@ -117,10 +140,10 @@ defmodule OrderLab.Language.Evaluator do
     end
   end
 
-  defp ordered?(a, b, query, env, sources) do
+  defp ordered?(a, b, query, sources) do
     Enum.reduce_while(query.order, true, fn {key, direction}, _ ->
-      left = eval(key, Map.put(env, query.alias, a), sources)
-      right = eval(key, Map.put(env, query.alias, b), sources)
+      left = eval(key, a, sources)
+      right = eval(key, b, sources)
       comparable!(left, right)
 
       if left == right,

@@ -17,12 +17,13 @@ TABLE Users = User
 TABLE Orders = Order
 
 TYPE DeviceID = String WHERE length(value) BETWEEN 1 AND 64
+TYPE Battery = Int WHERE value BETWEEN 0 AND 100
 TYPE Latitude = Number WHERE value BETWEEN -90 AND 90
 TYPE Longitude = Number WHERE value BETWEEN -180 AND 180
 MQTT DeviceStatus
     TOPIC "devices/{device_id}/status"
     PARAM device_id DeviceID
-    PAYLOAD {online: Bool, battery: Int}
+    PAYLOAD {online: Bool, battery: Battery}
     HISTORY 24 HOURS
 MQTT DevicePosition
     TOPIC "devices/{device_id}/position"
@@ -60,12 +61,12 @@ TRANSACTION
     user = ONE FROM Users AS u WHERE u.id = :user_id
     REQUIRE user IS PRESENT ELSE 404 user_not_found "Uživatel neexistuje."
     cart = group_sum(:items, "product_id", "quantity")
-    snapshots = FOR EACH item IN cart
+    snapshots: List<OrderItem> = FOR EACH item IN cart
         product = ONE FROM Products AS p WHERE p.id = item.product_id
         REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
         RETURN {id: product.id, name: product.name, price_cents: product.price_cents, quantity: item.quantity}
-    total = SUM item IN snapshots OF item.price_cents * item.quantity
-    order = INSERT Orders WITH {
+    total: Int = SUM item IN snapshots OF item.price_cents * item.quantity
+    order: Order = INSERT Orders WITH {
         id: uuid("ord"), user_id: user.id, request_id: request.id, created_at: request.time,
         items: snapshots, total_cents: total, payment_method: :payment_method,
         payment_url: "", status: "awaiting_payment"

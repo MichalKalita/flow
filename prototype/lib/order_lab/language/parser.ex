@@ -299,6 +299,20 @@ defmodule OrderLab.Language.Parser do
        do: iteration(tokens, name, line, rest, file)
 
   defp statement(
+         %{tokens: [name_token = {:word, _, _, _}, {:symbol, ":", _, _} | tokens]} = line,
+         rest,
+         file
+       ) do
+    {annotation, tail} = type(tokens, file)
+    tail = E.expect(tail, "=", file)
+
+    {node, rest} =
+      statement(%{line | tokens: [name_token, {:symbol, "=", line.line, 1} | tail]}, rest, file)
+
+    {Map.put(node, :annotation, annotation), rest}
+  end
+
+  defp statement(
          %{tokens: [{:word, name, _, _}, {:symbol, "=", _, _} | tokens]} = line,
          rest,
          file
@@ -413,6 +427,11 @@ defmodule OrderLab.Language.Parser do
 
   defp query_lines([line | rest], query, file) do
     case line.tokens do
+      [{:word, kind, _, _} | _] when kind in ["JOIN", "INNER", "LEFT"] ->
+        {join, tail} = E.join_clause(line.tokens, file)
+        unless tail == [], do: error!("Unexpected JOIN suffix", line, file)
+        query_lines(rest, %{query | joins: query.joins ++ [join]}, file)
+
       [{:word, "WHERE", _, _} | tokens] ->
         query_lines(
           rest,
@@ -440,21 +459,29 @@ defmodule OrderLab.Language.Parser do
         condition = expression!(tokens, line, file)
         {children, rest} = children(rest, line, file)
 
-        wheres =
-          Enum.map(children, fn child ->
+        query =
+          Enum.reduce(children, query, fn child, query ->
             case child.tokens do
               [{:word, "WHERE", _, _} | tokens] ->
-                {:guard, condition, expression!(tokens, child, file)}
+                %{
+                  query
+                  | where: query.where ++ [{:guard, condition, expression!(tokens, child, file)}]
+                }
+
+              [{:word, kind, _, _} | _] when kind in ["JOIN", "INNER", "LEFT"] ->
+                {join, tail} = E.join_clause(child.tokens, file)
+                unless tail == [], do: error!("Unexpected JOIN suffix", child, file)
+                %{query | joins: query.joins ++ [%{join | guard: condition}]}
 
               _ ->
-                error!("Conditional query clause must be WHERE", child, file)
+                error!("Conditional query clause must be WHERE or JOIN", child, file)
             end
           end)
 
-        query_lines(rest, %{query | where: query.where ++ wheres}, file)
+        query_lines(rest, query, file)
 
       _ ->
-        error!("Expected WHERE, SELECT, ORDER BY, LIMIT or WHEN query clause", line, file)
+        error!("Expected JOIN, WHERE, SELECT, ORDER BY, LIMIT or WHEN query clause", line, file)
     end
   end
 

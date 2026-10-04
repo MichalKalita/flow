@@ -1,6 +1,6 @@
 defmodule OrderLab.Language.Checker do
   @moduledoc "Structural expression checking; refinements are enforced at value boundaries."
-  alias OrderLab.Language.{Error, Types}
+  alias OrderLab.Language.{Error, Types, Evaluator}
   @bool {:named, "Bool"}
   @int {:named, "Int"}
   @number {:named, "Number"}
@@ -36,12 +36,16 @@ defmodule OrderLab.Language.Checker do
 
   def infer({:list, items}, env) do
     types = Enum.map(items, &infer(&1, env))
-    type = hd(types)
+    {:list, Enum.reduce(tl(types), hd(types), &common!/2)}
+  end
 
-    unless Enum.all?(types, &(compatible?(&1, type) or compatible?(type, &1))),
-      do: fail("List items must have compatible types")
+  def infer({:conditional, condition, positive, negative}, env) do
+    expect!(infer(condition, env), @bool)
 
-    {:list, if(Enum.all?(types, &(base(&1) == @int)), do: @int, else: type)}
+    common!(
+      infer(positive, narrow(condition, env)),
+      infer(negative, narrow_false(condition, env))
+    )
   end
 
   def infer({:present, value}, env) do
@@ -59,7 +63,7 @@ defmodule OrderLab.Language.Checker do
 
   def infer({:binary, "OR", a, b}, env) do
     expect!(infer(a, env), @bool)
-    expect!(infer(b, env), @bool)
+    expect!(infer(b, narrow_false(a, env)), @bool)
   end
 
   def infer({:binary, op, a, b}, env) when op in ["+", "-", "*", "/", "%"] do
@@ -106,14 +110,30 @@ defmodule OrderLab.Language.Checker do
     row = element!(infer(query.source, env))
     row_env = Map.put(env, query.alias, row)
 
-    Enum.each(query.where, fn
-      {:guard, guard, predicate} ->
-        expect!(infer(guard, env), @bool)
-        expect!(infer(predicate, narrow(guard, row_env)), @bool)
+    aliases = [query.alias | Enum.map(query.joins, & &1.alias)]
+    unless length(aliases) == length(Enum.uniq(aliases)), do: fail("Duplicate query alias")
 
-      predicate ->
-        expect!(infer(predicate, row_env), @bool)
-    end)
+    row_env =
+      Enum.reduce(query.joins, row_env, fn join, row_env ->
+        if join.guard, do: expect!(infer(join.guard, env), @bool)
+        inner_env = if join.guard, do: narrow(join.guard, row_env), else: row_env
+        type = element!(infer(join.source, inner_env))
+        expect!(infer(join.condition, Map.put(inner_env, join.alias, type)), @bool)
+        output = if join.kind == :left or join.guard, do: {:optional, type}, else: type
+        Map.put(row_env, join.alias, output)
+      end)
+
+    row_env =
+      Enum.reduce(query.where, row_env, fn
+        {:guard, guard, predicate}, row_env ->
+          expect!(infer(guard, env), @bool)
+          expect!(infer(predicate, narrow(guard, row_env)), @bool)
+          row_env
+
+        predicate, row_env ->
+          expect!(infer(predicate, row_env), @bool)
+          narrow(predicate, row_env)
+      end)
 
     Enum.each(query.order, fn {key, _} ->
       type = base(infer(key, row_env))
@@ -258,6 +278,9 @@ defmodule OrderLab.Language.Checker do
 
   defp builtin(name, _, _), do: fail("Unknown builtin or invalid arguments: #{name}")
 
+  def narrow_false({:unary, "NOT", predicate}, env), do: narrow(predicate, env)
+  def narrow_false(_, env), do: env
+
   def narrow({:present, {:variable, name}}, env), do: Map.update!(env, name, &unwrap_optional/1)
 
   def narrow({:present, {:field, {:variable, name}, field}}, env) do
@@ -270,6 +293,7 @@ defmodule OrderLab.Language.Checker do
   end
 
   def narrow({:binary, "AND", a, b}, env), do: narrow(b, narrow(a, env))
+  def narrow({:unary, "NOT", {:unary, "NOT", predicate}}, env), do: narrow(predicate, env)
   def narrow(_, env), do: env
 
   defp unwrap_optional(type) do
@@ -329,6 +353,100 @@ defmodule OrderLab.Language.Checker do
         false
     end
   end
+
+  def common!(a, b) do
+    case {a, b} do
+      {same, same} -> same
+      _ -> common_base!(base(a), base(b))
+    end
+  end
+
+  defp common_base!(a, a), do: a
+  defp common_base!(:empty, b), do: b
+  defp common_base!(a, :empty), do: a
+  defp common_base!(:null, {:optional, b}), do: {:optional, b}
+  defp common_base!({:optional, a}, :null), do: {:optional, a}
+  defp common_base!(:null, b), do: {:optional, b}
+  defp common_base!(a, :null), do: {:optional, a}
+  defp common_base!({:optional, a}, {:optional, b}), do: {:optional, common!(a, b)}
+  defp common_base!({:optional, a}, b), do: {:optional, common!(a, b)}
+  defp common_base!(a, {:optional, b}), do: {:optional, common!(a, b)}
+  defp common_base!({:list, a}, {:list, b}), do: {:list, common!(a, b)}
+
+  defp common_base!({:record, a}, {:record, b}) do
+    unless Enum.sort(Map.keys(a)) == Enum.sort(Map.keys(b)),
+      do: fail("Branches and list records must have the same fields")
+
+    {:record, Map.new(a, fn {key, type} -> {key, common!(type, b[key])} end)}
+  end
+
+  defp common_base!({:named, a}, {:named, b})
+       when a in ~w(Int Number Float) and b in ~w(Int Number Float), do: @number
+
+  defp common_base!(_, _), do: fail("Branches or list items have incompatible types")
+
+  def expect_expr!(expression, expected, env) do
+    expect!(infer(expression, env), expected)
+    check_constants!(expression, expected)
+  end
+
+  defp check_constants!(expression, expected) do
+    if constant?(expression) do
+      try do
+        Types.validate!(Evaluator.eval(expression, %{}), expected)
+      rescue
+        error in Error -> reraise %{error | stage: :compile}, __STACKTRACE__
+      end
+    else
+      case {expression, base(expected)} do
+        {{:conditional, _, positive, negative}, _} ->
+          check_constants!(positive, expected)
+          check_constants!(negative, expected)
+
+        {{:record, fields}, {:record, types}} ->
+          Enum.each(fields, fn {key, expr} -> check_constants!(expr, Map.fetch!(types, key)) end)
+
+        {{:list, items}, {:list, type}} ->
+          Enum.each(items, &check_constants!(&1, type))
+
+        {_, {:optional, type}} ->
+          check_constants!(expression, type)
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
+  def pure_refinement!({:builtin, name, _}) when name in ~w(uuid now ago),
+    do: fail("Refinements must be deterministic; #{name} is not allowed")
+
+  def pure_refinement!(value) when is_tuple(value),
+    do: value |> Tuple.to_list() |> Enum.each(&pure_refinement!/1)
+
+  def pure_refinement!(value) when is_list(value), do: Enum.each(value, &pure_refinement!/1)
+
+  def pure_refinement!(value) when is_map(value),
+    do: Enum.each(value, fn {_, item} -> pure_refinement!(item) end)
+
+  def pure_refinement!(_), do: :ok
+
+  defp constant?({:literal, _}), do: true
+  defp constant?({:record, fields}), do: Enum.all?(fields, fn {_, expr} -> constant?(expr) end)
+  defp constant?({:list, items}), do: Enum.all?(items, &constant?/1)
+  defp constant?({:unary, _, value}), do: constant?(value)
+  defp constant?({:binary, _, left, right}), do: constant?(left) and constant?(right)
+
+  defp constant?({:conditional, condition, positive, negative}),
+    do: constant?(condition) and constant?(positive) and constant?(negative)
+
+  defp constant?({:present, value}), do: constant?(value)
+
+  defp constant?({:builtin, name, args})
+       when name in ~w(count length contains lower upper starts_with concat merge coalesce min max round distinct group_sum),
+       do: Enum.all?(args, &constant?/1)
+
+  defp constant?(_), do: false
 
   def expect!(actual, expected) do
     unless compatible?(actual, expected),

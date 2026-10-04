@@ -148,7 +148,8 @@ defmodule OrderLab.Language.Native do
       [name, topic, cutoff, threshold, name, topic, cutoff]
     )
     |> Enum.map(fn row ->
-      Jason.decode!(row["payload_json"]) |> Map.put("received_at", row["received_at"])
+      validate_source!(Jason.decode!(row["payload_json"]), definition.payload)
+      |> Map.put("received_at", row["received_at"])
     end)
   end
 
@@ -162,12 +163,21 @@ defmodule OrderLab.Language.Native do
           Enum.reduce(json_fields, row, fn {field, column}, row ->
             Map.put(Map.delete(row, column), field, Jason.decode!(row[column]))
           end)
+          |> validate_source!(Map.fetch!(program.tables, name))
         end)
 
       nil ->
         query!(db, "SELECT value_json FROM flow_records WHERE table_name=? ORDER BY rowid", [name])
-        |> Enum.map(&Jason.decode!(&1["value_json"]))
+        |> Enum.map(
+          &validate_source!(Jason.decode!(&1["value_json"]), Map.fetch!(program.tables, name))
+        )
     end
+  end
+
+  defp validate_source!(value, type) do
+    Types.validate!(value, type)
+  rescue
+    error in OrderLab.Language.Error -> reraise %{error | stage: :runtime}, __STACKTRACE__
   end
 
   defp insert(db, program, name, value) do

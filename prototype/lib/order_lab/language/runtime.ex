@@ -80,6 +80,22 @@ defmodule OrderLab.Language.Runtime do
     end
   end
 
+  defp execute(%{annotation: type} = node, ctx) do
+    result = execute(Map.delete(node, :annotation), ctx)
+    child = result_context(result)
+    name = if node.kind == :let, do: node.name, else: node.binding
+
+    value =
+      try do
+        Types.validate!(Map.fetch!(child.env, name), type, %{}, name)
+      rescue
+        e in Error ->
+          raise Failure, status: 422, code: "type_constraint_failed", message: e.message
+      end
+
+    replace_context(result, bind(child, name, value))
+  end
+
   defp execute(%{kind: :let} = node, ctx),
     do: continue(bind(ctx, node.name, evaluate(node.value, ctx)))
 

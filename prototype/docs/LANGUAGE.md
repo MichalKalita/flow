@@ -24,7 +24,7 @@ INPUT filter ProductFilter
 INPUT limit Int = 20
 ```
 
-Typy jsou `String`, `Int`, `Number`, `Float`, `Bool`, `JSON`, `List<T>`, záznam `{pole: Typ}` a volitelný `Typ?`. `Float` nyní přijímá libovolné JSON číslo stejně jako `Number`. `TYPE` může odkazovat na jiný pojmenovaný typ. Cyklické a neznámé typy se odmítají. Refinement používá proměnnou `value`; predikát musí vrátit `true`. Záznamy odmítají neznámá pole a vyžadují všechna nepovinná pole. Chybějící volitelné pole a `null` jsou povolené. Kontrola rozsahu probíhá při validaci hodnot; zatím nejde o matematický důkaz správnosti celého programu.
+Typy jsou `String`, `Int`, `Number`, `Float`, `Bool`, `JSON`, `List<T>`, záznam `{pole: Typ}` a volitelný `Typ?`. `Float` nyní přijímá libovolné JSON číslo stejně jako `Number`. `TYPE` může odkazovat na jiný pojmenovaný typ. Cyklické a neznámé typy se odmítají. Refinement používá proměnnou `value`; predikát musí vrátit `true`. Záznamy odmítají neznámá pole a vyžadují všechna nepovinná pole. Chybějící volitelné pole a `null` jsou povolené. Známé konstanty (i uvnitř záznamu s jinými dynamickými poli) se kontrolují už při kompilaci. Vnější data a výpočty se kontrolují při validaci hodnot; zatím nejde o matematický důkaz správnosti celého programu.
 
 `INPUT` deklaruje JSON vstup nebo výchozí výraz. `:filter` a `filter` odkazují na stejnou proměnnou. Výchozí hodnoty mohou používat dříve deklarované vstupy. Není povolena implicitní konverze řetězce na číslo či boolean.
 
@@ -48,7 +48,7 @@ total = SUM item IN :items OF item.price_cents * item.quantity
 RETURN {products: products, available: available, total: total}
 ```
 
-`FROM` pracuje s kolekcí z registrovaného zdroje nebo s výrazem vracejícím seznam. Alias je povinný. `WHERE` se skládají konjunkcí; `WHEN` přidává filtr jen při splnění podmínky. Nejprve se filtruje, potom řadí a omezuje počet, nakonec promítá `SELECT`. Více klíčů řazení se zapisuje opakováním `ORDER BY`. `ONE FROM` vrací jeden záznam nebo `null`; více výsledků je chyba. `FIRST FROM` a `LAST FROM` vrací první/poslední výsledek nebo `null`.
+`FROM` pracuje s kolekcí z registrovaného zdroje nebo s výrazem vracejícím seznam. Alias je povinný. `WHERE` se skládají konjunkcí; `WHEN` přidává filtr jen při splnění podmínky. Nejprve se provádějí JOIN, potom se filtruje a řadí a omezuje počet, nakonec promítá `SELECT`. Více klíčů řazení se zapisuje opakováním `ORDER BY`. `ONE FROM` vrací jeden záznam nebo `null`; více výsledků je chyba. `FIRST FROM` a `LAST FROM` vrací první/poslední výsledek nebo `null`.
 
 Operátory: `OR`, `AND`, `NOT`, `=`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN … AND …`, `IS PRESENT`, `IS NOT PRESENT`, `+`, `-`, `*`, `/`, `%`. Logické operátory vyžadují boolean a vyhodnocují se zkráceně. Porovnání pořadí vyžaduje dvě čísla nebo dva řetězce. Dělení nulou je chyba. Kvantifikátor v kombinaci s vnějším logickým výrazem uzavři do závorek.
 
@@ -63,7 +63,10 @@ snapshots = FOR EACH item IN :items
     RETURN {id: product.id, price: product.price_cents, quantity: item.quantity}
 
 WHEN :send_email
-    CALL Email.send_confirmation WITH {to: :email, payment_url: payment.url}
+    CALL Email.send_confirmation WITH {
+        order_id: order.id, to: :email, subject: "Potvrzení", payment_url: payment.url,
+        total_cents: order.total_cents, items: snapshots, simulate_failure: false
+    }
 ELSE
     REQUIRE :email IS PRESENT ELSE 422 missing_email "Chybí email"
 ```
@@ -164,3 +167,51 @@ ON MQTT DeviceStatus
 ```
 
 `ON MQTT JménoZdroje` dostává automaticky parametry topicu a `message` s přesným typem PAYLOAD; tyto INPUT se znovu nedeklarují. Tělo používá stejné příkazy jako HTTP. Zpráva se nejprve validuje a uloží, pak spustí scénář. Transportní PUBACK potvrzuje přijetí zprávy, nikoliv úspěch obchodní operace. Chyba scénáře vrátí jeho transakční změny; přijatá zpráva a diagnostika zůstanou. Admin ji eviduje s metodou `MQTT`, skutečným topicem a vstupní zprávou. Vyhrazená metadata jsou `request` a `message`; MQTT parametry mají zatím řetězcový základ typu. Jeden zdroj může mít jediný ON handler. Handler se provádí synchronně ve Store; automatické opakování selhaného handleru zatím není součástí prototypu.
+
+
+## Typované vazby a kontrola konstrukcí
+
+```text
+TYPE Rating = Number WHERE value BETWEEN 1.0 AND 5.0
+HTTP POST /ratings
+INPUT rating Rating
+INPUT delta Number = 0
+value: Rating = :rating + :delta
+RETURN {rating: value}
+```
+
+Zápis `jméno: Typ = …` platí pro výraz, INSERT, CALL a iteraci s vazbou. Kompilátor kontroluje strukturální kompatibilitu. Známé konstanty ověřuje včetně refinements: `value: Rating = 7` nebo `INPUT rating Rating = 7` odmítne před spuštěním. Stejně kontroluje konstantní pole v INSERT a SET i při dynamických ostatních polích. Dynamický výsledek musí po vyhodnocení projít validátorem; nesplnění vyvolá obchodní chybu `422 type_constraint_failed`, kterou může zachytit TRY/CATCH. Uvnitř transakce vrátí její změny. Typovaný výsledek neslibuje, že libovolná aritmetika zachová původní rozsah; každý výpočet se znovu ověřuje.
+
+## JOIN a podmíněná propojení
+
+```text
+rows = FROM Products AS p
+    WHEN :show_reviews
+        LEFT JOIN Reviews AS r ON r.product_id = p.id
+    LEFT JOIN Users AS u ON r IS PRESENT AND u.id = r.user_id
+    ORDER BY p.id ASC
+    SELECT {product: p, review: r, author: u}
+```
+
+`JOIN` a `INNER JOIN` znamenají vnitřní propojení; `LEFT JOIN` zachová levý řádek a při chybějící shodě naváže alias na `null`. Více shod rozmnoží řádky. JOIN se vyhodnocují v pořadí datových závislostí před WHERE, ORDER BY, LIMIT a SELECT. Výchozí výsledek bez SELECT je původní levý záznam. Všechny aliasy musí být v dotazu jedinečné.
+
+JOIN může číst tabulku, typovaný MQTT zdroj i kolekci závislou na předchozím aliasu: `JOIN o.items AS item ON true`. Dotaz může mít více JOIN a zapisovat je na jednom řádku nebo odsazenými klauzulemi. `WHEN` nad JOIN řídí jeho zahrnutí podle vstupního podmínkového výrazu; při false má alias hodnotu null a řádky se nerozmnoží. Alias z LEFT či podmíněného JOIN má volitelný typ. Přístup k jeho polím vyžaduje `IS PRESENT`, například ve zkráceném AND v ON nebo ve WHERE; tento filtr zpřesní typ pro následující klauzule a SELECT. Runtime zatím provádí propojení nad kolekcemi v paměti, nikoliv SQL optimalizátorem.
+
+
+## Podmíněné hodnoty a výsledky větví
+
+```text
+SELECT {author_name: IF u IS PRESENT THEN u.name ELSE null}
+
+values = FOR EACH number IN :numbers
+    WHEN number > 0
+        half = number / 2
+        RETURN {value: half}
+    ELSE
+        original = number
+        RETURN {value: original}
+```
+
+`IF podmínka THEN výraz ELSE výraz` je čistý výraz. Vyhodnotí pouze vybranou větev; na obou stranách musí být kompatibilní typy. Kombinace čísla a null vytvoří volitelný číselný typ, kombinace Int a Number vytvoří Number. Totéž platí pro číselné položky seznamu a návratové hodnoty iterace. Každá větev má vlastní vazby a typové zúžení: `IS PRESENT` umožní přístup k polím ve THEN; `IS NOT PRESENT` jej umožní ve ELSE. Také odvozování výsledku `FOR EACH` respektuje lokální vazby jednotlivých větví.
+
+Refinement predikáty musí být deterministické. `uuid`, `now` a `ago` se v TYPE WHERE odmítají. Při čtení uložených záznamů a MQTT historie se znovu ověřuje aktuální kontrakt; stará data se po změně schématu nesmí vydávat za nový typ bez validace.

@@ -91,6 +91,78 @@ TABLE Notes = Note
 FILTER NoteFilter
     minimum Rating?
     tag String?
+TABLE Reviews = {id: String, product_id: String, user_id: String, rating: Rating, text: String}
+HTTP POST /api/reviews
+INPUT product_id String
+INPUT user_id String
+INPUT rating Rating
+INPUT text String
+TRANSACTION
+    review = INSERT Reviews WITH {id: uuid("review"), product_id: :product_id, user_id: :user_id, rating: :rating, text: :text}
+    COMMIT
+RESPONSE 201 WITH review
+HTTP GET /api/catalog
+INPUT show_reviews Bool = false
+rows = FROM Products AS p
+    WHEN :show_reviews
+        LEFT JOIN Reviews AS r ON r.product_id = p.id
+    LEFT JOIN Users AS u ON r IS PRESENT AND u.id = r.user_id
+    ORDER BY p.id ASC
+    SELECT {id: p.id, review: r, author: u, author_name: IF u IS PRESENT THEN u.name ELSE null}
+RETURN {rows: rows}
+HTTP GET /api/reviews
+INPUT minimum Rating = 1
+rows = FROM Reviews AS r JOIN Products AS p ON p.id = r.product_id JOIN Users AS u ON u.id = r.user_id
+    WHERE r.rating >= :minimum
+    ORDER BY r.rating DESC
+    SELECT {product: p.name, author: u.name, rating: r.rating}
+RETURN {rows: rows}
+HTTP GET /api/order-items/:id
+INPUT id String
+rows = FROM Orders AS o
+    JOIN o.items AS item ON true
+    WHERE o.id = :id
+    SELECT {order_id: o.id, product_id: item.id, quantity: item.quantity}
+RETURN {rows: rows}
+HTTP POST /api/ratings/constrained
+INPUT rating Rating
+INPUT delta Number = 0
+value: Rating = :rating + :delta
+RETURN {rating: value}
+HTTP POST /api/ratings/each
+INPUT ratings List<Number>
+values: List<Rating> = FOR EACH number IN :ratings
+    value: Rating = number
+    RETURN value
+RETURN {ratings: values}
+HTTP POST /api/optional-branch
+INPUT record {name: String}?
+WHEN :record IS NOT PRESENT
+    RETURN {name: "anonymous"}
+ELSE
+    RETURN {name: :record.name}
+HTTP POST /api/optional-or
+INPUT record {name: String}?
+valid = :record IS NOT PRESENT OR :record.name = "valid"
+RETURN {valid: valid}
+HTTP POST /api/branch-values
+INPUT numbers List<Int>
+values = FOR EACH number IN :numbers
+    WHEN number > 0
+        half = number / 2
+        RETURN {value: half}
+    ELSE
+        original = number
+        RETURN {value: original}
+safe: Number = IF COUNT :numbers > 0 THEN (IF :numbers = [0] THEN 0 ELSE 1) ELSE (IF false THEN 1 / 0 ELSE 0)
+RETURN {values: values, safe: safe}
+HTTP POST /api/ratings/rollback
+INPUT rating Rating
+TRANSACTION
+    INSERT Notes WITH {id: "typed-rollback", text: "must not persist", rating: 1, tags: []}
+    value: Rating = :rating + 1
+    COMMIT
+RETURN {rating: value}
 HTTP POST /api/notes
 INPUT text String
 INPUT rating Rating
@@ -332,6 +404,41 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
   });
 
 
+
+  test('joined queries support conditional LEFT joins, multiple INNER joins and correlated collections', async ({request}) => {
+    for(const data of [
+      {product_id:'p1',user_id:'u1',rating:5,text:'first'},
+      {product_id:'p1',user_id:'u2',rating:4,text:'second'},
+      {product_id:'p2',user_id:'u1',rating:3.5,text:'third'}
+    ])expect((await request.post('/api/reviews',{data})).status()).toBe(201);
+    let response=await request.get('/api/catalog',{params:{show_reviews:'false'}});expect(response.status()).toBe(200);
+    let result=await response.json();expect(result.rows).toHaveLength(4);expect(result.rows.every(row=>row.review===null && row.author===null)).toBe(true);expect(result.rows.every(row=>row.author_name===null)).toBe(true);
+    response=await request.get('/api/catalog',{params:{show_reviews:'true'}});expect(response.status()).toBe(200);result=await response.json();
+    expect(result.rows).toHaveLength(5);expect(result.rows.filter(row=>row.id==='p1').map(row=>row.author.id)).toEqual(['u1','u2']);
+    expect(result.rows.find(row=>row.id==='p4').review).toBeNull();expect(result.rows.filter(row=>row.id==='p1').map(row=>row.author_name)).toEqual(['Petra Nováková','David Miller']);
+    response=await request.get('/api/reviews',{params:{minimum:'4'}});expect(response.status()).toBe(200);result=await response.json();
+    expect(result.rows.map(row=>row.rating)).toEqual([5,4]);expect(result.rows.map(row=>row.author)).toEqual(['Petra Nováková','David Miller']);
+    response=await request.get(`/api/order-items/${successOrder}`);expect(response.status()).toBe(200);result=await response.json();
+    expect(result.rows).toEqual([{order_id:successOrder,product_id:'p1',quantity:2}]);
+  });
+
+  test('typed bindings check computed refinements, bound iterations and transactional rollback', async ({request}) => {
+    let response=await request.post('/api/ratings/constrained',{data:{rating:4,delta:0.5}});expect(response.status()).toBe(200);expect((await response.json()).rating).toBe(4.5);
+    response=await request.post('/api/ratings/constrained',{data:{rating:5,delta:1}});expect(response.status()).toBe(422);expect((await response.json()).error.code).toBe('type_constraint_failed');
+    response=await request.post('/api/ratings/each',{data:{ratings:[1,4.5,5]}});expect(response.status()).toBe(200);expect((await response.json()).ratings).toEqual([1,4.5,5]);
+    response=await request.post('/api/ratings/each',{data:{ratings:[1,6]}});expect(response.status()).toBe(422);
+    response=await request.post('/api/ratings/rollback',{data:{rating:5}});expect(response.status()).toBe(422);
+    response=await request.get('/api/notes',{params:{filter:'{}'}});expect((await response.json()).rows.map(row=>row.id)).not.toContain('typed-rollback');
+  });
+
+
+  test('iteration branches infer local result types and conditional expressions evaluate only the selected branch', async ({request}) => {
+    let response=await request.post('/api/branch-values',{data:{numbers:[2,-1,3]}});expect(response.status()).toBe(200);let result=await response.json();
+    expect(result.values).toEqual([{value:1},{value:-1},{value:1.5}]);expect(result.safe).toBe(1);
+    response=await request.post('/api/branch-values',{data:{numbers:[]}});expect(response.status()).toBe(200);result=await response.json();expect(result.values).toEqual([]);expect(result.safe).toBe(0);
+    for(const record of [null,{name:'valid'}]){response=await request.post('/api/optional-branch',{data:{record}});expect(response.status()).toBe(200);expect((await response.json()).name).toBe(record?.name || 'anonymous');response=await request.post('/api/optional-or',{data:{record}});expect(response.status()).toBe(200);expect((await response.json()).valid).toBe(true);}
+  });
+
   test('idempotency and rejected request tracing work for arbitrary Flow routes; queue DELETE retains call diagnostics', async ({request}) => {
     const data={text:'repeatable',rating:4,tags:[]};const headers={'Idempotency-Key':'generic-note'};
     const first=await request.post('/api/notes',{data,headers});expect(first.status()).toBe(201);const note=await first.json();
@@ -349,6 +456,14 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect((await request.post('/api/language/check',{data:valid,headers:{'Content-Type':'text/plain'}})).status()).toBe(200);
     const invalid=[
       'REST GET /old\nRETURN true',
+      'TYPE Random = String WHERE uuid("id") = value\nHTTP GET /bad\nRETURN true',
+      'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP GET /bad\nrating: Rating = 7\nRETURN rating',
+      'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP POST /bad\nINPUT rating Rating = 7\nRETURN :rating',
+      'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nTABLE Ratings = {id: String, rating: Rating}\nHTTP POST /bad\nINPUT id String\nTRANSACTION\n    INSERT Ratings WITH {id: :id, rating: 7}\n    COMMIT\nRETURN true',
+      'HTTP GET /bad\nnumbers: List<Int> = [1, 2.5]\nRETURN numbers',
+      'TABLE A = {id: String}\nHTTP GET /bad\nrows = FROM A AS a LEFT JOIN A AS b ON b.id = a.id SELECT b.id\nRETURN rows',
+      'TABLE A = {id: String}\nHTTP GET /bad\nrows = FROM A AS a JOIN A AS a ON true\nRETURN rows',
+
       'HTTP GET /bad\nRETURN missing',
       'HTTP POST /bad\nINPUT item {rating: Number}\nRETURN :item.price',
       'HTTP POST /bad\nINPUT item {rating: Number}?\nRETURN :item.rating',
@@ -439,6 +554,15 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
       expect((await subscriber.next()).header).toBe(0x90);const retained=await subscriber.next();expect(retained.header).toBe(0x31);
       const n=retained.body.readUInt16BE();expect(JSON.parse(retained.body.subarray(2+n)).battery).toBe(87);
     } finally {subscriber.close();}
+  });
+
+  test('persisted records are revalidated before being exposed as declared table or MQTT types', async ({request}) => {
+    await stopServer();
+    execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),`INSERT INTO mqtt_messages(source,topic,payload_json,received_at,retained) VALUES ('DevicePosition','devices/corrupt/position','{"latitude":91,"longitude":14}','2020-01-01T00:00:00.000000Z',0); INSERT INTO flow_records(table_name,id,value_json) VALUES ('Notes','corrupt','{"id":"corrupt","text":"invalid stored rating","rating":7,"tags":[]}');`]);
+    await startServer();
+    let response=await request.get('/api/devices/corrupt');expect(response.status()).toBe(500);expect((await response.json()).error.code).toBe('language_error');
+    response=await request.get('/api/notes',{params:{filter:'{}'}});expect(response.status()).toBe(500);expect((await response.json()).error.code).toBe('language_error');
+    expect((await request.get('/health')).status()).toBe(200);
   });
 
 });

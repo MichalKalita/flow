@@ -64,7 +64,7 @@ npm ci
 npm test
 ```
 
-Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, validaci vstupů, idempotenci, souběžné objednávky, emailové retry a ruční opravu, admin panel, mobilní layout a persistenci po restartu. Další E2E scénáře ve stejném jediném souboru ověřují obecné CRUD, rozsahy typů, podmíněné filtry, EXISTS, savepointy, MQTT QoS 1, DUP a retained subscriptions. Screenshoty a log serveru jsou v `e2e/test-results/`.
+Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, validaci vstupů, idempotenci, souběžné objednávky, emailové retry a ruční opravu, admin panel, mobilní layout a persistenci po restartu. Další E2E scénáře ve stejném jediném souboru ověřují obecné CRUD, rozsahy typů a typované výpočty, podmíněné filtry, INNER/LEFT JOIN, podmíněné projekce, EXISTS, savepointy, MQTT QoS 1, DUP a retained subscriptions. Screenshoty a log serveru jsou v `e2e/test-results/`.
 
 ## Hranice prototypu
 
