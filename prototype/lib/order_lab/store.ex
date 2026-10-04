@@ -6,18 +6,17 @@ defmodule OrderLab.Store do
   def snapshot, do: GenServer.call(__MODULE__, :snapshot)
   def detail(id), do: GenServer.call(__MODULE__, {:detail, id})
   def order(id), do: GenServer.call(__MODULE__, {:order, id})
-  def create(input, key), do: GenServer.call(__MODULE__, {:create, input, key}, 30_000)
 
-  def reject(input, status, code, message),
-    do: GenServer.call(__MODULE__, {:reject, input, status, code, message})
+  def reject(input, status, code, message, method, path),
+    do: GenServer.call(__MODULE__, {:reject, input, status, code, message, method, path})
 
   def deliver, do: GenServer.call(__MODULE__, :deliver, 30_000)
   def retry_email(id), do: GenServer.call(__MODULE__, {:retry_email, id})
 
   def route(method, path), do: GenServer.call(__MODULE__, {:route, method, path})
 
-  def execute(endpoint, input, path),
-    do: GenServer.call(__MODULE__, {:execute, endpoint, input, path}, 30_000)
+  def execute(endpoint, input, path, key \\ nil),
+    do: GenServer.call(__MODULE__, {:execute, endpoint, input, path, key}, 30_000)
 
   def mqtt_publish(topic, payload, retain),
     do: GenServer.call(__MODULE__, {:mqtt_publish, topic, payload, retain})
@@ -120,42 +119,6 @@ defmodule OrderLab.Store do
     {:reply, route, state}
   end
 
-  def handle_call({:execute, endpoint, input, path}, _, state) do
-    request_id = id("req")
-    started = System.monotonic_time(:millisecond)
-
-    write!(
-      state.db,
-      "INSERT INTO requests(id,created_at,method,path,input_json,status) VALUES (?,?,?,?,?,'running')",
-      [request_id, now(), endpoint.method, path, json(input)]
-    )
-
-    {status, result, context} =
-      execute_scenario(state.db, state.steps, endpoint, input, request_id)
-
-    Enum.each(Map.get(context, :calls, []), &save_call!(state.db, &1))
-
-    response =
-      if is_map(result),
-        do: Map.put(result, "request_id", request_id),
-        else: %{"result" => result, "request_id" => request_id}
-
-    write!(
-      state.db,
-      "UPDATE requests SET status=?,http_status=?,response_json=?,error_code=?,duration_ms=? WHERE id=?",
-      [
-        if(status < 400, do: "committed", else: "failed"),
-        status,
-        json(response),
-        get_in(response, ["error", "code"]),
-        System.monotonic_time(:millisecond) - started,
-        request_id
-      ]
-    )
-
-    {:reply, {status, response}, state}
-  end
-
   def handle_call({:mqtt_publish, topic, payload, retain}, _, state) do
     result =
       try do
@@ -191,7 +154,9 @@ defmodule OrderLab.Store do
           write!(state.db, "UPDATE mqtt_messages SET retained=0 WHERE topic=?", [topic])
         else
           value = Jason.decode!(payload)
-          OrderLab.Language.Types.validate!(value, source.payload)
+          value = OrderLab.Language.Types.validate!(value, source.payload)
+
+          exec!(state.db, "BEGIN IMMEDIATE")
 
           if retain,
             do: write!(state.db, "UPDATE mqtt_messages SET retained=0 WHERE topic=?", [topic])
@@ -203,6 +168,18 @@ defmodule OrderLab.Store do
             "INSERT INTO mqtt_messages(source,topic,payload_json,received_at,retained) VALUES (?,?,?,?,?)",
             [source.name, topic, json(value), timestamp, if(retain, do: 1, else: 0)]
           )
+
+          exec!(state.db, "COMMIT")
+
+          Enum.filter(state.steps.endpoints, &(&1.method == "MQTT" and &1.path == source.name))
+          |> Enum.each(fn endpoint ->
+            # Transport acceptance records the message even if the business scenario fails.
+            handle_call(
+              {:execute, endpoint, Map.put(values, "message", value), topic, nil},
+              nil,
+              state
+            )
+          end)
 
           # Preserve the latest value even when it has aged beyond history retention.
           threshold =
@@ -219,7 +196,9 @@ defmodule OrderLab.Store do
 
         :ok
       rescue
-        e -> {:error, Exception.message(e)}
+        e ->
+          SQL.execute(state.db, "ROLLBACK")
+          {:error, Exception.message(e)}
       end
 
     {:reply, result, state}
@@ -233,14 +212,14 @@ defmodule OrderLab.Store do
      ), state}
   end
 
-  def handle_call({:reject, input, status, code, message}, _, %{db: db} = state) do
+  def handle_call({:reject, input, status, code, message, method, path}, _, %{db: db} = state) do
     request_id = id("req")
     response = error(code, message) |> Map.put("request_id", request_id)
 
     write!(
       db,
-      "INSERT INTO requests(id,created_at,method,path,input_json,status,http_status,response_json,error_code,duration_ms) VALUES (?,?,'POST','/api/orders',?,'failed',?,?,?,0)",
-      [request_id, now(), json(input), status, json(response), code]
+      "INSERT INTO requests(id,created_at,method,path,input_json,status,http_status,response_json,error_code,duration_ms) VALUES (?,?,?,?,?,'failed',?,?,?,0)",
+      [request_id, now(), method, path, json(input), status, json(response), code]
     )
 
     {:reply, {status, response}, state}
@@ -265,7 +244,8 @@ defmodule OrderLab.Store do
       "email_jobs" =>
         query!(db, "SELECT * FROM flow_jobs ORDER BY rowid DESC")
         |> Enum.map(&decode(&1, ["input_json", "error_json", "result_json"])),
-      "workflow" => OrderLab.Workflow.source()
+      "workflow" => state.steps.source,
+      "workflow_path" => state.steps.file
     }
 
     {:reply, result, state}
@@ -294,7 +274,7 @@ defmodule OrderLab.Store do
     {:reply, if(result, do: decode(result, ["items_json"])), state}
   end
 
-  def handle_call({:create, input, key}, _, %{db: db} = state) do
+  def handle_call({:execute, endpoint, input, path, key}, _, %{db: db} = state) do
     started = System.monotonic_time(:millisecond)
     request_id = id("req")
     hash = :crypto.hash(:sha256, :erlang.term_to_binary(input)) |> Base.encode16(case: :lower)
@@ -304,15 +284,15 @@ defmodule OrderLab.Store do
         do:
           query!(
             db,
-            "SELECT * FROM requests WHERE idempotency_key=? AND replayed_from IS NULL ORDER BY rowid LIMIT 1",
-            [key]
+            "SELECT * FROM requests WHERE idempotency_key=? AND method=? AND path=? AND replayed_from IS NULL ORDER BY rowid LIMIT 1",
+            [key, endpoint.method, path]
           ),
         else: []
 
     write!(
       db,
-      "INSERT INTO requests(id,created_at,method,path,input_json,status,idempotency_key,input_hash) VALUES (?,?,'POST','/api/orders',?,'running',?,?)",
-      [request_id, now(), json(input), key, hash]
+      "INSERT INTO requests(id,created_at,method,path,input_json,status,idempotency_key,input_hash) VALUES (?,?,?,?,?,'running',?,?)",
+      [request_id, now(), endpoint.method, path, json(input), key, hash]
     )
 
     {status, response, context} =
@@ -333,12 +313,17 @@ defmodule OrderLab.Store do
           end
 
         [] ->
-          execute_order(state, input, request_id)
+          execute_scenario(db, state.steps, endpoint, input, request_id)
       end
 
     Enum.each(Map.get(context, :calls, []), &save_call!(db, &1))
     duration = System.monotonic_time(:millisecond) - started
-    response = Map.put(response, "request_id", request_id)
+
+    response =
+      if is_map(response),
+        do: Map.put(response, "request_id", request_id),
+        else: %{"result" => response, "request_id" => request_id}
+
     order_id = get_in(response, ["order", "id"])
     code = get_in(response, ["error", "code"])
 
@@ -410,6 +395,11 @@ defmodule OrderLab.Store do
             )
         end
 
+        if job["final_disposition"] == "delete" and attempt >= job["max_attempts"] and
+             match?({:error, _}, result) do
+          write!(db, "DELETE FROM flow_jobs WHERE id=?", [job["id"]])
+        end
+
         exec!(db, "COMMIT")
 
       [] ->
@@ -438,11 +428,6 @@ defmodule OrderLab.Store do
       end
 
     {:reply, result, state}
-  end
-
-  defp execute_order(%{db: db, steps: program}, input, request_id) do
-    endpoint = Enum.find(program.endpoints, &(&1.method == "POST" and &1.path == "/api/orders"))
-    execute_scenario(db, program, endpoint, input, request_id)
   end
 
   defp execute_scenario(db, program, endpoint, input, request_id) do

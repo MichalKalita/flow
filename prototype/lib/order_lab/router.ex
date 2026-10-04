@@ -35,32 +35,6 @@ defmodule OrderLab.Router do
     end
   end
 
-  get "/api/orders/:id" do
-    case OrderLab.Store.order(id) do
-      nil -> send_json(conn, 404, %{"error" => "not_found"})
-      result -> send_json(conn, 200, result)
-    end
-  end
-
-  post "/api/orders" do
-    case read_body(conn, length: 64_000) do
-      {:ok, body, conn} ->
-        handle_order_body(conn, body)
-
-      {:more, body, conn} ->
-        reject(
-          conn,
-          Map.put(raw_input(body), "truncated", true),
-          413,
-          "body_too_large",
-          "Tělo požadavku překračuje limit 64 kB."
-        )
-
-      {:error, _} ->
-        reject(conn, %{}, 400, "body_unreadable", "Tělo požadavku se nepodařilo přečíst.")
-    end
-  end
-
   post "/api/email-jobs/:id/retry" do
     case OrderLab.Store.retry_email(id) do
       :ok -> send_json(conn, 202, %{"state" => "queued"})
@@ -100,7 +74,11 @@ defmodule OrderLab.Router do
 
           send_json(conn, 200, %{
             "valid" => true,
-            "http" => Enum.map(program.endpoints, &%{"method" => &1.method, "path" => &1.path}),
+            "http" =>
+              Enum.map(
+                Enum.filter(program.endpoints, &(&1.method != "MQTT")),
+                &%{"method" => &1.method, "path" => &1.path}
+              ),
             "mqtt" => Map.keys(program.mqtt)
           })
         rescue
@@ -133,78 +111,61 @@ defmodule OrderLab.Router do
     conn = fetch_query_params(conn)
 
     if conn.method in ["GET", "DELETE"] do
-      input = Map.merge(conn.query_params, params)
-
       input =
-        Map.new(input, fn {key, value} ->
+        Map.merge(conn.query_params, params)
+        |> Map.new(fn {key, value} ->
           declaration = Enum.find(endpoint.inputs, &(&1.name == key))
-          type = if declaration, do: OrderLab.Language.Checker.base(declaration.type)
+          type = if declaration, do: query_type(declaration.type)
 
           parsed =
-            case type do
-              {:named, name} when name in ["Bool", "Int", "Number", "Float", "JSON"] ->
-                case Jason.decode(value) do
-                  {:ok, parsed} -> parsed
-                  _ -> value
-                end
-
-              {:record, _} ->
-                case Jason.decode(value) do
-                  {:ok, parsed} -> parsed
-                  _ -> value
-                end
-
-              _ ->
-                value
+            if type == {:named, "String"} or is_nil(type) do
+              value
+            else
+              case Jason.decode(value) do
+                {:ok, decoded} -> decoded
+                _ -> value
+              end
             end
 
           {key, parsed}
         end)
 
-      {status, result} = OrderLab.Store.execute(endpoint, input, conn.request_path)
-      send_json(conn, status, result)
+      dispatch_scenario(conn, endpoint, input)
     else
       case read_body(conn, length: 64_000) do
         {:ok, body, conn} ->
-          case Jason.decode(body) do
-            {:ok, input} when is_map(input) ->
-              {status, result} =
-                OrderLab.Store.execute(endpoint, Map.merge(input, params), conn.request_path)
+          handle_json(conn, endpoint, params, body)
 
-              send_json(conn, status, result)
+        {:more, body, conn} ->
+          reject(
+            conn,
+            Map.put(raw_input(body), "truncated", true),
+            413,
+            "body_too_large",
+            "Tělo požadavku překračuje limit 64 kB."
+          )
 
-            _ ->
-              send_json(conn, 400, %{"error" => "invalid_json"})
-          end
-
-        _ ->
-          send_json(conn, 413, %{"error" => "body_too_large"})
+        {:error, _} ->
+          reject(conn, %{}, 400, "body_unreadable", "Tělo požadavku se nepodařilo přečíst.")
       end
     end
   end
 
-  defp asset(file), do: :order_lab |> :code.priv_dir() |> Path.join("static/#{file}")
+  defp query_type({:refined, type, _}), do: query_type(type)
+  defp query_type({:optional, type}), do: query_type(type)
+  defp query_type(type), do: type
 
-  defp handle_order_body(conn, body) do
+  defp handle_json(conn, endpoint, params, body) do
     content_type = get_req_header(conn, "content-type") |> List.first() || ""
 
-    if String.starts_with?(content_type, "application/json") do
+    if content_type |> String.split(";") |> List.first() |> String.trim() == "application/json" do
       case Jason.decode(body) do
         {:ok, input} ->
-          key = get_req_header(conn, "idempotency-key") |> List.first()
-
-          if key && (byte_size(key) > 128 or key == "") do
-            reject(
-              conn,
-              input,
-              422,
-              "invalid_idempotency_key",
-              "Idempotency-Key musí mít 1 až 128 bajtů."
-            )
-          else
-            {status, result} = OrderLab.Store.create(input, key)
-            send_json(conn, status, result)
-          end
+          dispatch_scenario(
+            conn,
+            endpoint,
+            if(is_map(input), do: Map.merge(input, params), else: input)
+          )
 
         {:error, _} ->
           reject(conn, raw_input(body), 400, "invalid_json", "Požadavek neobsahuje platný JSON.")
@@ -220,6 +181,25 @@ defmodule OrderLab.Router do
     end
   end
 
+  defp dispatch_scenario(conn, endpoint, input) do
+    key = get_req_header(conn, "idempotency-key") |> List.first()
+
+    if key && (byte_size(key) > 128 or key == "") do
+      reject(
+        conn,
+        input,
+        422,
+        "invalid_idempotency_key",
+        "Idempotency-Key musí mít 1 až 128 bajtů."
+      )
+    else
+      {status, result} = OrderLab.Store.execute(endpoint, input, conn.request_path, key)
+      send_json(conn, status, result)
+    end
+  end
+
+  defp asset(file), do: :order_lab |> :code.priv_dir() |> Path.join("static/#{file}")
+
   defp raw_input(body) do
     if String.valid?(body),
       do: %{"raw_body" => body},
@@ -227,7 +207,9 @@ defmodule OrderLab.Router do
   end
 
   defp reject(conn, input, status, code, message) do
-    {status, response} = OrderLab.Store.reject(input, status, code, message)
+    {status, response} =
+      OrderLab.Store.reject(input, status, code, message, conn.method, conn.request_path)
+
     send_json(conn, status, response)
   end
 

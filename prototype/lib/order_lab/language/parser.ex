@@ -63,6 +63,20 @@ defmodule OrderLab.Language.Parser do
 
         top(rest, %{program | tables: Map.put(program.tables, name, type!(tokens, program.file))})
 
+      [{:word, "ON", _, _}, {:word, "MQTT", _, _}, {:word, name, _, _}] ->
+        {body, rest} = child_block(rest, line, program.file)
+
+        endpoint = %{
+          method: "MQTT",
+          path: name,
+          inputs: [],
+          body: body,
+          line: line.line,
+          file: program.file
+        }
+
+        top(rest, %{program | endpoints: program.endpoints ++ [endpoint]})
+
       [{:word, "MQTT", _, _}, {:word, name, _, _}] ->
         if Map.has_key?(program.mqtt, name),
           do: error!("Duplicate MQTT source #{name}", line, program.file)
@@ -124,7 +138,7 @@ defmodule OrderLab.Language.Parser do
         if method not in ["GET", "POST", "PUT", "PATCH", "DELETE"],
           do: error!("Unsupported HTTP method", line, program.file)
 
-        route = Enum.map_join(route_tokens, &Lexer.text/1)
+        route = Enum.map_join(route_tokens, fn {_, value, _, _} -> to_string(value) end)
 
         unless String.starts_with?(route, "/"),
           do: error!("HTTP path must start with /", line, program.file)
@@ -132,7 +146,7 @@ defmodule OrderLab.Language.Parser do
         {body, rest} =
           Enum.split_while(rest, fn next ->
             next.indent > 0 or
-              E.text(next.tokens) not in ["HTTP", "MQTT", "TYPE", "FILTER", "TABLE"]
+              E.text(next.tokens) not in ["HTTP", "MQTT", "ON", "TYPE", "FILTER", "TABLE"]
           end)
 
         {inputs, body} = inputs(body, program.file, [])

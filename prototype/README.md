@@ -48,7 +48,7 @@ curl -s http://127.0.0.1:4000/api/orders \
 
 `quantity` je celé číslo 1–100; vstup má 1–50 řádků a neznámá pole se odmítají. Opakované řádky stejného produktu se sloučí. Ceny jsou v haléřích, vždy ze serverové databáze. `Idempotency-Key` je volitelný: stejný klíč a stejné JSON hodnoty vrátí původní dokončený výsledek bez nových efektů; změněný vstup vrátí 409.
 
-`GET /api/devices/:device_id` vrací poslední MQTT stav a polohy za posledních pět minut. MQTT 3.1.1 server naslouchá na `127.0.0.1:1883` (`MQTT_PORT` mění port). Přijímá striktně typovaný JSON na `devices/:device_id/status` a `devices/:device_id/position`; poskytuje QoS 0/1, subscriptions a retained zprávy.
+`GET /api/devices/:device_id` vrací poslední MQTT stav a polohy za posledních pět minut. MQTT 3.1.1 server naslouchá na `127.0.0.1:1883` (`MQTT_PORT` mění port). Přijímá striktně typovaný JSON na `devices/:device_id/status` a `devices/:device_id/position`; poskytuje QoS 0/1, subscriptions a retained zprávy. `ON MQTT DeviceStatus` spouští deklarovaný scénář nízké baterie; jeho požadavky a výsledky jsou vidět v adminu.
 
 `POST /api/language/check` validuje Flow zaslaný jako text bez spuštění.
 

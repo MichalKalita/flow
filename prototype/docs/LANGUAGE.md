@@ -140,12 +140,27 @@ Scénář používá jméno typovaného zdroje a parametry. `PARAM` odpovídá `
 
 Zdroj vrací historii a případně poslední starší hodnotu. `HISTORY` určuje uchovávané okno, ale poslední zpráva a retained zprávy se uchovávají i mimo něj. Přesné okno proto vyžaduje explicitní `WHERE`. `LAST FROM` vrátí poslední známý stav. Dotazy zahrnují pouze zprávy přijaté do `request.time`; Store serializuje celý scénář. `ago(5, "minutes")` počítá od času vyhodnocení a podporuje `ms`, `seconds`, `minutes`, `hours`.
 
-MQTT 3.1.1 server na `127.0.0.1:1883` (`MQTT_PORT`) podporuje CONNECT, PUBLISH QoS 0/1, SUBSCRIBE (doručení QoS 0), UNSUBSCRIBE, retained zprávy, PING a DISCONNECT. QoS 1 potvrzuje až po validaci a uložení. DUP pakety deduplikuje v rámci spojení. Neplatný payload nebo nedeklarovaný topic ukončí spojení bez PUBACK. Prázdný retained payload ruší retained stav. SQLite uchová historii i retained stav přes restart. Broker zatím nemá persistent sessions, QoS 2, will messages, TLS ani autentizaci. MQTT nyní slouží jako typovaný vstupní zdroj; událostní scénáře a odchozí PUBLISH ještě nejsou implementované.
+MQTT 3.1.1 server na `127.0.0.1:1883` (`MQTT_PORT`) podporuje CONNECT, PUBLISH QoS 0/1, SUBSCRIBE (doručení QoS 0), UNSUBSCRIBE, retained zprávy, PING a DISCONNECT. QoS 1 potvrzuje až po validaci a uložení. Posledních 100 QoS 1 identifikátorů deduplikuje při DUP v rámci spojení. Neplatný payload nebo nedeklarovaný topic ukončí spojení bez PUBACK. Prázdný retained payload ruší retained stav. SQLite uchová historii i retained stav přes restart. Broker zatím nemá persistent sessions, QoS 2, will messages, TLS ani autentizaci. MQTT slouží také jako spouštěč `ON MQTT`; odchozí PUBLISH ještě není implementované.
 
 ## Tabulky, HTTP a ověření
 
-`Products`, `Users`, `Orders` mají registrované SQLite adaptéry. Jiná `TABLE` se ukládá jako typované JSON záznamy v `flow_records`; nový scénář ani tabulka nevyžadují změnu Elixiru. Tabulka musí mít `id: String`; `UPDATE` nesmí měnit identifikátor. Vložené a změněné záznamy se validují včetně refinements. `RETAIN` ponechá neúspěšnou úlohu; mazání úloh s `DELETE` se ještě doplňuje.
+`Products`, `Users`, `Orders` mají registrované SQLite adaptéry. Jiná `TABLE` se ukládá jako typované JSON záznamy v `flow_records`; nový scénář ani tabulka nevyžadují změnu Elixiru. Tabulka musí mít `id: String`; `UPDATE` nesmí měnit identifikátor. Vložené a změněné záznamy se validují včetně refinements. `RETAIN` ponechá neúspěšnou úlohu, `DELETE` ji po posledním neúspěšném pokusu smaže; diagnostické záznamy pokusů zůstávají.
 
-HTTP cesty mají parametry `:name` deklarované pomocí `INPUT`. GET a DELETE čtou query string; ostatní metody JSON objekt. Čísla a boolean v query stringu se dekódují jako JSON; záznamový filtr se předává jako JSON v jedné query hodnotě. Cestový parametr má přednost. Admin, diagnostika, fake platební stránka a retry jsou hostitelská rozhraní. Objednávkový endpoint zatím zachovává zvláštní hostitelskou obsluhu idempotence; samotný objednávkový scénář je už celý ve Flow.
+HTTP cesty mají parametry `:name` deklarované pomocí `INPUT`. GET a DELETE čtou query string; ostatní metody JSON objekt. Čísla a boolean v query stringu se dekódují jako JSON; záznamový filtr se předává jako JSON v jedné query hodnotě. Cestový parametr má přednost. Admin, diagnostika, fake platební stránka a retry jsou hostitelská rozhraní. Všechny HTTP scénáře používají stejnou obsluhu idempotence: `Idempotency-Key` se vztahuje k metodě a konkrétní cestě. Stejný vstup vrací uložený výsledek bez opakování účinků; jiný vstup vrací 409. Přijaté i odmítnuté požadavky se zaznamenávají pod skutečnou metodou a cestou.
 
 `cd prototype/e2e && npm test` spouští pouze E2E testy. Ty připojí další CRUD scénáře do stejného jediného souboru, nastartují skutečný Elixir proces a provádějí HTTP, MQTT přes TCP i ovládání adminu v Chrome. Ověřují rozsahy typů, podmíněné filtry, EXISTS, savepoint rollback, MQTT QoS 1, DUP, retained subscriptions, izolaci zařízení, odmítnutí neplatných payloadů a persistenci po restartu. Objednávkové testy pokrývají sklad, platby, frontu pluginů, idempotenci a souběh.
+
+
+## Scénáře spouštěné MQTT
+
+```text
+TABLE DeviceAlerts = {id: String, device_id: DeviceID, kind: String, created_at: String}
+ON MQTT DeviceStatus
+    WHEN :message.battery < 20
+        TRANSACTION
+            INSERT DeviceAlerts WITH {id: uuid("alert"), device_id: :device_id, kind: "low_battery", created_at: request.time}
+            COMMIT
+    RETURN {accepted: true}
+```
+
+`ON MQTT JménoZdroje` dostává automaticky parametry topicu a `message` s přesným typem PAYLOAD; tyto INPUT se znovu nedeklarují. Tělo používá stejné příkazy jako HTTP. Zpráva se nejprve validuje a uloží, pak spustí scénář. Transportní PUBACK potvrzuje přijetí zprávy, nikoliv úspěch obchodní operace. Chyba scénáře vrátí jeho transakční změny; přijatá zpráva a diagnostika zůstanou. Admin ji eviduje s metodou `MQTT`, skutečným topicem a vstupní zprávou. Vyhrazená metadata jsou `request` a `message`; MQTT parametry mají zatím řetězcový základ typu. Jeden zdroj může mít jediný ON handler. Handler se provádí synchronně ve Store; automatické opakování selhaného handleru zatím není součástí prototypu.

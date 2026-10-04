@@ -63,7 +63,7 @@ function renderRequests() {
   $('#requests-body').innerHTML = requests.map(r => {
     const user = data.users.find(u => u.id === r.input?.user_id);
     const calls = data.plugin_calls.filter(c => c.request_id === (r.replayed_from || r.id));
-    return `<tr><td class="request-cell"><span class="method">POST</span>/api/orders<strong>${esc(short(r.id))}</strong></td><td class="user-cell">${esc(user?.name || 'Neznámý uživatel')}<small>${esc(user?.country || '')}</small></td><td>${badge(r.status)}${r.replayed_from ? '<small class="muted"> · replay</small>' : ''}</td><td>${calls.length ? calls.map(c => c.plugin).filter((v,i,a) => a.indexOf(v) === i).join(' + ') : '<span class="muted">—</span>'}</td><td class="user-cell">${time(r.created_at)}<small>${r.duration_ms ?? '—'} ms</small></td><td><button class="button" data-request="${esc(r.id)}">Detail →</button></td></tr>`;
+    return `<tr><td class="request-cell"><span class="method">${esc(r.method)}</span>${esc(r.path)}<strong>${esc(short(r.id))}</strong></td><td class="user-cell">${esc(user?.name || 'Neznámý uživatel')}<small>${esc(user?.country || '')}</small></td><td>${badge(r.status)}${r.replayed_from ? '<small class="muted"> · replay</small>' : ''}</td><td>${calls.length ? calls.map(c => c.plugin).filter((v,i,a) => a.indexOf(v) === i).join(' + ') : '<span class="muted">—</span>'}</td><td class="user-cell">${time(r.created_at)}<small>${r.duration_ms ?? '—'} ms</small></td><td><button class="button" data-request="${esc(r.id)}">Detail →</button></td></tr>`;
   }).join('');
 }
 
@@ -95,7 +95,7 @@ async function detail(id, open = true) {
   if (status !== 200) return;
   const r = body.request;
   $('#detail-title').textContent = r.id;
-  $('#request-detail').innerHTML = `<div class="detail-summary"><span class="tag">${esc(r.method)} ${esc(r.path)}</span>${badge(r.status)}<span class="muted">HTTP ${r.http_status} · ${r.duration_ms} ms</span></div>${r.replayed_from ? `<p class="hint">Opakování požadavku ${esc(r.replayed_from)}; pluginy se znovu nevolaly.</p>` : ''}<div class="json-grid"><div><div class="json-title">PŘIJATÝ POŽADAVEK</div><pre>${pretty(r.input)}</pre></div><div><div class="json-title">ODPOVĚĎ ENDPOINTU</div><pre>${pretty(r.response)}</pre></div></div><h2 class="timeline-heading">Volání pluginů <span class="muted">${body.plugin_calls.length} volání</span></h2>${body.plugin_calls.length ? body.plugin_calls.map(callCard).join('') : '<p class="hint">Tento požadavek nevyvolal žádné pluginy.</p>'}`;
+  $('#request-detail').innerHTML = `<div class="detail-summary"><span class="tag">${esc(r.method)} ${esc(r.path)}</span>${badge(r.status)}<span class="muted">${r.method === 'MQTT' ? 'Výsledek' : 'HTTP'} ${r.http_status} · ${r.duration_ms} ms</span></div>${r.replayed_from ? `<p class="hint">Opakování požadavku ${esc(r.replayed_from)}; pluginy se znovu nevolaly.</p>` : ''}<div class="json-grid"><div><div class="json-title">PŘIJATÝ POŽADAVEK</div><pre>${pretty(r.input)}</pre></div><div><div class="json-title">ODPOVĚĎ ENDPOINTU</div><pre>${pretty(r.response)}</pre></div></div><h2 class="timeline-heading">Volání pluginů <span class="muted">${body.plugin_calls.length} volání</span></h2>${body.plugin_calls.length ? body.plugin_calls.map(callCard).join('') : '<p class="hint">Tento požadavek nevyvolal žádné pluginy.</p>'}`;
   selectedRequest = id;
   if (open && !$('#request-dialog').open) $('#request-dialog').showModal();
 }

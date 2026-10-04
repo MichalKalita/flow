@@ -22,6 +22,14 @@ defmodule OrderLab.Language.Compiler do
     mqtt =
       Map.new(program.mqtt, fn {name, source} ->
         params = Enum.map(source.params, &%{&1 | type: Types.resolve!(&1.type, definitions)})
+
+        Enum.each(params, fn param ->
+          Checker.expect!(Checker.base(param.type), {:named, "String"})
+
+          if param.name in ["message", "request"],
+            do: fail("Reserved MQTT parameter name #{param.name}")
+        end)
+
         payload = Types.resolve!(source.payload, definitions)
 
         fields =
@@ -68,7 +76,8 @@ defmodule OrderLab.Language.Compiler do
              Enum.zip(left, right)
              |> Enum.all?(fn {x, y} ->
                x == y or String.starts_with?(x, "{") or String.starts_with?(y, "{")
-             end), do: fail("Ambiguous MQTT topic templates #{a.name} and #{b.name}")
+             end),
+           do: fail("Ambiguous MQTT topic templates #{a.name} and #{b.name}")
       end)
     end)
 
@@ -82,7 +91,31 @@ defmodule OrderLab.Language.Compiler do
 
     endpoints =
       Enum.map(program.endpoints, fn endpoint ->
-        inputs = Enum.map(endpoint.inputs, &%{&1 | type: Types.resolve!(&1.type, definitions)})
+        inputs =
+          if endpoint.method == "MQTT" do
+            source = Map.get(mqtt, endpoint.path) || fail("Unknown MQTT source #{endpoint.path}")
+
+            Enum.map(source.params, &Map.merge(&1, %{default: :missing, line: endpoint.line})) ++
+              [%{name: "message", type: source.payload, default: :missing, line: endpoint.line}]
+          else
+            Enum.map(endpoint.inputs, &%{&1 | type: Types.resolve!(&1.type, definitions)})
+          end
+
+        if endpoint.method != "MQTT" do
+          unless Regex.match?(
+                   ~r{^/(?:[A-Za-z0-9_.-]+|:[A-Za-z_][A-Za-z_0-9]*)(?:/(?:[A-Za-z0-9_.-]+|:[A-Za-z_][A-Za-z_0-9]*))*$},
+                   endpoint.path
+                 ) or endpoint.path == "/", do: fail("Invalid HTTP path #{endpoint.path}")
+
+          parameters =
+            Regex.scan(~r/:([A-Za-z_][A-Za-z_0-9]*)/, endpoint.path) |> Enum.map(&List.last/1)
+
+          if length(parameters) != length(Enum.uniq(parameters)),
+            do: fail("Duplicate HTTP path parameter")
+
+          unless parameters -- Enum.map(inputs, & &1.name) == [],
+            do: fail("HTTP path parameters require INPUT declarations")
+        end
 
         local =
           Enum.reduce(inputs, env, fn input, env ->
@@ -108,7 +141,7 @@ defmodule OrderLab.Language.Compiler do
         check_block(endpoint.body, state)
 
         unless returns?(endpoint.body),
-          do: fail("HTTP #{endpoint.path} requires a response on every path")
+          do: fail("#{endpoint.method} #{endpoint.path} requires a response on every path")
 
         Map.merge(endpoint, %{inputs: inputs, source_names: Map.keys(mqtt)})
       end)
@@ -218,7 +251,8 @@ defmodule OrderLab.Language.Compiler do
 
     if kind == :queue do
       unless is_integer(n.attempts) and n.attempts in 1..100 and is_integer(n.delay) and
-               n.delay in 0..86_400_000, do: fail("Invalid queue policy")
+               n.delay in 0..86_400_000,
+             do: fail("Invalid queue policy")
 
       bind(s, n.binding, {:record, %{"id" => {:named, "String"}, "state" => {:named, "String"}}})
     else

@@ -30,6 +30,19 @@ MQTT DevicePosition
     PAYLOAD {latitude: Latitude, longitude: Longitude}
     HISTORY 5 MINUTES
 
+TABLE DeviceAlerts = {id: String, device_id: DeviceID, kind: String, created_at: String}
+ON MQTT DeviceStatus
+    WHEN :message.battery < 20
+        TRANSACTION
+            INSERT DeviceAlerts WITH {id: uuid("alert"), device_id: :device_id, kind: "low_battery", created_at: request.time}
+            COMMIT
+    RETURN {accepted: true}
+
+HTTP GET /api/device-alerts/:device_id
+INPUT device_id DeviceID
+alerts = FROM DeviceAlerts AS a WHERE a.device_id = :device_id
+RETURN {alerts: alerts}
+
 HTTP GET /api/devices/:device_id
 INPUT device_id DeviceID
 status = LAST FROM DeviceStatus(:device_id) AS s
@@ -74,3 +87,9 @@ TRANSACTION
     } POLICY 3 ATTEMPTS DELAY 1000 ms RETAIN
     COMMIT
 RESPONSE 201 WITH {order: merge(order, {currency: "CZK"}), payment: payment, email: {state: "queued"}}
+
+HTTP GET /api/orders/:order_id
+INPUT order_id String
+order = ONE FROM Orders AS o WHERE o.id = :order_id
+REQUIRE order IS PRESENT ELSE 404 order_not_found "Objednávka neexistuje."
+RETURN order
