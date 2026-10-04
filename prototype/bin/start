@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+if [[ -d .mix ]]; then export MIX_HOME="$PWD/.mix"; fi
+if [[ -d .hex ]]; then export HEX_HOME="$PWD/.hex"; fi
+exec mix run --no-halt

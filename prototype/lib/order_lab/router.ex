@@ -1,7 +1,7 @@
 defmodule OrderLab.Router do
   use Plug.Router
-  plug :match
-  plug :dispatch
+  plug(:match)
+  plug(:dispatch)
 
   get "/health" do
     send_json(conn, 200, %{"status" => "ok"})
@@ -43,10 +43,15 @@ defmodule OrderLab.Router do
   end
 
   post "/api/orders" do
-    with true <- String.starts_with?(get_req_header(conn, "content-type") |> List.first() || "", "application/json"),
+    with true <-
+           String.starts_with?(
+             get_req_header(conn, "content-type") |> List.first() || "",
+             "application/json"
+           ),
          {:ok, body, conn} <- read_body(conn, length: 64_000),
          {:ok, input} <- Jason.decode(body) do
       key = get_req_header(conn, "idempotency-key") |> List.first()
+
       if key && (byte_size(key) > 128 or key == "") do
         send_json(conn, 422, %{"error" => %{"code" => "invalid_idempotency_key"}})
       else
@@ -69,7 +74,9 @@ defmodule OrderLab.Router do
 
   get "/pay/:id" do
     case OrderLab.Store.order(id) do
-      nil -> send_json(conn, 404, %{"error" => "order_not_found"})
+      nil ->
+        send_json(conn, 404, %{"error" => "order_not_found"})
+
       order ->
         html = """
         <!doctype html><html lang="cs"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -79,6 +86,7 @@ defmodule OrderLab.Router do
         <p>Tento odkaz vytvořil lokální plugin. Žádná skutečná platba se neprovádí.</p>
         <a class="button primary" href="/admin">Zpět do Order Lab</a></main></body></html>
         """
+
         conn |> put_resp_content_type("text/html") |> send_resp(200, html)
     end
   end
@@ -88,7 +96,11 @@ defmodule OrderLab.Router do
   end
 
   defp asset(file), do: :order_lab |> :code.priv_dir() |> Path.join("static/#{file}")
+
   defp send_json(conn, status, body) do
-    conn |> put_resp_content_type("application/json") |> put_resp_header("cache-control", "no-store") |> send_resp(status, Jason.encode!(body))
+    conn
+    |> put_resp_content_type("application/json")
+    |> put_resp_header("cache-control", "no-store")
+    |> send_resp(status, Jason.encode!(body))
   end
 end
