@@ -1,0 +1,76 @@
+# Celá aplikace: kontrakty, zdroje a scénáře v jediném souboru.
+TYPE UserID = String WHERE length(value) > 0
+TYPE Quantity = Int WHERE value BETWEEN 1 AND 100
+TYPE Stock = Int WHERE value >= 0
+TYPE Price = Int WHERE value >= 0
+TYPE CartItem = {product_id: String, quantity: Quantity}
+TYPE Cart = List<CartItem> WHERE length(value) BETWEEN 1 AND 50
+TYPE PaymentMethod = String WHERE value IN ["card", "bank"]
+TYPE Product = {id: String, name: String, price_cents: Price, stock: Stock}
+TYPE User = {id: String, name: String, email: String, country: String}
+TYPE OrderItem = {id: String, name: String, price_cents: Price, quantity: Int}
+TYPE Order = {id: String, user_id: String, request_id: String, created_at: String,
+    items: List<OrderItem>, total_cents: Int, payment_method: PaymentMethod,
+    payment_url: String, status: String}
+TABLE Products = Product
+TABLE Users = User
+TABLE Orders = Order
+
+TYPE DeviceID = String WHERE length(value) BETWEEN 1 AND 64
+TYPE Latitude = Number WHERE value BETWEEN -90 AND 90
+TYPE Longitude = Number WHERE value BETWEEN -180 AND 180
+MQTT DeviceStatus
+    TOPIC "devices/{device_id}/status"
+    PARAM device_id DeviceID
+    PAYLOAD {online: Bool, battery: Int}
+    HISTORY 24 HOURS
+MQTT DevicePosition
+    TOPIC "devices/{device_id}/position"
+    PARAM device_id DeviceID
+    PAYLOAD {latitude: Latitude, longitude: Longitude}
+    HISTORY 5 MINUTES
+
+HTTP GET /api/devices/:device_id
+INPUT device_id DeviceID
+status = LAST FROM DeviceStatus(:device_id) AS s
+positions = FROM DevicePosition(:device_id) AS p
+    WHERE p.received_at >= ago(5, "minutes")
+    ORDER BY p.received_at ASC
+RETURN {device_id: :device_id, status: status, positions: positions}
+
+HTTP POST /api/orders
+INPUT user_id UserID
+INPUT items Cart
+INPUT payment_method PaymentMethod
+INPUT email_failure Bool = false
+TRANSACTION
+    user = ONE FROM Users AS u WHERE u.id = :user_id
+    REQUIRE user IS PRESENT ELSE 404 user_not_found "Uživatel neexistuje."
+    cart = group_sum(:items, "product_id", "quantity")
+    snapshots = FOR EACH item IN cart
+        product = ONE FROM Products AS p WHERE p.id = item.product_id
+        REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
+        RETURN {id: product.id, name: product.name, price_cents: product.price_cents, quantity: item.quantity}
+    total = SUM item IN snapshots OF item.price_cents * item.quantity
+    order = INSERT Orders WITH {
+        id: uuid("ord"), user_id: user.id, request_id: request.id, created_at: request.time,
+        items: snapshots, total_cents: total, payment_method: :payment_method,
+        payment_url: "", status: "awaiting_payment"
+    }
+    FOR EACH item IN snapshots
+        product = ONE FROM Products AS p WHERE p.id = item.id
+        REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
+        REQUIRE product.stock >= item.quantity ELSE 409 insufficient_stock "Nedostatek kusů na skladě."
+        UPDATE Products AS p WHERE p.id = item.id SET {stock: p.stock - item.quantity}
+    payment = CALL Payment.create_url WITH {
+        order_id: order.id, amount_cents: order.total_cents, currency: "CZK",
+        country: user.country, method: :payment_method
+    }
+    UPDATE Orders AS o WHERE o.id = order.id SET {payment_url: payment.url}
+    QUEUE Email.send_confirmation WITH {
+        order_id: order.id, to: user.email, subject: concat(["Objednávka ", order.id]),
+        payment_url: payment.url, total_cents: order.total_cents, items: snapshots,
+        simulate_failure: :email_failure
+    } POLICY 3 ATTEMPTS DELAY 1000 ms RETAIN
+    COMMIT
+RESPONSE 201 WITH {order: merge(order, {currency: "CZK"}), payment: payment, email: {state: "queued"}}

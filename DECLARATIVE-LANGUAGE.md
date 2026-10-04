@@ -36,7 +36,7 @@ FILTER ProductFilter
     minRating Rating?
     price PriceRange?
 
-REST POST /products/:id/photo
+HTTP POST /products/:id/photo
 INPUT id Product.ID
 INPUT photo ProductPhoto
 
@@ -87,7 +87,7 @@ MQTT zdroje mají striktní kontrakt: název typu zdroje, typ parametru a přesn
 Ilustrativní syntaxe endpointu; závorky vybírají zdroj podle parametru, nejde o deklaraci uživatelské funkce:
 
 ```text
-REST GET /device/:id
+HTTP GET /device/:id
 INPUT id Device.ID
 
 status = LAST FROM DeviceStatus(:id)
@@ -115,7 +115,7 @@ Platforma nebo plugin zajišťuje příjem a historii, kterou samotné MQTT auto
 Ilustrativní zápis, nikoliv schválená syntaxe:
 
 ```text
-REST POST /orders
+HTTP POST /orders
 INPUT cart Cart.ID
 INPUT paymentMethod PaymentMethod
 
@@ -152,3 +152,5 @@ Pracovní označení je **typovaný deklarativní orchestrační DSL s transakč
 Inspirace: [NoFlo](https://noflojs.org/) pro skládání komponent, [Ash + Reactor](https://reactor.hexdocs.pm/readme.html) pro závislosti a kompenzace, [Ballerina](https://ballerina.io/use-cases/integration/) a [Open Workflow Specification](https://github.com/open-workflow-specification/specification) pro integrace, [Unison](https://www.unison-lang.org/docs/language-reference/abilities-and-ability-handlers/) pro typované efekty a [Temporal](https://docs.temporal.io/tasks) pro obnovu provádění. Žádný zde není považován za hotovou realizaci celé kombinace požadavků platformy.
 
 Jazyk navazuje na [BLACKBOX-LAYERS.md](BLACKBOX-LAYERS.md); propojení s [ARCHITECTURE-PROPOSAL.md](ARCHITECTURE-PROPOSAL.md) zůstává otevřené. Dopracovat je nutné syntaxe, kompozice, kontrakty pluginů, konzistence kolekcí, externí retry, význam odpovědí a aktualizace rozpracovaných operací.
+
+Implementace prototypu: [syntax a aktuální podpora](prototype/docs/LANGUAGE.md). Celá aplikace je v jediném [application.flow](prototype/priv/workflows/application.flow), včetně typů, MQTT zdrojů a HTTP scénářů.

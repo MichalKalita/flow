@@ -14,6 +14,16 @@ defmodule OrderLab.Store do
   def deliver, do: GenServer.call(__MODULE__, :deliver, 30_000)
   def retry_email(id), do: GenServer.call(__MODULE__, {:retry_email, id})
 
+  def route(method, path), do: GenServer.call(__MODULE__, {:route, method, path})
+
+  def execute(endpoint, input, path),
+    do: GenServer.call(__MODULE__, {:execute, endpoint, input, path}, 30_000)
+
+  def mqtt_publish(topic, payload, retain),
+    do: GenServer.call(__MODULE__, {:mqtt_publish, topic, payload, retain})
+
+  def mqtt_retained, do: GenServer.call(__MODULE__, :mqtt_retained)
+
   def init(_) do
     path = System.get_env("DATABASE_PATH", "data/order_lab.sqlite3")
     File.mkdir_p!(Path.dirname(path))
@@ -52,6 +62,18 @@ defmodule OrderLab.Store do
       error_json TEXT, result_json TEXT);
     """)
 
+    exec!(db, """
+    CREATE TABLE IF NOT EXISTS flow_records(table_name TEXT NOT NULL,id TEXT NOT NULL,value_json TEXT NOT NULL,PRIMARY KEY(table_name,id));
+    CREATE TABLE IF NOT EXISTS flow_jobs(
+      id TEXT PRIMARY KEY,order_id TEXT,request_id TEXT NOT NULL REFERENCES requests(id),operation TEXT NOT NULL,
+      input_json TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL,retry_delay_ms INTEGER NOT NULL,final_disposition TEXT NOT NULL,
+      next_at INTEGER NOT NULL,error_json TEXT,result_json TEXT);
+    INSERT OR IGNORE INTO flow_jobs SELECT id,order_id,request_id,'Email.send_confirmation',input_json,state,attempts,max_attempts,retry_delay_ms,final_disposition,next_at,error_json,result_json FROM email_jobs;
+    CREATE TABLE IF NOT EXISTS mqtt_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,topic TEXT NOT NULL,payload_json TEXT NOT NULL,received_at TEXT NOT NULL,retained INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS mqtt_source_topic ON mqtt_messages(source,topic,id);
+    """)
+
     Enum.each(
       [
         ["p1", "Studio sluchátka", 249_000, 12],
@@ -72,6 +94,143 @@ defmodule OrderLab.Store do
     )
 
     {:ok, %{db: db, steps: OrderLab.Workflow.compile!()}}
+  end
+
+  def handle_call({:route, method, path}, _, state) do
+    route =
+      Enum.find_value(state.steps.endpoints, fn endpoint ->
+        if endpoint.method == method do
+          expected = String.split(endpoint.path, "/", trim: true)
+          actual = String.split(path, "/", trim: true)
+
+          if length(expected) == length(actual) do
+            params =
+              Enum.zip(expected, actual)
+              |> Enum.reduce_while(%{}, fn
+                {":" <> name, value}, params -> {:cont, Map.put(params, name, URI.decode(value))}
+                {same, same}, params -> {:cont, params}
+                _, _ -> {:halt, nil}
+              end)
+
+            if params, do: {endpoint, params}
+          end
+        end
+      end)
+
+    {:reply, route, state}
+  end
+
+  def handle_call({:execute, endpoint, input, path}, _, state) do
+    request_id = id("req")
+    started = System.monotonic_time(:millisecond)
+
+    write!(
+      state.db,
+      "INSERT INTO requests(id,created_at,method,path,input_json,status) VALUES (?,?,?,?,?,'running')",
+      [request_id, now(), endpoint.method, path, json(input)]
+    )
+
+    {status, result, context} =
+      execute_scenario(state.db, state.steps, endpoint, input, request_id)
+
+    Enum.each(Map.get(context, :calls, []), &save_call!(state.db, &1))
+
+    response =
+      if is_map(result),
+        do: Map.put(result, "request_id", request_id),
+        else: %{"result" => result, "request_id" => request_id}
+
+    write!(
+      state.db,
+      "UPDATE requests SET status=?,http_status=?,response_json=?,error_code=?,duration_ms=? WHERE id=?",
+      [
+        if(status < 400, do: "committed", else: "failed"),
+        status,
+        json(response),
+        get_in(response, ["error", "code"]),
+        System.monotonic_time(:millisecond) - started,
+        request_id
+      ]
+    )
+
+    {:reply, {status, response}, state}
+  end
+
+  def handle_call({:mqtt_publish, topic, payload, retain}, _, state) do
+    result =
+      try do
+        definition =
+          Enum.find_value(state.steps.mqtt, fn {_name, source} ->
+            template = String.split(source.topic, "/")
+            parts = String.split(topic, "/")
+
+            if length(template) == length(parts) do
+              values =
+                Enum.zip(template, parts)
+                |> Enum.reduce_while(%{}, fn {pattern, part}, acc ->
+                  case Regex.run(~r/^\{([A-Za-z_][A-Za-z_0-9]*)\}$/, pattern) do
+                    [_, param] -> {:cont, Map.put(acc, param, part)}
+                    nil -> if pattern == part, do: {:cont, acc}, else: {:halt, nil}
+                  end
+                end)
+
+              if values, do: {source, values}
+            end
+          end)
+
+        unless definition,
+          do: raise(OrderLab.Language.Error, message: "Topic is not declared", stage: :validation)
+
+        {source, values} = definition
+
+        Enum.each(source.params, fn param ->
+          OrderLab.Language.Types.validate!(values[param.name], param.type)
+        end)
+
+        if retain and payload == "" do
+          write!(state.db, "UPDATE mqtt_messages SET retained=0 WHERE topic=?", [topic])
+        else
+          value = Jason.decode!(payload)
+          OrderLab.Language.Types.validate!(value, source.payload)
+
+          if retain,
+            do: write!(state.db, "UPDATE mqtt_messages SET retained=0 WHERE topic=?", [topic])
+
+          timestamp = now()
+
+          write!(
+            state.db,
+            "INSERT INTO mqtt_messages(source,topic,payload_json,received_at,retained) VALUES (?,?,?,?,?)",
+            [source.name, topic, json(value), timestamp, if(retain, do: 1, else: 0)]
+          )
+
+          # Preserve the latest value even when it has aged beyond history retention.
+          threshold =
+            DateTime.utc_now()
+            |> DateTime.add(-source.history_ms, :millisecond)
+            |> DateTime.to_iso8601()
+
+          write!(
+            state.db,
+            "DELETE FROM mqtt_messages WHERE source=? AND topic=? AND received_at<? AND retained=0 AND id!=(SELECT MAX(id) FROM mqtt_messages WHERE source=? AND topic=?)",
+            [source.name, topic, threshold, source.name, topic]
+          )
+        end
+
+        :ok
+      rescue
+        e -> {:error, Exception.message(e)}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:mqtt_retained, _, state) do
+    {:reply,
+     query!(
+       state.db,
+       "SELECT topic,payload_json FROM mqtt_messages WHERE retained=1 ORDER BY id"
+     ), state}
   end
 
   def handle_call({:reject, input, status, code, message}, _, %{db: db} = state) do
@@ -104,7 +263,7 @@ defmodule OrderLab.Store do
         query!(db, "SELECT * FROM plugin_calls ORDER BY created_at DESC LIMIT 200")
         |> Enum.map(&decode(&1, ["input_json", "output_json"])),
       "email_jobs" =>
-        query!(db, "SELECT * FROM email_jobs ORDER BY rowid DESC")
+        query!(db, "SELECT * FROM flow_jobs ORDER BY rowid DESC")
         |> Enum.map(&decode(&1, ["input_json", "error_json", "result_json"])),
       "workflow" => OrderLab.Workflow.source()
     }
@@ -204,7 +363,7 @@ defmodule OrderLab.Store do
     jobs =
       query!(
         db,
-        "SELECT * FROM email_jobs WHERE state IN ('queued','retrying') AND next_at<=? ORDER BY rowid LIMIT 1",
+        "SELECT * FROM flow_jobs WHERE state IN ('queued','retrying') AND next_at<=? ORDER BY rowid LIMIT 1",
         [System.system_time(:millisecond)]
       )
 
@@ -215,9 +374,9 @@ defmodule OrderLab.Store do
 
         {result, call} =
           invoke(
-            OrderLab.Plugins.Email,
-            "Email",
-            "send_confirmation",
+            Map.fetch!(OrderLab.Language.Native.operations(), job["operation"]).module,
+            List.first(String.split(job["operation"], ".")),
+            List.last(String.split(job["operation"], ".")),
             input,
             job["request_id"],
             job["order_id"],
@@ -231,7 +390,7 @@ defmodule OrderLab.Store do
           {:ok, response} ->
             write!(
               db,
-              "UPDATE email_jobs SET state='sent',attempts=?,result_json=?,error_json=NULL WHERE id=?",
+              "UPDATE flow_jobs SET state='sent',attempts=?,result_json=?,error_json=NULL WHERE id=?",
               [attempt, json(response), job["id"]]
             )
 
@@ -240,7 +399,7 @@ defmodule OrderLab.Store do
 
             write!(
               db,
-              "UPDATE email_jobs SET state=?,attempts=?,error_json=?,next_at=? WHERE id=?",
+              "UPDATE flow_jobs SET state=?,attempts=?,error_json=?,next_at=? WHERE id=?",
               [
                 next_state,
                 attempt,
@@ -262,13 +421,13 @@ defmodule OrderLab.Store do
 
   def handle_call({:retry_email, id}, _, %{db: db} = state) do
     result =
-      case query!(db, "SELECT * FROM email_jobs WHERE id=? AND state='failed'", [id]) do
+      case query!(db, "SELECT * FROM flow_jobs WHERE id=? AND state='failed'", [id]) do
         [job] ->
           input = Jason.decode!(job["input_json"]) |> Map.put("simulate_failure", false)
 
           write!(
             db,
-            "UPDATE email_jobs SET state='queued',attempts=0,input_json=?,error_json=NULL,next_at=? WHERE id=?",
+            "UPDATE flow_jobs SET state='queued',attempts=0,input_json=?,error_json=NULL,next_at=? WHERE id=?",
             [json(input), System.system_time(:millisecond), id]
           )
 
@@ -281,204 +440,48 @@ defmodule OrderLab.Store do
     {:reply, result, state}
   end
 
-  defp execute_order(%{db: db, steps: steps}, input, request_id) do
-    with :ok <- validate(input),
-         [user] <- query!(db, "SELECT * FROM users WHERE id=?", [input["user_id"]]) do
-      context = %{db: db, input: input, user: user, request_id: request_id, calls: []}
-      exec!(db, "BEGIN IMMEDIATE")
+  defp execute_order(%{db: db, steps: program}, input, request_id) do
+    endpoint = Enum.find(program.endpoints, &(&1.method == "POST" and &1.path == "/api/orders"))
+    execute_scenario(db, program, endpoint, input, request_id)
+  end
 
-      try do
-        case OrderLab.Workflow.run(steps, context, &step/2) do
-          {:ok, result} ->
-            {201,
-             %{
-               "order" => result.order,
-               "payment" => result.payment,
-               "email" => %{"state" => "queued"}
-             }, result}
+  defp execute_scenario(db, program, endpoint, input, request_id) do
+    key = {:flow_calls, request_id}
+    Process.put(key, [])
+    request = %{"id" => request_id, "time" => now()}
 
-          {:error, {status, code, message}, result} ->
-            exec!(db, "ROLLBACK")
-            {status, error(code, message), result}
-        end
-      rescue
-        exception ->
-          SQL.execute(db, "ROLLBACK")
-          require Logger
-          Logger.error(Exception.format(:error, exception, __STACKTRACE__))
-          {500, error("internal_error", "Operace selhala; změny byly vráceny."), %{}}
-      end
-    else
-      {:error, message} -> {422, error("invalid_input", message), %{}}
-      [] -> {404, error("user_not_found", "Uživatel neexistuje."), %{}}
+    invoke = fn operation, module, input ->
+      [plugin, method] = String.split(operation, ".", parts: 2)
+      {result, call} = invoke(module, plugin, method, input, request_id, input["order_id"], 1)
+      Process.put(key, Process.get(key) ++ [call])
+      result
     end
-  end
 
-  defp validate(input) when is_map(input) do
-    items = input["items"]
+    host = OrderLab.Language.Native.host(db, program, request, invoke)
 
-    cond do
-      Map.keys(input) -- ["user_id", "items", "payment_method", "email_failure"] != [] ->
-        {:error, "Požadavek obsahuje neznámá pole."}
+    try do
+      {status, result} =
+        OrderLab.Language.Runtime.run(endpoint, input, program.types, host, request)
 
-      not is_binary(input["user_id"]) ->
-        {:error, "user_id musí být identifikátor uživatele."}
+      {status, result, %{calls: Process.get(key)}}
+    rescue
+      e in OrderLab.Language.Failure ->
+        {e.status, error(e.code, e.message), %{calls: Process.get(key)}}
 
-      input["payment_method"] not in ["card", "bank"] ->
-        {:error, "payment_method musí být card nebo bank."}
+      e in OrderLab.Language.Error ->
+        code = if e.stage == :validation, do: "invalid_input", else: "language_error"
 
-      not is_boolean(Map.get(input, "email_failure", false)) ->
-        {:error, "email_failure musí být boolean."}
+        {if(e.stage == :validation, do: 422, else: 500), error(code, e.message),
+         %{calls: Process.get(key)}}
 
-      not is_list(items) or length(items) not in 1..50 ->
-        {:error, "Objednávka musí obsahovat 1 až 50 položek."}
-
-      not Enum.all?(items, fn item ->
-        is_map(item) and Map.keys(item) -- ["product_id", "quantity"] == [] and
-          is_binary(item["product_id"]) and is_integer(item["quantity"]) and
-            item["quantity"] in 1..100
-      end) ->
-        {:error, "Položka potřebuje product_id a celočíselné quantity v rozsahu 1 až 100."}
-
-      true ->
-        :ok
+      e ->
+        SQL.execute(db, "ROLLBACK")
+        require Logger
+        Logger.error(Exception.format(:error, e, __STACKTRACE__))
+        {500, error("internal_error", "Operace selhala."), %{calls: Process.get(key)}}
+    after
+      Process.delete(key)
     end
-  end
-
-  defp validate(_), do: {:error, "Vstup musí být JSON objekt."}
-
-  defp step(:snapshot, context) do
-    quantities =
-      Enum.reduce(context.input["items"], %{}, fn item, acc ->
-        Map.update(acc, item["product_id"], item["quantity"], &(&1 + item["quantity"]))
-      end)
-
-    items =
-      Enum.map(Enum.sort(quantities), fn {product_id, quantity} ->
-        case query!(context.db, "SELECT * FROM products WHERE id=?", [product_id]) do
-          [product] ->
-            Map.take(product, ["id", "name", "price_cents"]) |> Map.put("quantity", quantity)
-
-          [] ->
-            nil
-        end
-      end)
-
-    if Enum.any?(items, &is_nil/1) do
-      {:error, {404, "product_not_found", "Některý produkt neexistuje."}, context}
-    else
-      order = %{
-        "id" => id("ord"),
-        "user_id" => context.user["id"],
-        "items" => items,
-        "total_cents" => Enum.reduce(items, 0, &(&1["price_cents"] * &1["quantity"] + &2)),
-        "currency" => "CZK",
-        "payment_method" => context.input["payment_method"],
-        "status" => "awaiting_payment",
-        "created_at" => now()
-      }
-
-      write!(
-        context.db,
-        "INSERT INTO orders(id,user_id,request_id,created_at,items_json,total_cents,payment_method) VALUES (?,?,?,?,?,?,?)",
-        [
-          order["id"],
-          order["user_id"],
-          context.request_id,
-          order["created_at"],
-          json(items),
-          order["total_cents"],
-          order["payment_method"]
-        ]
-      )
-
-      {:ok, Map.put(context, :order, order)}
-    end
-  end
-
-  defp step(:decrease, context) do
-    Enum.reduce_while(context.order["items"], {:ok, context}, fn item, {:ok, context} ->
-      write!(context.db, "UPDATE products SET stock=stock-? WHERE id=? AND stock>=?", [
-        item["quantity"],
-        item["id"],
-        item["quantity"]
-      ])
-
-      [%{"changed" => changed}] = query!(context.db, "SELECT changes() changed")
-
-      if changed == 1,
-        do: {:cont, {:ok, context}},
-        else:
-          {:halt,
-           {:error, {409, "insufficient_stock", "Nedostatek kusů: #{item["name"]}."}, context}}
-    end)
-  end
-
-  defp step(:payment, context) do
-    input = %{
-      "order_id" => context.order["id"],
-      "amount_cents" => context.order["total_cents"],
-      "currency" => "CZK",
-      "country" => context.user["country"],
-      "method" => context.input["payment_method"]
-    }
-
-    {result, call} =
-      invoke(
-        OrderLab.Plugins.Payment,
-        "Payment",
-        "create_url",
-        input,
-        context.request_id,
-        context.order["id"],
-        1
-      )
-
-    context = %{context | calls: context.calls ++ [call]}
-
-    case result do
-      {:ok, payment} ->
-        write!(context.db, "UPDATE orders SET payment_url=? WHERE id=?", [
-          payment["url"],
-          context.order["id"]
-        ])
-
-        {:ok, Map.put(context, :payment, payment)}
-
-      {:error, error} ->
-        {:error, {422, error["code"], error["message"]}, context}
-    end
-  end
-
-  defp step(:email, context) do
-    input = %{
-      "order_id" => context.order["id"],
-      "to" => context.user["email"],
-      "subject" => "Objednávka #{context.order["id"]}",
-      "payment_url" => context.payment["url"],
-      "total_cents" => context.order["total_cents"],
-      "items" => context.order["items"],
-      "simulate_failure" => Map.get(context.input, "email_failure", false)
-    }
-
-    write!(
-      context.db,
-      "INSERT INTO email_jobs(id,order_id,request_id,input_json,state,next_at) VALUES (?,?,?,?,'queued',?)",
-      [
-        id("job"),
-        context.order["id"],
-        context.request_id,
-        json(input),
-        System.system_time(:millisecond)
-      ]
-    )
-
-    {:ok, context}
-  end
-
-  defp step(:commit, context) do
-    exec!(context.db, "COMMIT")
-    {:ok, context}
   end
 
   defp invoke(module, plugin, operation, input, request_id, order_id, attempt) do

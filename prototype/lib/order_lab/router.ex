@@ -87,8 +87,100 @@ defmodule OrderLab.Router do
     end
   end
 
+  post "/api/language/check" do
+    case read_body(conn, length: 256_000) do
+      {:ok, body, conn} ->
+        try do
+          program =
+            OrderLab.Language.Compiler.compile!(
+              body,
+              "<request>",
+              OrderLab.Language.Native.operations()
+            )
+
+          send_json(conn, 200, %{
+            "valid" => true,
+            "http" => Enum.map(program.endpoints, &%{"method" => &1.method, "path" => &1.path}),
+            "mqtt" => Map.keys(program.mqtt)
+          })
+        rescue
+          e in OrderLab.Language.Error ->
+            send_json(conn, 422, %{
+              "valid" => false,
+              "diagnostic" => OrderLab.Language.Error.diagnostic(e)
+            })
+
+          e ->
+            send_json(conn, 422, %{
+              "valid" => false,
+              "diagnostic" => %{"message" => Exception.message(e)}
+            })
+        end
+
+      _ ->
+        send_json(conn, 413, %{"error" => "body_too_large"})
+    end
+  end
+
   match _ do
-    send_json(conn, 404, %{"error" => "not_found"})
+    case OrderLab.Store.route(conn.method, conn.request_path) do
+      nil -> send_json(conn, 404, %{"error" => "not_found"})
+      {endpoint, params} -> handle_scenario(conn, endpoint, params)
+    end
+  end
+
+  defp handle_scenario(conn, endpoint, params) do
+    conn = fetch_query_params(conn)
+
+    if conn.method in ["GET", "DELETE"] do
+      input = Map.merge(conn.query_params, params)
+
+      input =
+        Map.new(input, fn {key, value} ->
+          declaration = Enum.find(endpoint.inputs, &(&1.name == key))
+          type = if declaration, do: OrderLab.Language.Checker.base(declaration.type)
+
+          parsed =
+            case type do
+              {:named, name} when name in ["Bool", "Int", "Number", "Float", "JSON"] ->
+                case Jason.decode(value) do
+                  {:ok, parsed} -> parsed
+                  _ -> value
+                end
+
+              {:record, _} ->
+                case Jason.decode(value) do
+                  {:ok, parsed} -> parsed
+                  _ -> value
+                end
+
+              _ ->
+                value
+            end
+
+          {key, parsed}
+        end)
+
+      {status, result} = OrderLab.Store.execute(endpoint, input, conn.request_path)
+      send_json(conn, status, result)
+    else
+      case read_body(conn, length: 64_000) do
+        {:ok, body, conn} ->
+          case Jason.decode(body) do
+            {:ok, input} when is_map(input) ->
+              {status, result} =
+                OrderLab.Store.execute(endpoint, Map.merge(input, params), conn.request_path)
+
+              send_json(conn, status, result)
+
+            _ ->
+              send_json(conn, 400, %{"error" => "invalid_json"})
+          end
+
+        _ ->
+          send_json(conn, 413, %{"error" => "body_too_large"})
+      end
+    end
   end
 
   defp asset(file), do: :order_lab |> :code.priv_dir() |> Path.join("static/#{file}")

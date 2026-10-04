@@ -31,7 +31,7 @@ V přehledu otevřete detail požadavku: obsahuje vstupní JSON, HTTP výsledek 
 
 ## Deklarativní tok
 
-`priv/workflows/create_order.flow` je skutečný vstup runtime, načtený a zkontrolovaný při startu. Malý parser překládá registrované příkazy do plánu; interpret spouští jejich Elixir implementace. Verze 0 podporuje pouze uvedený objednávkový tok a přesné závislosti, nikoliv obecnou implementaci celého navrženého jazyka. Úprava deklarace vyžaduje restart.
+Celá aplikace je v jediném `priv/workflows/application.flow`: typy s rozsahy, tabulky, typované MQTT zdroje a HTTP scénáře. Obecný parser, typová kontrola a interpreter vykonávají dotazy, podmínky, iterace, CRUD, transakce a registrované pluginy. Objednávková logika je ve Flow. `FLOW_PATH` mění cestu jediného souboru; úprava vyžaduje restart. Syntaxi a hranice implementace popisuje [dokumentace jazyka](docs/LANGUAGE.md).
 
 Jedna SQLite transakce vytvoří cenový snapshot, podmíněně odečte sklad, získá demo payment URL a vloží emailovou úlohu. Selhání před commitem vše vrátí. Jeden Store proces serializuje operace; to je záměrné zjednodušení lokálního prototypu. SQLite má zapnuté WAL, foreign keys a `synchronous=FULL`.
 
@@ -48,11 +48,15 @@ curl -s http://127.0.0.1:4000/api/orders \
 
 `quantity` je celé číslo 1–100; vstup má 1–50 řádků a neznámá pole se odmítají. Opakované řádky stejného produktu se sloučí. Ceny jsou v haléřích, vždy ze serverové databáze. `Idempotency-Key` je volitelný: stejný klíč a stejné JSON hodnoty vrátí původní dokončený výsledek bez nových efektů; změněný vstup vrátí 409.
 
+`GET /api/devices/:device_id` vrací poslední MQTT stav a polohy za posledních pět minut. MQTT 3.1.1 server naslouchá na `127.0.0.1:1883` (`MQTT_PORT` mění port). Přijímá striktně typovaný JSON na `devices/:device_id/status` a `devices/:device_id/position`; poskytuje QoS 0/1, subscriptions a retained zprávy.
+
+`POST /api/language/check` validuje Flow zaslaný jako text bez spuštění.
+
 `GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `GET /health`.
 
 ## Pouze E2E testy
 
-Žádné unit testy. Testy spouštějí skutečnou Elixir aplikaci na portu 4100 s vlastní dočasnou SQLite databází, používají HTTP a ovládají admin přes skutečný Chrome. Instalovaný Google Chrome je potřeba; na jiném systému lze v `playwright.config.js` změnit `channel` a nainstalovat Chromium.
+Žádné unit testy. Testy spouštějí skutečnou Elixir aplikaci na portu 4100 s vlastní dočasnou SQLite databází, používají HTTP, skutečné MQTT TCP spojení na portu 18830 a ovládají admin přes skutečný Chrome. Instalovaný Google Chrome je potřeba; na jiném systému lze v `playwright.config.js` změnit `channel` a nainstalovat Chromium.
 
 ```sh
 cd prototype/e2e
@@ -60,7 +64,7 @@ npm ci
 npm test
 ```
 
-Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, validaci vstupů, idempotenci, souběžné objednávky, emailové retry a ruční opravu, admin panel, mobilní layout a persistenci po restartu. Screenshoty a log serveru jsou v `e2e/test-results/`.
+Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, validaci vstupů, idempotenci, souběžné objednávky, emailové retry a ruční opravu, admin panel, mobilní layout a persistenci po restartu. Další E2E scénáře ve stejném jediném souboru ověřují obecné CRUD, rozsahy typů, podmíněné filtry, EXISTS, savepointy, MQTT QoS 1, DUP a retained subscriptions. Screenshoty a log serveru jsou v `e2e/test-results/`.
 
 ## Hranice prototypu
 

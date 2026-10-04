@@ -15,7 +15,7 @@ async function startServer() {
   server = spawn('mix', ['run', '--no-halt'], {
     cwd: root,
     detached: true,
-    env: {...process.env, PORT:'4100', DATABASE_PATH:path.join(directory, 'e2e.sqlite3'),
+    env: {...process.env, PORT:'4100', MQTT_PORT:'18830', FLOW_PATH:path.join(directory,'application.flow'), DATABASE_PATH:path.join(directory, 'e2e.sqlite3'),
       ...(fs.existsSync(path.join(root,'.mix')) ? {MIX_HOME:path.join(root,'.mix')} : {}),
       ...(fs.existsSync(path.join(root,'.hex')) ? {HEX_HOME:path.join(root,'.hex')} : {})},
     stdio: ['ignore','pipe','pipe']
@@ -44,8 +44,98 @@ async function post(request, body, key) {
   return {status:response.status(), body:await response.json()};
 }
 
+
+const net = require('node:net');
+const mqttString = value => {const b=Buffer.from(value); const h=Buffer.alloc(2); h.writeUInt16BE(b.length); return Buffer.concat([h,b]);};
+function mqttPacket(header, body=Buffer.alloc(0)) {
+  let n=body.length; const size=[];
+  do {let digit=n%128; n=Math.floor(n/128); if(n)digit|=128; size.push(digit);} while(n);
+  return Buffer.concat([Buffer.from([header,...size]),body]);
+}
+async function mqttClient() {
+  const socket=net.createConnection({host:'127.0.0.1',port:18830});
+  socket.on('error',()=>{});
+  await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+  let buffer=Buffer.alloc(0); const packets=[]; const waits=[];
+  socket.on('data',data=>{
+    buffer=Buffer.concat([buffer,data]);
+    while(buffer.length>=2){
+      let n=0,m=1,i=1,d;
+      do {if(i>=buffer.length)return;d=buffer[i++];n+=(d&127)*m;m*=128;}while(d&128);
+      if(buffer.length<i+n)return;
+      const packet={header:buffer[0],body:buffer.subarray(i,i+n)};buffer=buffer.subarray(i+n);
+      if(waits.length)waits.shift()(packet);else packets.push(packet);
+    }
+  });
+  const next=()=>new Promise((resolve,reject)=>{
+    if(packets.length)return resolve(packets.shift());
+    const timeout=setTimeout(()=>reject(new Error('MQTT packet timeout')),3000);
+    waits.push(p=>{clearTimeout(timeout);resolve(p);});
+  });
+  socket.write(mqttPacket(0x10,Buffer.concat([mqttString('MQTT'),Buffer.from([4,2,0,60]),mqttString(`e2e-${Math.random()}`)])));
+  expect(await next()).toEqual({header:0x20,body:Buffer.from([0,0])});
+  return {
+    socket,next,
+    async publish(topic,value,{retain=false,id=1,dup=false}={}) {
+      const identifier=Buffer.alloc(2);identifier.writeUInt16BE(id);
+      socket.write(mqttPacket(0x32|(retain?1:0)|(dup?8:0),Buffer.concat([mqttString(topic),identifier,Buffer.from(JSON.stringify(value))])));
+      const ack=await next();expect(ack.header).toBe(0x40);expect(ack.body.readUInt16BE()).toBe(id);
+    },
+    close(){socket.end(mqttPacket(0xE0));}
+  };
+}
+const extraFlow = `
+TYPE Rating = Number WHERE value BETWEEN 1.0 AND 5.0
+TYPE Note = {id: String, text: String, rating: Rating, tags: List<String>}
+TABLE Notes = Note
+FILTER NoteFilter
+    minimum Rating?
+    tag String?
+HTTP POST /api/notes
+INPUT text String
+INPUT rating Rating
+INPUT tags List<String>
+TRANSACTION
+    note = INSERT Notes WITH {id: uuid("note"), text: upper(:text), rating: :rating, tags: distinct(:tags)}
+    COMMIT
+RESPONSE 201 WITH note
+HTTP GET /api/notes
+INPUT filter NoteFilter
+rows = FROM Notes AS n
+    WHEN :filter.minimum IS PRESENT
+        WHERE n.rating >= :filter.minimum
+    WHEN :filter.tag IS PRESENT
+        WHERE EXISTS tag IN n.tags WHERE tag = :filter.tag
+    ORDER BY n.rating DESC
+    SELECT {id: n.id, text: n.text, rating: n.rating}
+RETURN {rows: rows, total: COUNT rows, any: EXISTS n IN rows WHERE n.rating >= 4}
+HTTP PATCH /api/notes/:id
+INPUT id String
+INPUT text String
+TRANSACTION
+    changed = UPDATE Notes AS n WHERE n.id = :id SET {text: :text}
+    REQUIRE COUNT changed = 1 ELSE 404 not_found "Missing note"
+    COMMIT
+RETURN {changed: changed}
+HTTP DELETE /api/notes/:id
+INPUT id String
+TRANSACTION
+    removed = DELETE FROM Notes AS n WHERE n.id = :id
+    COMMIT
+RETURN {removed: removed}
+HTTP POST /api/notes/savepoint
+TRANSACTION
+    TRY
+        INSERT Notes WITH {id: "rolled-back", text: "transient", rating: 5, tags: []}
+        FAIL 409 temporary_failure "Business error"
+    CATCH error
+        REQUIRE error.code = "temporary_failure" ELSE 500 wrong_error "Wrong error"
+    surviving = INSERT Notes WITH {id: "surviving", text: "kept", rating: 3, tags: []}
+    COMMIT
+RETURN surviving
+`;
 test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', () => {
-  test.beforeAll(async () => { directory=fs.mkdtempSync(path.join(os.tmpdir(),'order-lab-e2e-')); await startServer(); });
+  test.beforeAll(async () => { directory=fs.mkdtempSync(path.join(os.tmpdir(),'order-lab-e2e-')); fs.writeFileSync(path.join(directory,'application.flow'),fs.readFileSync(path.join(root,'priv/workflows/application.flow'),'utf8')+extraFlow); await startServer(); });
   test.afterAll(async () => {
     await stopServer();
     fs.mkdirSync(path.join(__dirname,'test-results'), {recursive:true});
@@ -192,12 +282,95 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect(errors).toEqual([]);
   });
 
+
+  test('one source file defines unrelated CRUD, refined inputs, conditional queries, EXISTS and savepoints', async ({request}) => {
+    for (const rating of [0,5.1,"4",null]) {
+      const response=await request.post('/api/notes',{data:{text:'invalid',rating,tags:[]}});
+      expect(response.status()).toBe(422);
+    }
+    const created=[];
+    for (const data of [{text:'first',rating:4.5,tags:['red','red']},{text:'second',rating:2,tags:['blue']}]) {
+      const response=await request.post('/api/notes',{data});expect(response.status()).toBe(201);
+      created.push(await response.json());
+    }
+    expect(created[0].text).toBe('FIRST');expect(created[0].tags).toEqual(['red']);
+    let response=await request.get('/api/notes',{params:{filter:JSON.stringify({minimum:4,tag:'red'})}});
+    expect(response.status()).toBe(200);let result=await response.json();
+    expect(result.rows.map(n=>n.id)).toEqual([created[0].id]);expect(result.total).toBe(1);expect(result.any).toBe(true);
+    response=await request.get('/api/notes',{params:{filter:'{}'}});expect(response.status()).toBe(200);
+    expect((await response.json()).total).toBe(2);
+    response=await request.patch(`/api/notes/${created[0].id}`,{data:{text:'changed'}});expect(response.status()).toBe(200);
+    expect((await response.json()).changed[0].text).toBe('changed');
+    response=await request.post('/api/notes/savepoint',{data:{}});expect(response.status()).toBe(200);
+    response=await request.get('/api/notes',{params:{filter:'{}'}});
+    result=await response.json();expect(result.rows.map(n=>n.id)).toContain('surviving');expect(result.rows.map(n=>n.id)).not.toContain('rolled-back');
+    response=await request.delete(`/api/notes/${created[1].id}`);expect(response.status()).toBe(200);
+    expect((await response.json()).removed[0].id).toBe(created[1].id);
+    const trace=(await snapshot(request)).requests.find(r=>r.path===`/api/notes/${created[1].id}` && r.method==='DELETE');expect(trace.http_status).toBe(200);
+  });
+
+  test('HTTP compiler diagnostics reject unknown fields, optional access, effects and ambiguous MQTT contracts', async ({request}) => {
+    const valid='TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP POST /rating\nINPUT rating Rating\nRETURN {rating: :rating}';
+    expect((await request.post('/api/language/check',{data:valid,headers:{'Content-Type':'text/plain'}})).status()).toBe(200);
+    const invalid=[
+      'REST GET /old\nRETURN true',
+      'HTTP GET /bad\nRETURN missing',
+      'HTTP POST /bad\nINPUT item {rating: Number}\nRETURN :item.price',
+      'HTTP POST /bad\nINPUT item {rating: Number}?\nRETURN :item.rating',
+      'HTTP POST /bad\nINSERT Notes WITH {id: "x"}',
+      'HTTP POST /bad\nCALL Unknown.send WITH {}\nRETURN true',
+      'TYPE X = Missing\nHTTP GET /bad\nRETURN true',
+      'TYPE X = X\nHTTP GET /bad\nRETURN true',
+      'TYPE X = Number WHERE value + 1\nHTTP GET /bad\nRETURN true',
+      'MQTT X\n    TOPIC "a/{id}"\n    PAYLOAD {ok: Bool}',
+      'MQTT X\n    TOPIC "a/{id}"\n    PARAM id String\n    PAYLOAD {ok: Bool}\nMQTT Y\n    TOPIC "a/{other}"\n    PARAM other String\n    PAYLOAD {ok: Bool}'
+    ];
+    for(const source of invalid){const response=await request.post('/api/language/check',{data:source,headers:{'Content-Type':'text/plain'}});expect(response.status(),source).toBe(422);expect((await response.json()).valid).toBe(false);}
+  });
+
+  test('real MQTT QoS1 publishes feed typed HTTP sources, history, duplicate suppression and retained subscriptions', async ({request}) => {
+    const client=await mqttClient();
+    try {
+      await client.publish('devices/d1/status',{online:true,battery:87},{retain:true});
+      await client.publish('devices/d1/position',{latitude:50.1,longitude:14.4},{id:2});
+      await client.publish('devices/d1/position',{latitude:50.2,longitude:14.5},{id:3});
+      await client.publish('devices/d1/position',{latitude:50.2,longitude:14.5},{id:3,dup:true});
+      await client.publish('devices/d2/status',{online:false,battery:10},{id:4});
+      let response=await request.get('/api/devices/d1');expect(response.status()).toBe(200);
+      const device=await response.json();expect(device.status.online).toBe(true);expect(device.status.battery).toBe(87);
+      expect(device.positions.map(p=>p.latitude)).toEqual([50.1,50.2]);expect(device.positions.every(p=>p.received_at)).toBe(true);
+      const subscriber=await mqttClient();
+      try {
+        subscriber.socket.write(mqttPacket(0x82,Buffer.concat([Buffer.from([0,1]),mqttString('devices/+/status'),Buffer.from([0])])));
+        expect((await subscriber.next()).header).toBe(0x90);
+        const retained=await subscriber.next();expect(retained.header).toBe(0x31);
+        const length=retained.body.readUInt16BE();expect(retained.body.subarray(2,2+length).toString()).toBe('devices/d1/status');
+        expect(JSON.parse(retained.body.subarray(2+length))).toEqual({online:true,battery:87});
+        await client.publish('devices/d1/status',{online:false,battery:80},{id:5});
+        const live=await subscriber.next();expect(live.header).toBe(0x30);
+        response=await request.get('/api/devices/d1');expect((await response.json()).status.battery).toBe(80);
+      } finally {subscriber.close();}
+    } finally {client.close();}
+    const empty=await request.get('/api/devices/unknown');const value=await empty.json();expect(value.status).toBeNull();expect(value.positions).toEqual([]);
+  });
+
+  test('MQTT rejects out-of-range payloads and unknown fields before they enter typed history', async ({request}) => {
+    for(const payload of [{latitude:91,longitude:14},{latitude:50,longitude:181},{latitude:"50",longitude:14},{latitude:50,longitude:14,extra:true}]) {
+      const client=await mqttClient();
+      const closed=new Promise(resolve=>client.socket.once('close',resolve));
+      client.socket.write(mqttPacket(0x32,Buffer.concat([mqttString('devices/rejected/position'),Buffer.from([0,1]),Buffer.from(JSON.stringify(payload))])));
+      await closed;
+    }
+    const response=await request.get('/api/devices/rejected');expect(response.status()).toBe(200);expect((await response.json()).positions).toEqual([]);
+  });
+
   test('process restart preserves SQL state, request history, plugin calls and completed idempotency keys', async ({request}) => {
     await expect.poll(async()=> (await snapshot(request)).email_jobs.every(j=>['sent','failed'].includes(j.state))).toBe(true);
     const before=await snapshot(request);
     await stopServer(); await startServer();
     const after=await snapshot(request);
     for (const key of ['products','users','orders','requests','plugin_calls','email_jobs']) expect(after[key]).toEqual(before[key]);
+    const device=await request.get('/api/devices/d1');const persisted=await device.json();expect(persisted.status.battery).toBe(80);expect(persisted.positions).toHaveLength(2);
     const replay=await post(request,payload(),'e2e-replay'); expect(replay.status).toBe(201); expect(replay.body.replayed).toBe(true);
     expect((await snapshot(request)).orders).toEqual(before.orders);
   });
