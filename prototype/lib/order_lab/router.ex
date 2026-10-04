@@ -43,25 +43,21 @@ defmodule OrderLab.Router do
   end
 
   post "/api/orders" do
-    with true <-
-           String.starts_with?(
-             get_req_header(conn, "content-type") |> List.first() || "",
-             "application/json"
-           ),
-         {:ok, body, conn} <- read_body(conn, length: 64_000),
-         {:ok, input} <- Jason.decode(body) do
-      key = get_req_header(conn, "idempotency-key") |> List.first()
+    case read_body(conn, length: 64_000) do
+      {:ok, body, conn} ->
+        handle_order_body(conn, body)
 
-      if key && (byte_size(key) > 128 or key == "") do
-        send_json(conn, 422, %{"error" => %{"code" => "invalid_idempotency_key"}})
-      else
-        {status, result} = OrderLab.Store.create(input, key)
-        send_json(conn, status, result)
-      end
-    else
-      false -> send_json(conn, 415, %{"error" => %{"code" => "json_required"}})
-      {:more, _, conn} -> send_json(conn, 413, %{"error" => %{"code" => "body_too_large"}})
-      _ -> send_json(conn, 400, %{"error" => %{"code" => "invalid_json"}})
+      {:more, body, conn} ->
+        reject(
+          conn,
+          Map.put(raw_input(body), "truncated", true),
+          413,
+          "body_too_large",
+          "Tělo požadavku překračuje limit 64 kB."
+        )
+
+      {:error, _} ->
+        reject(conn, %{}, 400, "body_unreadable", "Tělo požadavku se nepodařilo přečíst.")
     end
   end
 
@@ -96,6 +92,52 @@ defmodule OrderLab.Router do
   end
 
   defp asset(file), do: :order_lab |> :code.priv_dir() |> Path.join("static/#{file}")
+
+  defp handle_order_body(conn, body) do
+    content_type = get_req_header(conn, "content-type") |> List.first() || ""
+
+    if String.starts_with?(content_type, "application/json") do
+      case Jason.decode(body) do
+        {:ok, input} ->
+          key = get_req_header(conn, "idempotency-key") |> List.first()
+
+          if key && (byte_size(key) > 128 or key == "") do
+            reject(
+              conn,
+              input,
+              422,
+              "invalid_idempotency_key",
+              "Idempotency-Key musí mít 1 až 128 bajtů."
+            )
+          else
+            {status, result} = OrderLab.Store.create(input, key)
+            send_json(conn, status, result)
+          end
+
+        {:error, _} ->
+          reject(conn, raw_input(body), 400, "invalid_json", "Požadavek neobsahuje platný JSON.")
+      end
+    else
+      reject(
+        conn,
+        raw_input(body),
+        415,
+        "json_required",
+        "Použijte Content-Type application/json."
+      )
+    end
+  end
+
+  defp raw_input(body) do
+    if String.valid?(body),
+      do: %{"raw_body" => body},
+      else: %{"raw_body_base64" => Base.encode64(body)}
+  end
+
+  defp reject(conn, input, status, code, message) do
+    {status, response} = OrderLab.Store.reject(input, status, code, message)
+    send_json(conn, status, response)
+  end
 
   defp send_json(conn, status, body) do
     conn

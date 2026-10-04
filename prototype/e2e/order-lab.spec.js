@@ -16,7 +16,8 @@ async function startServer() {
     cwd: root,
     detached: true,
     env: {...process.env, PORT:'4100', DATABASE_PATH:path.join(directory, 'e2e.sqlite3'),
-      MIX_HOME:path.join(root,'.mix'), HEX_HOME:path.join(root,'.hex')},
+      ...(fs.existsSync(path.join(root,'.mix')) ? {MIX_HOME:path.join(root,'.mix')} : {}),
+      ...(fs.existsSync(path.join(root,'.hex')) ? {HEX_HOME:path.join(root,'.hex')} : {})},
     stdio: ['ignore','pipe','pipe']
   });
   server.stdout.on('data', d => serverOutput += d.toString());
@@ -116,7 +117,18 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     }
     expect((await post(request,payload({user_id:'missing'}))).status).toBe(404);
     expect((await post(request,payload({items:[{product_id:'missing',quantity:1}]}))).status).toBe(404);
-    expect((await request.post('/api/orders',{headers:{'Content-Type':'application/json'},data:Buffer.from('{broken')})).status()).toBe(400);
+    const malformed=await request.post('/api/orders',{headers:{'Content-Type':'application/json'},data:Buffer.from('{broken')});
+    expect(malformed.status()).toBe(400);
+    const malformedBody=await malformed.json();
+    const malformedDetail=await (await request.get(`/api/requests/${malformedBody.request_id}`)).json();
+    expect(malformedDetail.request.input.raw_body).toBe('{broken');
+    const wrongType=await request.post('/api/orders',{headers:{'Content-Type':'text/plain'},data:Buffer.from('hello')});
+    expect(wrongType.status()).toBe(415);
+    expect((await wrongType.json()).request_id).toBeTruthy();
+    const tooLarge=await request.post('/api/orders',{headers:{'Content-Type':'application/json'},data:Buffer.from('x'.repeat(70000))});
+    expect(tooLarge.status()).toBe(413);
+    const tooLargeBody=await tooLarge.json();
+    expect((await (await request.get(`/api/requests/${tooLargeBody.request_id}`)).json()).request.input.truncated).toBe(true);
     const after=await snapshot(request); expect(after.orders).toEqual(before.orders); expect(after.products).toEqual(before.products);
   });
 

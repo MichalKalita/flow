@@ -27,6 +27,8 @@ Na macOS při problému s CA nastavte `MIX_CACERTS_PATH=/etc/ssl/cert.pem` a `HE
 
 V přehledu otevřete detail požadavku: obsahuje vstupní JSON, HTTP výsledek a všechny vstupy/výstupy pluginů. Sekce Pluginy ukazuje i chyby a jednotlivé emailové pokusy. Nejde o skutečná externí HTTP volání: oba pluginy jsou lokální Elixir moduly. Žádný email ani platba se reálně neodesílá.
 
+`./bin/demo` odešle čtyři skutečné demo požadavky (úspěch, sklad, platba, email). Díky pevným idempotency klíčům při opakování nevytvoří další objednávky. Neplatný JSON, nesprávný content type i příliš velké tělo se také zaznamenají; u velkého těla se uchová jen přijatý fragment s označením `truncated`.
+
 ## Deklarativní tok
 
 `priv/workflows/create_order.flow` je skutečný vstup runtime, načtený a zkontrolovaný při startu. Malý parser překládá registrované příkazy do plánu; interpret spouští jejich Elixir implementace. Verze 0 podporuje pouze uvedený objednávkový tok a přesné závislosti, nikoliv obecnou implementaci celého navrženého jazyka. Úprava deklarace vyžaduje restart.

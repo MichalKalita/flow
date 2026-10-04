@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+base="http://127.0.0.1:${PORT:-4000}"
+curl -sS "$base/api/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-success' \
+  -d '{"user_id":"u1","items":[{"product_id":"p1","quantity":1}],"payment_method":"card"}'
+printf '\n'
+curl -sS "$base/api/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-stock-failure' \
+  -d '{"user_id":"u1","items":[{"product_id":"p4","quantity":1}],"payment_method":"card"}'
+printf '\n'
+curl -sS "$base/api/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-payment-failure' \
+  -d '{"user_id":"u3","items":[{"product_id":"p2","quantity":1}],"payment_method":"card"}'
+printf '\n'
+curl -sS "$base/api/orders" -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-email-failure' \
+  -d '{"user_id":"u1","items":[{"product_id":"p2","quantity":1}],"payment_method":"card","email_failure":true}'
+printf '\n'

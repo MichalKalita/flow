@@ -7,6 +7,10 @@ defmodule OrderLab.Store do
   def detail(id), do: GenServer.call(__MODULE__, {:detail, id})
   def order(id), do: GenServer.call(__MODULE__, {:order, id})
   def create(input, key), do: GenServer.call(__MODULE__, {:create, input, key}, 30_000)
+
+  def reject(input, status, code, message),
+    do: GenServer.call(__MODULE__, {:reject, input, status, code, message})
+
   def deliver, do: GenServer.call(__MODULE__, :deliver, 30_000)
   def retry_email(id), do: GenServer.call(__MODULE__, {:retry_email, id})
 
@@ -68,6 +72,19 @@ defmodule OrderLab.Store do
     )
 
     {:ok, %{db: db, steps: OrderLab.Workflow.compile!()}}
+  end
+
+  def handle_call({:reject, input, status, code, message}, _, %{db: db} = state) do
+    request_id = id("req")
+    response = error(code, message) |> Map.put("request_id", request_id)
+
+    write!(
+      db,
+      "INSERT INTO requests(id,created_at,method,path,input_json,status,http_status,response_json,error_code,duration_ms) VALUES (?,?,'POST','/api/orders',?,'failed',?,?,?,0)",
+      [request_id, now(), json(input), status, json(response), code]
+    )
+
+    {:reply, {status, response}, state}
   end
 
   def handle_call(:snapshot, _, %{db: db} = state) do
