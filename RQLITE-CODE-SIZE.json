@@ -1,0 +1,604 @@
+{
+  "rqlite": {
+    "groups": {
+      "fixtures_examples_tools": {
+        "files": 12,
+        "code": 21669,
+        "physical": 22814
+      },
+      "tests": {
+        "files": 140,
+        "code": 47219,
+        "physical": 56400
+      },
+      "production": {
+        "files": 153,
+        "code": 25073,
+        "physical": 33326
+      },
+      "generated": {
+        "files": 4,
+        "code": 3558,
+        "physical": 4318
+      }
+    },
+    "production_packages": {
+      "store": {
+        "code": 3525,
+        "files": 11
+      },
+      "db": {
+        "code": 4000,
+        "files": 19
+      },
+      "http": {
+        "code": 2344,
+        "files": 8
+      },
+      "cmd": {
+        "code": 3136,
+        "files": 21
+      },
+      "cluster": {
+        "code": 1772,
+        "files": 9
+      },
+      "snapshot": {
+        "code": 3201,
+        "files": 17
+      },
+      "cdc": {
+        "code": 1412,
+        "files": 9
+      },
+      "auto": {
+        "code": 1390,
+        "files": 10
+      },
+      "command": {
+        "code": 1025,
+        "files": 8
+      },
+      "tcp": {
+        "code": 486,
+        "files": 8
+      },
+      "proxy": {
+        "code": 232,
+        "files": 1
+      },
+      "internal": {
+        "code": 1959,
+        "files": 26
+      },
+      "queue": {
+        "code": 179,
+        "files": 1
+      },
+      "auth": {
+        "code": 132,
+        "files": 1
+      },
+      "otlp": {
+        "code": 279,
+        "files": 3
+      },
+      "doc.go": {
+        "code": 1,
+        "files": 1
+      }
+    },
+    "selected_files": {
+      "store/store.go": {
+        "blank": 355,
+        "comment": 494,
+        "code": 2516,
+        "language": "Go"
+      },
+      "db/db.go": {
+        "blank": 212,
+        "comment": 258,
+        "code": 1929,
+        "language": "Go"
+      },
+      "command/sql/processor.go": {
+        "blank": 30,
+        "comment": 31,
+        "code": 207,
+        "language": "Go"
+      },
+      "db/swappable_db.go": {
+        "blank": 37,
+        "comment": 36,
+        "code": 206,
+        "language": "Go"
+      },
+      "command/marshal.go": {
+        "blank": 33,
+        "comment": 29,
+        "code": 175,
+        "language": "Go"
+      },
+      "db/checkpoint_manager.go": {
+        "blank": 25,
+        "comment": 62,
+        "code": 131,
+        "language": "Go"
+      },
+      "db/driver.go": {
+        "blank": 28,
+        "comment": 49,
+        "code": 129,
+        "language": "Go"
+      },
+      "store/command_processor.go": {
+        "blank": 12,
+        "comment": 14,
+        "code": 129,
+        "language": "Go"
+      },
+      "store/fsm.go": {
+        "blank": 13,
+        "comment": 9,
+        "code": 66,
+        "language": "Go"
+      }
+    },
+    "cloc_sum": {
+      "blank": 11547,
+      "comment": 7792,
+      "code": 97519,
+      "nFiles": 309
+    },
+    "revision": "812963feb363ea655521885dfd32212ebfb17983",
+    "changelog_version": "v10.5.2"
+  },
+  "sqlite_driver": {
+    "groups": {
+      "C": {
+        "files": 3,
+        "code": 170483,
+        "physical": 269778
+      },
+      "tests": {
+        "files": 22,
+        "code": 5819,
+        "physical": 6923
+      },
+      "production": {
+        "files": 44,
+        "code": 4057,
+        "physical": 6981
+      },
+      "C/C++ Header": {
+        "files": 3,
+        "code": 3475,
+        "physical": 16142
+      },
+      "C++": {
+        "files": 1,
+        "code": 208,
+        "physical": 238
+      },
+      "fixtures_examples_tools": {
+        "files": 15,
+        "code": 1252,
+        "physical": 1579
+      },
+      "YAML": {
+        "files": 5,
+        "code": 79,
+        "physical": 104
+      },
+      "Bourne Shell": {
+        "files": 2,
+        "code": 51,
+        "physical": 71
+      },
+      "make": {
+        "files": 3,
+        "code": 57,
+        "physical": 68
+      },
+      "Markdown": {
+        "files": 2,
+        "code": 26,
+        "physical": 38
+      },
+      "Dockerfile": {
+        "files": 1,
+        "code": 19,
+        "physical": 47
+      }
+    },
+    "production_packages": {
+      "sqlite3.go": {
+        "code": 1981,
+        "files": 1
+      },
+      "sqlite3_opt_vtable.go": {
+        "code": 369,
+        "files": 1
+      },
+      "callback.go": {
+        "code": 346,
+        "files": 1
+      },
+      "convert.go": {
+        "code": 266,
+        "files": 1
+      },
+      "sqlite3_trace.go": {
+        "code": 168,
+        "files": 1
+      },
+      "sqlite3_session.go": {
+        "code": 137,
+        "files": 1
+      },
+      "error.go": {
+        "code": 117,
+        "files": 1
+      },
+      "sqlite3_type.go": {
+        "code": 75,
+        "files": 1
+      },
+      "sqlite3_opt_preupdate_hook.go": {
+        "code": 67,
+        "files": 1
+      },
+      "sqlite3_opt_unlock_notify.go": {
+        "code": 60,
+        "files": 1
+      },
+      "sqlite3_load_extension.go": {
+        "code": 59,
+        "files": 1
+      },
+      "sqlite3_context.go": {
+        "code": 56,
+        "files": 1
+      },
+      "sqlite3_func_crypt.go": {
+        "code": 54,
+        "files": 1
+      },
+      "backup.go": {
+        "code": 48,
+        "files": 1
+      },
+      "sqlite3_opt_serialize.go": {
+        "code": 46,
+        "files": 1
+      },
+      "sqlite3_opt_userauth.go": {
+        "code": 43,
+        "files": 1
+      },
+      "sqlite3_opt_userauth_omit.go": {
+        "code": 34,
+        "files": 1
+      },
+      "sqlite3_sql.go": {
+        "code": 29,
+        "files": 1
+      },
+      "static_mock.go": {
+        "code": 25,
+        "files": 1
+      },
+      "sqlite3_load_extension_omit.go": {
+        "code": 11,
+        "files": 1
+      },
+      "sqlite3_opt_serialize_omit.go": {
+        "code": 11,
+        "files": 1
+      },
+      "sqlite3_opt_preupdate.go": {
+        "code": 9,
+        "files": 1
+      },
+      "sqlite3_opt_column_metadata.go": {
+        "code": 5,
+        "files": 1
+      },
+      "sqlite3_libsqlite3.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_allow_uri_authority.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_app_armor.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_dbstat.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_foreign_keys.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_fts5.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_icu.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_introspect.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_math_functions.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_os_trace.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_percentile.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_secure_delete.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_secure_delete_fast.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_stat4.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_vacuum_full.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_opt_vacuum_incr.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_other.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_solaris.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_usleep_windows.go": {
+        "code": 2,
+        "files": 1
+      },
+      "sqlite3_windows.go": {
+        "code": 2,
+        "files": 1
+      },
+      "doc.go": {
+        "code": 1,
+        "files": 1
+      }
+    },
+    "selected_files": {
+      "sqlite3-binding.c": {
+        "blank": 16978,
+        "comment": 82300,
+        "code": 170376,
+        "language": "C"
+      },
+      "sqlite3-binding.h": {
+        "blank": 368,
+        "comment": 12068,
+        "code": 1918,
+        "language": "C/C++ Header"
+      },
+      "sqlite3_session.go": {
+        "blank": 23,
+        "comment": 30,
+        "code": 137,
+        "language": "Go"
+      }
+    },
+    "cloc_sum": {
+      "blank": 19314,
+      "comment": 97129,
+      "code": 185526,
+      "nFiles": 101
+    },
+    "version": "v1.51.0",
+    "revision": "cee84f443e3b95fdd08e5853c797a02148e90380"
+  },
+  "raft": {
+    "groups": {
+      "tests": {
+        "files": 25,
+        "code": 6367,
+        "physical": 8507
+      },
+      "production": {
+        "files": 39,
+        "code": 8115,
+        "physical": 12311
+      },
+      "fixtures_examples_tools": {
+        "files": 1,
+        "code": 128,
+        "physical": 175
+      }
+    },
+    "production_packages": {
+      "raft.go": {
+        "code": 1578,
+        "files": 1
+      },
+      "api.go": {
+        "code": 749,
+        "files": 1
+      },
+      "testing.go": {
+        "code": 668,
+        "files": 1
+      },
+      "net_transport.go": {
+        "code": 588,
+        "files": 1
+      },
+      "replication.go": {
+        "code": 432,
+        "files": 1
+      },
+      "file_snapshot.go": {
+        "code": 385,
+        "files": 1
+      },
+      "fuzzy": {
+        "code": 958,
+        "files": 8
+      },
+      "inmem_transport.go": {
+        "code": 275,
+        "files": 1
+      },
+      "raft-compat": {
+        "code": 312,
+        "files": 2
+      },
+      "configuration.go": {
+        "code": 242,
+        "files": 1
+      },
+      "future.go": {
+        "code": 190,
+        "files": 1
+      },
+      "fsm.go": {
+        "code": 166,
+        "files": 1
+      },
+      "snapshot.go": {
+        "code": 155,
+        "files": 1
+      },
+      "config.go": {
+        "code": 133,
+        "files": 1
+      },
+      "inmem_store.go": {
+        "code": 121,
+        "files": 1
+      },
+      "progress.go": {
+        "code": 119,
+        "files": 1
+      },
+      "util.go": {
+        "code": 114,
+        "files": 1
+      },
+      "state.go": {
+        "code": 113,
+        "files": 1
+      },
+      "commands.go": {
+        "code": 103,
+        "files": 1
+      },
+      "log.go": {
+        "code": 96,
+        "files": 1
+      },
+      "tcp_transport.go": {
+        "code": 86,
+        "files": 1
+      },
+      "observer.go": {
+        "code": 83,
+        "files": 1
+      },
+      "inmem_snapshot.go": {
+        "code": 78,
+        "files": 1
+      },
+      "commitment.go": {
+        "code": 66,
+        "files": 1
+      },
+      "saturation.go": {
+        "code": 64,
+        "files": 1
+      },
+      "log_cache.go": {
+        "code": 63,
+        "files": 1
+      },
+      "peersjson.go": {
+        "code": 63,
+        "files": 1
+      },
+      "transport.go": {
+        "code": 57,
+        "files": 1
+      },
+      "discard_snapshot.go": {
+        "code": 32,
+        "files": 1
+      },
+      "testing_batch.go": {
+        "code": 19,
+        "files": 1
+      },
+      "stable.go": {
+        "code": 7,
+        "files": 1
+      }
+    },
+    "selected_files": {},
+    "cloc_sum": {
+      "blank": 2834,
+      "comment": 3549,
+      "code": 14610,
+      "nFiles": 65
+    },
+    "version": "v1.8.0",
+    "revision": "0f543c056e7e577a54b819a62116335c9661a13a",
+    "runtime_source_excluding_support": {
+      "code": 6158,
+      "files": 27,
+      "excluded_non_test_go": [
+        "testing.go",
+        "testing_batch.go",
+        "fuzzy/",
+        "raft-compat/"
+      ]
+    }
+  },
+  "measurement": {
+    "date": "2026-10-05",
+    "tool": "cloc 2.10",
+    "options": [
+      "--skip-uniqueness",
+      "--json",
+      "--by-file",
+      "--exclude-dir=.git"
+    ],
+    "go_counts": "Code excludes blank and comment lines; generated code and testing/support directories are classified separately. This is a source inventory, not compiled reachability or binary size.",
+    "classification_order": [
+      "non-Go language",
+      "paths containing testdata, system_test, _example, tools, upgrade, or bench",
+      "*_test.go",
+      "Code generated marker in first 1000 characters",
+      "remaining Go source"
+    ],
+    "dependency_scope": "Only rqlite, its selected SQLite driver, and HashiCorp Raft were measured. bbolt, protobuf, SQL parser, AWS SDK and other dependencies are excluded."
+  }
+}

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Order Lab · přehled operací</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/admin"><span class="brand-icon">↗</span> Order Lab<span class="version">01</span></a>
+    <div class="sidebar-label">WORKSPACE</div>
+    <nav aria-label="Hlavní navigace">
+      <button data-page="overview" class="nav-button active"><span>◉</span> Přehled <span class="nav-count" id="request-count">0</span></button>
+      <button data-page="orders" class="nav-button"><span>▤</span> Objednávky</button>
+      <button data-page="plugins" class="nav-button"><span>⇄</span> Pluginy</button>
+      <button data-page="workflow" class="nav-button"><span>⌘</span> Deklarace toku</button>
+    </nav>
+    <div class="sidebar-label">VYZKOUŠET</div>
+    <button data-page="lab" class="nav-button"><span>＋</span> Nová objednávka</button>
+    <div class="sidebar-bottom"><span class="live-dot"></span> Lokální runtime <small>Elixir / SQLite · bez replikace</small></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><span>Prototyp <span class="slash">/</span> <span id="breadcrumb">Přehled</span></span><span class="environment">LOCAL <span class="live-dot"></span></span></header>
+    <div class="content">
+      <div id="connection-error" class="error-banner" hidden>Runtime není dostupný. Zkouším obnovit spojení…</div>
+      <section id="page-overview" class="page">
+        <div class="heading"><div><span class="eyebrow">KAŽDÝ POŽADAVEK, CELÝ PŘÍBĚH</span><h1>Přehled operací<span class="heading-dot">.</span></h1><p>Od přijaté objednávky až po poslední volání pluginu.</p></div><button class="button primary" data-page="lab">＋ Vytvořit objednávku</button></div>
+        <div class="stats" id="stats"></div>
+        <div class="section-title"><h2>Přijaté požadavky</h2><span class="muted" id="updated-at">Aktualizuji…</span></div>
+        <div class="filter-row"><input id="request-search" aria-label="Hledat požadavek" placeholder="Hledat podle ID, uživatele nebo chyby…"><select id="request-filter" aria-label="Stav požadavku"><option value="all">Všechny výsledky</option><option value="committed">Commitnuto</option><option value="failed">Chyba</option></select></div>
+        <div class="table-wrap"><table><thead><tr><th>Požadavek</th><th>Uživatel</th><th>Výsledek</th><th>Pluginy</th><th>Čas</th><th></th></tr></thead><tbody id="requests-body"></tbody></table><div id="requests-empty" class="empty"><span class="empty-icon">⇄</span><h3>Zatím žádný požadavek</h3><p>Vytvořte objednávku a sledujte její cestu runtime.</p><button class="button" data-page="lab">Otevřít laboratoř →</button></div></div>
+        <div class="architecture-strip"><span class="live-dot"></span><strong>Nativní změny v jedné transakci.</strong><span>Objednávka + sklad + emailová fronta. Historie pokusů zůstává i po rollbacku.</span></div>
+      </section>
+      <section id="page-lab" class="page" hidden>
+        <div class="heading"><div><span class="eyebrow">INTERAKTIVNÍ LABORATOŘ</span><h1>Nová objednávka<span class="heading-dot">.</span></h1><p>Zkuste úspěšný commit, nedostatek skladu nebo odmítnutou platbu.</p></div><span class="tag">POST /api/orders</span></div>
+        <form id="order-form" class="lab-grid">
+          <div class="panel"><div class="panel-title"><h2>Vyberte produkty</h2><span class="muted">Ceny se kopírují z databáze</span></div><div id="products"></div></div>
+          <div class="lab-side"><div class="panel"><h2>Detaily objednávky</h2><label for="user">Uživatel</label><select id="user" name="user_id"></select><label for="payment">Platební metoda</label><select id="payment" name="payment_method"><option value="card">Platební karta</option><option value="bank">Bankovní převod</option></select><label class="checkbox"><input id="email-failure" type="checkbox"> Simulovat chybu emailu</label><p class="hint">Nora / BR: platba selže a objednávka se rollbackne. David / US: bankovní převod není dostupný.</p><div class="total"><span>Celkem</span><strong id="cart-total">0 Kč</strong></div><button id="submit-order" class="button primary full" type="submit">Odeslat objednávku →</button></div><div id="order-result" class="panel result" hidden aria-live="polite"></div></div>
+        </form>
+      </section>
+      <section id="page-orders" class="page" hidden><div class="heading"><div><span class="eyebrow">POTVRZENÝ APLIKAČNÍ STAV</span><h1>Objednávky<span class="heading-dot">.</span></h1><p>Zde jsou pouze objednávky, které prošly commitem.</p></div></div><div id="orders-list"></div></section>
+      <section id="page-plugins" class="page" hidden><div class="heading"><div><span class="eyebrow">VSTUPY, VÝSTUPY, CHYBY</span><h1>Volání pluginů<span class="heading-dot">.</span></h1><p>Lokální platební URL a simulované emaily. Všechny pokusy zůstávají dohledatelné.</p></div></div><div class="plugin-summary"><div class="panel"><span class="plugin-icon">↗</span><h2>Payment</h2><p>Vytvoří demo platební URL nebo vrátí obchodní chybu.</p><code>create_url(order, country, method)</code></div><div class="panel"><span class="plugin-icon">✉</span><h2>Email</h2><p>Simuluje odeslání až po commitu. 3 pokusy, odstup 1 s, pak ponechání chyby.</p><code>send_confirmation(order, payment)</code></div></div><div class="section-title"><h2>Historie volání</h2><select id="plugin-filter" aria-label="Filtrovat plugin"><option value="all">Všechny pluginy</option><option>Payment</option><option>Email</option></select></div><div id="plugin-calls"></div></section>
+      <section id="page-workflow" class="page" hidden><div class="heading"><div><span class="eyebrow">APLIKAČNÍ LOGIKA JAKO DEKLARACE</span><h1>Objednávkový tok<span class="heading-dot">.</span></h1><p>Tento soubor runtime načte a přeloží při startu.</p></div><span class="tag">DSL v0</span></div><div class="code-panel"><div class="code-heading"><span>create_order.flow</span><span>registrované operace</span></div><pre id="workflow-source"></pre></div><div class="architecture-strip"><strong>Uzavřený prototyp jazyka.</strong><span>Podporuje tento konkrétní tok a kontroluje jeho závislosti. Implementace operací jsou v Elixiru.</span></div></section>
+    </div>
+  </main>
+  <dialog id="request-dialog" aria-labelledby="detail-title"><div class="dialog-header"><div><span class="eyebrow">DETAIL OPERACE</span><h2 id="detail-title">Požadavek</h2></div><button id="close-dialog" class="icon-button" aria-label="Zavřít detail">×</button></div><div id="request-detail"></div></dialog>
+</body>
+</html>
