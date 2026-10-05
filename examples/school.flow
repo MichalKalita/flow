@@ -1,0 +1,147 @@
+# Small school: courses, enrollments, assignments, and grades.
+
+[type UserID [id User]]
+[type CourseID [id Course]]
+[type EnrollmentID [id Enrollment]]
+[type AssignmentID [id Assignment]]
+[type SubmissionID [id Submission]]
+[type RequestID [id Request]]
+[type Capacity [integer [range 1 40]]]
+[type Score [decimal [range 0 100] [scale 1]]]
+[type Weight [decimal [range 0 1] [scale 2]]]
+
+[enum Role TEACHER REGISTRAR]
+[enum Term FALL SPRING]
+[enum EnrollmentStatus ACTIVE DROPPED]
+[enum SubmissionStatus DRAFT SUBMITTED GRADED]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field email String]
+  [field enrollments [list Enrollment] [inverse Enrollment.student]]
+  [field taught [list Course] [inverse Course.teacher]]]
+
+[entity Course
+  [field id CourseID]
+  [field code String [unique]]
+  [field title String]
+  [field term Term]
+  [field capacity Capacity]
+  [field teacher User]
+  [field enrollments [list Enrollment] [inverse Enrollment.course]]
+  [field assignments [list Assignment] [inverse Assignment.course]]]
+
+[entity Enrollment
+  [field id EnrollmentID]
+  [field student User]
+  [field course Course]
+  [field status EnrollmentStatus]
+  [field createdAt DateTime]]
+
+[entity Assignment
+  [field id AssignmentID]
+  [field course Course]
+  [field title String]
+  [field dueAt DateTime]
+  [field weight Weight]
+  [field submissions [list Submission] [inverse Submission.assignment]]]
+
+[entity Submission
+  [field id SubmissionID]
+  [field assignment Assignment]
+  [field student User]
+  [field body String]
+  [field status SubmissionStatus]
+  [field score [optional Score]]
+  [field createdAt DateTime]]
+
+[seed User [rows
+  [record [id "s1"] [identitySubject "idp:s1"] [roles [list]] [name "Eva Student"] [email "eva@school.test"]]
+  [record [id "t1"] [identitySubject "idp:t1"] [roles [list TEACHER]] [name "Prof. Holub"] [email "holub@school.test"]]
+  [record [id "r1"] [identitySubject "idp:r1"] [roles [list REGISTRAR]] [name "Registrar"] [email "office@school.test"]]]]
+[seed Course [rows
+  [record [id "c1"] [code "CS101"] [title "Intro to Computing"] [term FALL] [capacity 30] [teacher "t1"]]
+  [record [id "c2"] [code "LIT200"] [title "Czech Literature"] [term FALL] [capacity 20] [teacher "t1"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "school"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Course [READ [when true]]]]
+
+[permissions User
+  [Enrollment
+    [READ [when [or [eq actor target.student] [eq actor target.course.teacher] [contains actor.roles REGISTRAR]]]]
+    [CREATE [when [or [eq actor after.student] [contains actor.roles REGISTRAR]]]]]
+  [Assignment
+    [READ [when [or
+      [eq actor target.course.teacher]
+      [any target.course.enrollments e [eq e.student actor]]]]]
+    [CREATE [when [eq actor after.course.teacher]]]]
+  [Submission
+    [READ [when [or [eq actor target.student] [eq actor target.assignment.course.teacher]]]]
+    [CREATE [when [eq actor after.student]]]
+    [UPDATE [when [eq actor after.assignment.course.teacher]]]]]
+
+[type CourseOutput [record [field id CourseID] [field code String] [field title String] [field term Term]]]
+[type EnrollmentOutput [record [field id EnrollmentID] [field status EnrollmentStatus]]]
+[type AssignmentOutput [record [field id AssignmentID] [field title String] [field dueAt DateTime]]]
+[type SubmissionOutput [record
+  [field id SubmissionID] [field status SubmissionStatus] [field score [optional Score]]]]
+
+[query Catalog
+  [output [list CourseOutput [max 50]]]
+  [http GET "/api/courses"]
+  [result [first [entities Course] 50]]]
+
+[query CourseAssignments
+  [input courseId CourseID]
+  [output [list AssignmentOutput [max 30]]]
+  [http GET "/api/courses/{courseId}/assignments"]
+  [course [entity $courseId]]
+  [result [order [last course.assignments 30] Assignment.dueAt ASC]]]
+
+[mutate Enroll
+  [input studentId UserID]
+  [input courseId CourseID]
+  [output EnrollmentOutput]
+  [http POST "/api/enrollments" [status 201]]
+  [atomic]
+  [student [entity $studentId]]
+  [course [entity $courseId]]
+  [enrollment [create Enrollment [record
+    [id [new EnrollmentID]] [student student] [course course]
+    [status ACTIVE] [createdAt request.time]]]]
+  [result enrollment]]
+
+[mutate SubmitWork
+  [input studentId UserID]
+  [input assignmentId AssignmentID]
+  [input body String]
+  [output SubmissionOutput]
+  [http POST "/api/submissions" [status 201]]
+  [atomic]
+  [student [entity $studentId]]
+  [assignment [entity $assignmentId]]
+  [submission [create Submission [record
+    [id [new SubmissionID]] [student student] [assignment assignment]
+    [body $body] [status SUBMITTED] [createdAt request.time]]]]
+  [result submission]]
+
+[mutate GradeSubmission
+  [input submissionId SubmissionID]
+  [input score Score]
+  [output SubmissionOutput]
+  [http POST "/api/submissions/{submissionId}/grade"]
+  [atomic]
+  [submission [entity $submissionId]]
+  [scored [set submission.score $score]]
+  [graded [set submission.status GRADED]]
+  [result submission]]

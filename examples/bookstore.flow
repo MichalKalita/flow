@@ -1,0 +1,165 @@
+# Independent bookstore: catalog, carts, orders, and stock.
+
+[type UserID [id User]]
+[type BookID [id Book]]
+[type AuthorID [id Author]]
+[type OrderID [id Order]]
+[type ReviewID [id Review]]
+[type RequestID [id Request]]
+[type Quantity [integer [range 1 20]]]
+[type Stock [integer [range 0 [pow 10 5]]]]
+[type Price [decimal [range 0.01 [pow 10 6]] [scale 2]]]
+[type OrderTotal [decimal [range 0.01 [mul 50 [pow 10 6]]] [scale 2]]]
+[type Rating [decimal [range 1 5] [scale 1]]]
+[type Year [integer [range 1450 2100]]]
+
+[enum PaymentMethod CARD BANK CASH]
+[enum OrderStatus AWAITING_PAYMENT PAID CANCELLED]
+[enum Role STAFF]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field name String]
+  [field email String]
+  [field country String]
+  [field orders [list Order] [inverse Order.customer]]
+  [field reviews [list Review] [inverse Review.author]]]
+
+[entity Author
+  [field id AuthorID]
+  [field name String]
+  [field books [list Book] [inverse Book.author]]]
+
+[entity Book
+  [field id BookID]
+  [field title String]
+  [field author Author]
+  [field isbn String [unique]]
+  [field year Year]
+  [field price Price]
+  [field stock Stock]
+  [field reviews [list Review] [inverse Review.book]]]
+
+[type OrderItem [record
+  [field book Book]
+  [field title String]
+  [field price Price]
+  [field quantity Quantity]]]
+
+[entity Order
+  [field id OrderID]
+  [field customer User]
+  [field requestId RequestID]
+  [field createdAt DateTime]
+  [field items [list OrderItem [min 1] [max 50]]]
+  [field total OrderTotal]
+  [field paymentMethod PaymentMethod]
+  [field status OrderStatus]]
+
+[entity Review
+  [field id ReviewID]
+  [field book Book]
+  [field author User]
+  [field rating Rating]
+  [field body String]
+  [field createdAt DateTime]]
+
+[seed Author [rows
+  [record [id "a1"] [name "Božena Němcová"]]
+  [record [id "a2"] [name "Karel Čapek"]]
+  [record [id "a3"] [name "Ursula K. Le Guin"]]]]
+[seed Book [rows
+  [record [id "b1"] [title "Babička"] [author "a1"] [isbn "978-80-000-0001"] [year 1855] [price 249.00] [stock 8]]
+  [record [id "b2"] [title "R.U.R."] [author "a2"] [isbn "978-80-000-0002"] [year 1920] [price 199.00] [stock 4]]
+  [record [id "b3"] [title "The Left Hand of Darkness"] [author "a3"] [isbn "978-0-441-47812-5"] [year 1969] [price 389.00] [stock 6]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"] [country "CZ"]]
+  [record [id "staff"] [identitySubject "idp:staff"] [roles [list STAFF]] [name "Shop staff"] [email "staff@example.test"] [country "CZ"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "bookstore"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Book [READ [when true]]]
+  [Author [READ [when true]]]
+  [Review [READ [when true]]]]
+
+[permissions User
+  [User [READ [when [eq actor target]]]]
+  [Order
+    [READ [when [eq actor target.customer]]]
+    [CREATE [when [and
+      [eq actor after.customer]
+      [eq after.total [sum after.items item [mul item.price item.quantity]]]]]]]
+  [Review
+    [CREATE [when [eq actor after.author]]]]
+  [Book
+    [UPDATE [when [contains actor.roles STAFF]]]]]
+
+[type BookSummary [record
+  [field id BookID] [field title String] [field isbn String] [field price Price] [field stock Stock]]]
+[type CartItem [record [field bookId BookID] [field quantity Quantity]]]
+[type OrderOutput [record
+  [field id OrderID] [field total OrderTotal] [field status OrderStatus] [field createdAt DateTime]]]
+[type ReviewOutput [record
+  [field id ReviewID] [field rating Rating] [field body String] [field createdAt DateTime]]]
+
+[query Catalog
+  [output [list BookSummary [max 100]]]
+  [http GET "/api/books"]
+  [result [first [entities Book] 100]]]
+
+[query Book
+  [input bookId BookID]
+  [output Book]
+  [http GET "/api/books/{bookId}"]
+  [result [entity $bookId]]]
+
+[query BookReviews
+  [input bookId BookID]
+  [output [list ReviewOutput [max 50]]]
+  [http GET "/api/books/{bookId}/reviews"]
+  [book [entity $bookId]]
+  [result [order [last book.reviews 50] Review.createdAt DESC]]]
+
+[mutate PlaceOrder
+  [input customerId UserID]
+  [input items [list CartItem [min 1] [max 50]]]
+  [input paymentMethod PaymentMethod]
+  [output OrderOutput]
+  [http POST "/api/orders" [status 201]]
+  [atomic]
+  [customer [entity $customerId]]
+  [cart [groupSum $items bookId quantity Quantity]]
+  [lines [map cart item
+    [book [entity item.bookId]]
+    [quantity item.quantity]
+    [snapshot [record [book book] [title book.title] [price book.price] [quantity quantity]]]
+    [remaining [as Stock [sub book.stock quantity]]]
+    [stock [set book.stock remaining]]]]
+  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
+  [order [create Order [record
+    [id [new OrderID]] [customer customer] [requestId request.id] [createdAt request.time]
+    [items lines.snapshot] [total total] [paymentMethod $paymentMethod] [status AWAITING_PAYMENT]]]]
+  [result order]]
+
+[mutate WriteReview
+  [input authorId UserID]
+  [input bookId BookID]
+  [input rating Rating]
+  [input body String]
+  [output ReviewOutput]
+  [http POST "/api/reviews" [status 201]]
+  [atomic]
+  [author [entity $authorId]]
+  [book [entity $bookId]]
+  [review [create Review [record
+    [id [new ReviewID]] [author author] [book book]
+    [rating $rating] [body $body] [createdAt request.time]]]]
+  [result review]]

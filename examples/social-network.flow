@@ -1,0 +1,152 @@
+# Social network: profiles, posts, follows, and likes.
+
+[type UserID [id User]]
+[type PostID [id Post]]
+[type CommentID [id Comment]]
+[type FollowID [id Follow]]
+[type LikeID [id Like]]
+[type RequestID [id Request]]
+[type PageSize [integer [range 1 50]]]
+[type BodyLength [integer [range 1 2000]]]
+
+[enum Role MODERATOR]
+[enum PostVisibility PUBLIC FOLLOWERS]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field handle String [unique]]
+  [field displayName String]
+  [field bio String]
+  [field posts [list Post] [inverse Post.author]]
+  [field following [list Follow] [inverse Follow.follower]]
+  [field followers [list Follow] [inverse Follow.followee]]]
+
+[entity Post
+  [field id PostID]
+  [field author User]
+  [field body String]
+  [field visibility PostVisibility]
+  [field createdAt DateTime]
+  [field comments [list Comment] [inverse Comment.post]]
+  [field likes [list Like] [inverse Like.post]]]
+
+[entity Comment
+  [field id CommentID]
+  [field post Post]
+  [field author User]
+  [field body String]
+  [field createdAt DateTime]]
+
+[entity Follow
+  [field id FollowID]
+  [field follower User]
+  [field followee User]
+  [field createdAt DateTime]]
+
+[entity Like
+  [field id LikeID]
+  [field post Post]
+  [field user User]
+  [field createdAt DateTime]]
+
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [handle "petra"] [displayName "Petra"] [bio "Photos and coffee"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [handle "david"] [displayName "David"] [bio "Cycling"]]]
+  [record [id "u3"] [identitySubject "idp:mod"] [roles [list MODERATOR]] [handle "mod"] [displayName "Moderator"] [bio ""]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "social"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [User [READ [when true]]]
+  [Post [READ [when [eq target.visibility PUBLIC]]]]]
+
+[permissions User
+  [User [UPDATE [when [eq actor target]]]]
+  [Post
+    [READ [when [or
+      [eq target.visibility PUBLIC]
+      [eq actor target.author]
+      [any target.author.followers follow [eq follow.follower actor]]]]]
+    [CREATE [when [eq actor after.author]]]
+    [DELETE [when [or [eq actor target.author] [contains actor.roles MODERATOR]]]]]
+  [Comment
+    [READ [when [can READ target.post]]]
+    [CREATE [when [and [eq actor after.author] [can READ after.post]]]]]
+  [Follow
+    [READ [when true]]
+    [CREATE [when [and [eq actor after.follower] [neq actor after.followee]]]]]
+  [Like
+    [READ [when [can READ target.post]]]
+    [CREATE [when [and [eq actor after.user] [can READ after.post]]]]]]
+
+[type UserSummary [record [field id UserID] [field handle String] [field displayName String]]]
+[type PostOutput [record
+  [field id PostID] [field author UserSummary] [field body String]
+  [field visibility PostVisibility] [field createdAt DateTime]]]
+[type CommentOutput [record
+  [field id CommentID] [field author UserSummary] [field body String] [field createdAt DateTime]]]
+
+[query Timeline
+  [input userId UserID]
+  [input pageSize PageSize]
+  [output [list PostOutput [max 50]]]
+  [http GET "/api/users/{userId}/timeline"]
+  [user [entity $userId]]
+  [result [order [last user.posts $pageSize] Post.createdAt DESC]]]
+
+[query Post
+  [input postId PostID]
+  [output PostOutput]
+  [http GET "/api/posts/{postId}"]
+  [result [entity $postId]]]
+
+[query PostComments
+  [input postId PostID]
+  [output [list CommentOutput [max 50]]]
+  [http GET "/api/posts/{postId}/comments"]
+  [post [entity $postId]]
+  [result [order [last post.comments 50] Comment.createdAt ASC]]]
+
+[mutate CreatePost
+  [input authorId UserID]
+  [input body String]
+  [input visibility PostVisibility]
+  [output PostOutput]
+  [http POST "/api/posts" [status 201]]
+  [atomic]
+  [author [entity $authorId]]
+  [post [create Post [record
+    [id [new PostID]] [author author] [body $body]
+    [visibility $visibility] [createdAt request.time]]]]
+  [result post]]
+
+[mutate FollowUser
+  [input followerId UserID]
+  [input followeeId UserID]
+  [output Follow]
+  [http POST "/api/follows" [status 201]]
+  [atomic]
+  [follower [entity $followerId]]
+  [followee [entity $followeeId]]
+  [follow [create Follow [record
+    [id [new FollowID]] [follower follower] [followee followee] [createdAt request.time]]]]
+  [result follow]]
+
+[mutate LikePost
+  [input userId UserID]
+  [input postId PostID]
+  [output Like]
+  [http POST "/api/likes" [status 201]]
+  [atomic]
+  [user [entity $userId]]
+  [post [entity $postId]]
+  [like [create Like [record
+    [id [new LikeID]] [user user] [post post] [createdAt request.time]]]]
+  [result like]]

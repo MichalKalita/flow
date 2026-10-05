@@ -1,0 +1,141 @@
+# Job board: companies, listings, applications, and messages.
+
+[type UserID [id User]]
+[type CompanyID [id Company]]
+[type ListingID [id Listing]]
+[type ApplicationID [id Application]]
+[type MessageID [id Message]]
+[type RequestID [id Request]]
+[type Salary [decimal [range 1000 [pow 10 7]] [scale 0]]]
+
+[enum Role RECRUITER]
+[enum Workplace REMOTE HYBRID ONSITE]
+[enum ListingStatus OPEN CLOSED]
+[enum ApplicationStatus SUBMITTED REVIEWING OFFER REJECTED]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field name String]
+  [field email String]
+  [field headline String]
+  [field applications [list Application] [inverse Application.candidate]]]
+
+[entity Company
+  [field id CompanyID]
+  [field name String]
+  [field website String]
+  [field listings [list Listing] [inverse Listing.company]]]
+
+[entity Listing
+  [field id ListingID]
+  [field company Company]
+  [field title String]
+  [field workplace Workplace]
+  [field salaryMin Salary]
+  [field salaryMax Salary]
+  [field status ListingStatus]
+  [field postedAt DateTime]
+  [field applications [list Application] [inverse Application.listing]]]
+
+[entity Application
+  [field id ApplicationID]
+  [field listing Listing]
+  [field candidate User]
+  [field coverLetter String]
+  [field status ApplicationStatus]
+  [field createdAt DateTime]
+  [field messages [list Message] [inverse Message.application]]]
+
+[entity Message
+  [field id MessageID]
+  [field application Application]
+  [field author User]
+  [field body String]
+  [field createdAt DateTime]]
+
+[seed Company [rows
+  [record [id "c1"] [name "River Labs"] [website "https://river.example"]]
+  [record [id "c2"] [name "Oak Press"] [website "https://oak.example"]]]]
+[seed Listing [rows
+  [record [id "l1"] [company "c1"] [title "Backend engineer"] [workplace REMOTE]
+    [salaryMin 90000] [salaryMax 130000] [status OPEN] [postedAt "2026-09-01T00:00:00Z"]]
+  [record [id "l2"] [company "c2"] [title "Editor"] [workplace HYBRID]
+    [salaryMin 45000] [salaryMax 65000] [status OPEN] [postedAt "2026-09-15T00:00:00Z"]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Nora Silva"] [email "nora@example.test"] [headline "Rust and SQLite"]]
+  [record [id "hr"] [identitySubject "idp:hr"] [roles [list RECRUITER]] [name "River HR"] [email "hr@river.example"] [headline ""]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "jobs"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Company [READ [when true]]]
+  [Listing [READ [when [eq target.status OPEN]]]]]
+
+[permissions User
+  [Application
+    [READ [when [or [eq actor target.candidate] [contains actor.roles RECRUITER]]]]
+    [CREATE [when [eq actor after.candidate]]]
+    [UPDATE [when [contains actor.roles RECRUITER]]]]
+  [Message
+    [READ [when [can READ target.application]]]
+    [CREATE [when [can READ after.application]]]]]
+
+[type ListingOutput [record
+  [field id ListingID] [field title String] [field workplace Workplace]
+  [field salaryMin Salary] [field salaryMax Salary]]]
+[type ApplicationOutput [record
+  [field id ApplicationID] [field status ApplicationStatus] [field createdAt DateTime]]]
+[type MessageOutput [record [field id MessageID] [field body String] [field createdAt DateTime]]]
+
+[query Openings
+  [output [list ListingOutput [max 100]]]
+  [http GET "/api/listings"]
+  [result [first [entities Listing] 100]]]
+
+[query Listing
+  [input listingId ListingID]
+  [output Listing]
+  [http GET "/api/listings/{listingId}"]
+  [result [entity $listingId]]]
+
+[query MyApplications
+  [input userId UserID]
+  [output [list ApplicationOutput [max 50]]]
+  [http GET "/api/users/{userId}/applications"]
+  [user [entity $userId]]
+  [result [order [last user.applications 50] Application.createdAt DESC]]]
+
+[mutate Apply
+  [input candidateId UserID]
+  [input listingId ListingID]
+  [input coverLetter String]
+  [output ApplicationOutput]
+  [http POST "/api/applications" [status 201]]
+  [atomic]
+  [candidate [entity $candidateId]]
+  [listing [entity $listingId]]
+  [application [create Application [record
+    [id [new ApplicationID]] [candidate candidate] [listing listing]
+    [coverLetter $coverLetter] [status SUBMITTED] [createdAt request.time]]]]
+  [result application]]
+
+[mutate MessageCandidate
+  [input applicationId ApplicationID]
+  [input authorId UserID]
+  [input body String]
+  [output MessageOutput]
+  [http POST "/api/applications/{applicationId}/messages" [status 201]]
+  [atomic]
+  [application [entity $applicationId]]
+  [author [entity $authorId]]
+  [message [create Message [record
+    [id [new MessageID]] [application application] [author author]
+    [body $body] [createdAt request.time]]]]
+  [result message]]

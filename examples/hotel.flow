@@ -1,0 +1,145 @@
+# Boutique hotel: rooms, stays, extras, and housekeeping.
+
+[type UserID [id User]]
+[type RoomID [id Room]]
+[type StayID [id Stay]]
+[type ExtraID [id Extra]]
+[type TaskID [id HousekeepingTask]]
+[type RequestID [id Request]]
+[type Floor [integer [range 1 8]]]
+[type NightCount [integer [range 1 30]]]
+[type GuestCount [integer [range 1 4]]]
+[type Price [decimal [range 1 [pow 10 6]] [scale 2]]]
+[type StayTotal [decimal [range 1 [mul 30 [pow 10 6]]] [scale 2]]]
+
+[enum Role FRONT_DESK HOUSEKEEPING]
+[enum RoomKind SINGLE DOUBLE SUITE]
+[enum StayStatus REQUESTED CONFIRMED CHECKED_IN CHECKED_OUT CANCELLED]
+[enum TaskStatus OPEN DONE]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field email String]
+  [field stays [list Stay] [inverse Stay.guest]]]
+
+[entity Room
+  [field id RoomID]
+  [field number String [unique]]
+  [field kind RoomKind]
+  [field floor Floor]
+  [field nightly Price]
+  [field stays [list Stay] [inverse Stay.room]]]
+
+[entity Extra
+  [field id ExtraID]
+  [field name String]
+  [field price Price]]
+
+[type StayExtra [record [field extra Extra] [field name String] [field price Price]]]
+
+[entity Stay
+  [field id StayID]
+  [field guest User]
+  [field room Room]
+  [field nights NightCount]
+  [field guests GuestCount]
+  [field extras [list StayExtra [max 10]]]
+  [field total StayTotal]
+  [field status StayStatus]
+  [field checkIn DateTime]
+  [field createdAt DateTime]]
+
+[entity HousekeepingTask
+  [field id TaskID]
+  [field room Room]
+  [field stay Stay]
+  [field status TaskStatus]
+  [field createdAt DateTime]]
+
+[seed Room [rows
+  [record [id "r101"] [number "101"] [kind SINGLE] [floor 1] [nightly 1890.00]]
+  [record [id "r202"] [number "202"] [kind DOUBLE] [floor 2] [nightly 2490.00]]
+  [record [id "r301"] [number "301"] [kind SUITE] [floor 3] [nightly 4290.00]]]]
+[seed Extra [rows
+  [record [id "e1"] [name "Breakfast"] [price 290.00]]
+  [record [id "e2"] [name "Parking"] [price 200.00]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "David Miller"] [email "david@example.test"]]
+  [record [id "desk"] [identitySubject "idp:desk"] [roles [list FRONT_DESK]] [name "Front desk"] [email "desk@hotel.test"]]
+  [record [id "hk"] [identitySubject "idp:hk"] [roles [list HOUSEKEEPING]] [name "Housekeeping"] [email "hk@hotel.test"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "hotel"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Room [READ [when true]]]
+  [Extra [READ [when true]]]]
+
+[permissions User
+  [Stay
+    [READ [when [or [eq actor target.guest] [contains actor.roles FRONT_DESK]]]]
+    [CREATE [when [eq actor after.guest]]]
+    [UPDATE [when [contains actor.roles FRONT_DESK]]]]
+  [HousekeepingTask
+    [READ [when [contains actor.roles HOUSEKEEPING]]]
+    [CREATE [when [contains actor.roles FRONT_DESK]]]
+    [UPDATE [when [contains actor.roles HOUSEKEEPING]]]]]
+
+[type RoomOutput [record [field id RoomID] [field number String] [field kind RoomKind] [field nightly Price]]]
+[type StayOutput [record
+  [field id StayID] [field nights NightCount] [field total StayTotal] [field status StayStatus]]]
+[type ExtraChoice [record [field extraId ExtraID]]]
+
+[query Rooms
+  [output [list RoomOutput [max 50]]]
+  [http GET "/api/rooms"]
+  [result [first [entities Room] 50]]]
+
+[query MyStays
+  [input userId UserID]
+  [output [list StayOutput [max 20]]]
+  [http GET "/api/users/{userId}/stays"]
+  [user [entity $userId]]
+  [result [order [last user.stays 20] Stay.createdAt DESC]]]
+
+[mutate BookStay
+  [input guestId UserID]
+  [input roomId RoomID]
+  [input nights NightCount]
+  [input guests GuestCount]
+  [input extras [list ExtraChoice [max 10]]]
+  [input checkIn DateTime]
+  [output StayOutput]
+  [http POST "/api/stays" [status 201]]
+  [atomic]
+  [guest [entity $guestId]]
+  [room [entity $roomId]]
+  [chosen [map $extras item
+    [extra [entity item.extraId]]
+    [snapshot [record [extra extra] [name extra.name] [price extra.price]]]]]
+  [roomCost [as StayTotal [mul room.nightly $nights]]]
+  [extraCost [as StayTotal [sum chosen line line.snapshot.price]]]
+  [total [as StayTotal [add roomCost extraCost]]]
+  [stay [create Stay [record
+    [id [new StayID]] [guest guest] [room room] [nights $nights] [guests $guests]
+    [extras chosen.snapshot] [total total] [status REQUESTED]
+    [checkIn $checkIn] [createdAt request.time]]]]
+  [result stay]]
+
+[mutate CheckIn
+  [input stayId StayID]
+  [output StayOutput]
+  [http POST "/api/stays/{stayId}/check-in"]
+  [atomic]
+  [stay [entity $stayId]]
+  [updated [set stay.status CHECKED_IN]]
+  [task [create HousekeepingTask [record
+    [id [new TaskID]] [room stay.room] [stay stay] [status OPEN] [createdAt request.time]]]]
+  [result stay]]

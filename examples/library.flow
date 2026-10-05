@@ -1,0 +1,140 @@
+# Public library: catalog, copies, loans, and holds.
+
+[type UserID [id User]]
+[type WorkID [id Work]]
+[type CopyID [id Copy]]
+[type LoanID [id Loan]]
+[type HoldID [id Hold]]
+[type RequestID [id Request]]
+[type Year [integer [range 1400 2100]]]
+[type LoanDays [integer [range 1 28]]]
+
+[enum Role LIBRARIAN]
+[enum CopyStatus AVAILABLE LOANED REPAIR]
+[enum LoanStatus ACTIVE RETURNED OVERDUE]
+[enum HoldStatus WAITING READY CANCELLED]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field name String]
+  [field cardNumber String [unique]]
+  [field loans [list Loan] [inverse Loan.patron]]
+  [field holds [list Hold] [inverse Hold.patron]]]
+
+[entity Work
+  [field id WorkID]
+  [field title String]
+  [field creator String]
+  [field year Year]
+  [field copies [list Copy] [inverse Copy.work]]]
+
+[entity Copy
+  [field id CopyID]
+  [field work Work]
+  [field barcode String [unique]]
+  [field status CopyStatus]
+  [field loans [list Loan] [inverse Loan.copy]]]
+
+[entity Loan
+  [field id LoanID]
+  [field patron User]
+  [field copy Copy]
+  [field days LoanDays]
+  [field status LoanStatus]
+  [field borrowedAt DateTime]
+  [field dueAt DateTime]]
+
+[entity Hold
+  [field id HoldID]
+  [field patron User]
+  [field work Work]
+  [field status HoldStatus]
+  [field createdAt DateTime]]
+
+[seed Work [rows
+  [record [id "w1"] [title "Babička"] [creator "Božena Němcová"] [year 1855]]
+  [record [id "w2"] [title "The Dispossessed"] [creator "Ursula K. Le Guin"] [year 1974]]]]
+[seed Copy [rows
+  [record [id "c1"] [work "w1"] [barcode "LIB-0001"] [status AVAILABLE]]
+  [record [id "c2"] [work "w1"] [barcode "LIB-0002"] [status AVAILABLE]]
+  [record [id "c3"] [work "w2"] [barcode "LIB-0100"] [status AVAILABLE]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [cardNumber "CARD-1"]]
+  [record [id "lib"] [identitySubject "idp:lib"] [roles [list LIBRARIAN]] [name "Librarian"] [cardNumber "STAFF"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "library"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Work [READ [when true]]]
+  [Copy [READ [when true]]]]
+
+[permissions User
+  [Loan
+    [READ [when [or [eq actor target.patron] [contains actor.roles LIBRARIAN]]]]
+    [CREATE [when [contains actor.roles LIBRARIAN]]]
+    [UPDATE [when [contains actor.roles LIBRARIAN]]]]
+  [Hold
+    [READ [when [or [eq actor target.patron] [contains actor.roles LIBRARIAN]]]]
+    [CREATE [when [eq actor after.patron]]]]]
+
+[type WorkOutput [record [field id WorkID] [field title String] [field creator String] [field year Year]]]
+[type LoanOutput [record
+  [field id LoanID] [field status LoanStatus] [field borrowedAt DateTime] [field dueAt DateTime]]]
+[type HoldOutput [record [field id HoldID] [field status HoldStatus] [field createdAt DateTime]]]
+
+[query Catalog
+  [output [list WorkOutput [max 100]]]
+  [http GET "/api/works"]
+  [result [first [entities Work] 100]]]
+
+[query MyLoans
+  [input userId UserID]
+  [output [list LoanOutput [max 20]]]
+  [http GET "/api/users/{userId}/loans"]
+  [user [entity $userId]]
+  [result [order [last user.loans 20] Loan.borrowedAt DESC]]]
+
+[mutate Checkout
+  [input patronId UserID]
+  [input copyId CopyID]
+  [input days LoanDays]
+  [output LoanOutput]
+  [http POST "/api/loans" [status 201]]
+  [atomic]
+  [patron [entity $patronId]]
+  [copy [entity $copyId]]
+  [loaned [set copy.status LOANED]]
+  [loan [create Loan [record
+    [id [new LoanID]] [patron patron] [copy copy] [days $days]
+    [status ACTIVE] [borrowedAt request.time] [dueAt request.time]]]]
+  [result loan]]
+
+[mutate ReturnCopy
+  [input loanId LoanID]
+  [output LoanOutput]
+  [http POST "/api/loans/{loanId}/return"]
+  [atomic]
+  [loan [entity $loanId]]
+  [returned [set loan.status RETURNED]]
+  [available [set loan.copy.status AVAILABLE]]
+  [result loan]]
+
+[mutate PlaceHold
+  [input patronId UserID]
+  [input workId WorkID]
+  [output HoldOutput]
+  [http POST "/api/holds" [status 201]]
+  [atomic]
+  [patron [entity $patronId]]
+  [work [entity $workId]]
+  [hold [create Hold [record
+    [id [new HoldID]] [patron patron] [work work]
+    [status WAITING] [createdAt request.time]]]]
+  [result hold]]

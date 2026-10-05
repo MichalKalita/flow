@@ -1,0 +1,169 @@
+# Neighborhood food delivery: restaurants, menus, couriers, and orders.
+
+[type UserID [id User]]
+[type KitchenID [id Kitchen]]
+[type ItemID [id MenuItem]]
+[type CourierID [id Courier]]
+[type OrderID [id Order]]
+[type RequestID [id Request]]
+[type Quantity [integer [range 1 10]]]
+[type Price [decimal [range 1 [pow 10 5]] [scale 2]]]
+[type OrderTotal [decimal [range 1 [mul 30 [pow 10 5]]] [scale 2]]]
+[type Latitude [decimal [range -90 90] [scale 6]]]
+[type Longitude [decimal [range -180 180] [scale 6]]]
+
+[enum Role SUPPORT]
+[enum KitchenKind PIZZA ASIAN CAFE]
+[enum OrderStatus PLACED COOKING OUT_FOR_DELIVERY DELIVERED CANCELLED]
+[enum CourierStatus AVAILABLE BUSY]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field name String]
+  [field address String]
+  [field orders [list Order] [inverse Order.customer]]]
+
+[entity Kitchen
+  [field id KitchenID]
+  [field name String]
+  [field kind KitchenKind]
+  [field open Bool]
+  [field items [list MenuItem] [inverse MenuItem.kitchen]]]
+
+[entity MenuItem
+  [field id ItemID]
+  [field kitchen Kitchen]
+  [field name String]
+  [field price Price]
+  [field available Bool]]
+
+[entity Courier
+  [field id CourierID]
+  [field identitySubject String [unique]]
+  [field name String]
+  [field status CourierStatus]
+  [field orders [list Order] [inverse Order.courier]]
+  [field positions [list CourierPosition] [stream CourierPosition.courier]]]
+
+[type Line [record
+  [field item MenuItem]
+  [field name String]
+  [field price Price]
+  [field quantity Quantity]]]
+
+[entity Order
+  [field id OrderID]
+  [field customer User]
+  [field kitchen Kitchen]
+  [field courier [optional Courier]]
+  [field items [list Line [min 1] [max 30]]]
+  [field total OrderTotal]
+  [field status OrderStatus]
+  [field createdAt DateTime]]
+
+[stream CourierPosition
+  [mqtt "couriers/{courier}/position"]
+  [history [duration "30m"] [maxMessages 3000]]
+  [field courier Courier]
+  [field receivedAt DateTime [receivedAt]]
+  [field latitude Latitude]
+  [field longitude Longitude]]
+
+[seed Kitchen [rows
+  [record [id "k1"] [name "Pizzeria Roma"] [kind PIZZA] [open true]]
+  [record [id "k2"] [name "Green Bowl"] [kind CAFE] [open true]]]]
+[seed MenuItem [rows
+  [record [id "i1"] [kitchen "k1"] [name "Margherita"] [price 189.00] [available true]]
+  [record [id "i2"] [kitchen "k1"] [name "Diavola"] [price 219.00] [available true]]
+  [record [id "i3"] [kitchen "k2"] [name "Lentil soup"] [price 89.00] [available true]]]]
+[seed Courier [rows
+  [record [id "c1"] [identitySubject "idp:c1"] [name "Tomas"] [status AVAILABLE]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [address "Nerudova 12"]]
+  [record [id "sup"] [identitySubject "idp:sup"] [roles [list SUPPORT]] [name "Support"] [address ""]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "delivery"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [courier Courier
+    [jwt [issuer "https://identity.example.com"] [audience "delivery"]]
+    [entity [eq Courier.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user courier anonymous]]
+[transport MQTT [auth courier]]
+[transport WebSocket [auth user courier]]
+
+[permissions *
+  [Kitchen [READ [when true]]]
+  [MenuItem [READ [when true]]]]
+
+[permissions User
+  [Order
+    [READ [when [or [eq actor target.customer] [contains actor.roles SUPPORT]]]]
+    [CREATE [when [eq actor after.customer]]]]]
+[permissions Courier
+  [Order
+    [READ [when [eq actor target.courier]]]
+    [UPDATE [when [eq actor after.courier]]]]
+  [CourierPosition [CREATE [when [eq actor after.courier]]]]]
+
+[type KitchenOutput [record [field id KitchenID] [field name String] [field kind KitchenKind]]]
+[type ItemOutput [record [field id ItemID] [field name String] [field price Price]]]
+[type CartItem [record [field itemId ItemID] [field quantity Quantity]]]
+[type OrderOutput [record
+  [field id OrderID] [field total OrderTotal] [field status OrderStatus] [field createdAt DateTime]]]
+[type PositionOutput [record
+  [field latitude Latitude] [field longitude Longitude] [field receivedAt DateTime]]]
+
+[query Kitchens
+  [output [list KitchenOutput [max 50]]]
+  [http GET "/api/kitchens"]
+  [result [first [entities Kitchen] 50]]]
+
+[query Menu
+  [input kitchenId KitchenID]
+  [output [list ItemOutput [max 100]]]
+  [http GET "/api/kitchens/{kitchenId}/menu"]
+  [kitchen [entity $kitchenId]]
+  [result [first kitchen.items 100]]]
+
+[query LiveCourier
+  [input courierId CourierID]
+  [output PositionOutput]
+  [websocket "/ws" [source CourierPosition]]
+  [courier [entity $courierId]]
+  [result [live courier.positions]]]
+
+[mutate PlaceOrder
+  [input customerId UserID]
+  [input kitchenId KitchenID]
+  [input items [list CartItem [min 1] [max 30]]]
+  [output OrderOutput]
+  [http POST "/api/orders" [status 201]]
+  [atomic]
+  [customer [entity $customerId]]
+  [kitchen [entity $kitchenId]]
+  [lines [map $items item
+    [menu [entity item.itemId]]
+    [snapshot [record [item menu] [name menu.name] [price menu.price] [quantity item.quantity]]]]]
+  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
+  [order [create Order [record
+    [id [new OrderID]] [customer customer] [kitchen kitchen]
+    [items lines.snapshot] [total total] [status PLACED] [createdAt request.time]]]]
+  [result order]]
+
+[mutate AssignCourier
+  [input orderId OrderID]
+  [input courierId CourierID]
+  [output OrderOutput]
+  [http POST "/api/orders/{orderId}/assign"]
+  [atomic]
+  [order [entity $orderId]]
+  [courier [entity $courierId]]
+  [assigned [set order.courier courier]]
+  [busy [set courier.status BUSY]]
+  [out [set order.status OUT_FOR_DELIVERY]]
+  [result order]]

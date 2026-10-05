@@ -1,0 +1,144 @@
+# City rideshare: riders, drivers, vehicles, and live trip positions.
+
+[type UserID [id User]]
+[type DriverID [id Driver]]
+[type VehicleID [id Vehicle]]
+[type TripID [id Trip]]
+[type RequestID [id Request]]
+[type Latitude [decimal [range -90 90] [scale 6]]]
+[type Longitude [decimal [range -180 180] [scale 6]]]
+[type Fare [decimal [range 1 [pow 10 5]] [scale 2]]]
+[type Rating [decimal [range 1 5] [scale 1]]]
+
+[enum Role DISPATCH]
+[enum VehicleKind CAR BIKE]
+[enum TripStatus REQUESTED MATCHED EN_ROUTE COMPLETED CANCELLED]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field name String]
+  [field trips [list Trip] [inverse Trip.rider]]]
+
+[entity Driver
+  [field id DriverID]
+  [field identitySubject String [unique]]
+  [field name String]
+  [field rating Rating]
+  [field vehicle Vehicle]
+  [field trips [list Trip] [inverse Trip.driver]]
+  [field positions [list DriverPosition] [stream DriverPosition.driver]]]
+
+[entity Vehicle
+  [field id VehicleID]
+  [field plate String [unique]]
+  [field kind VehicleKind]]
+
+[entity Trip
+  [field id TripID]
+  [field rider User]
+  [field driver [optional Driver]]
+  [field pickupLat Latitude]
+  [field pickupLng Longitude]
+  [field dropoffLat Latitude]
+  [field dropoffLng Longitude]
+  [field fare Fare]
+  [field status TripStatus]
+  [field createdAt DateTime]]
+
+[stream DriverPosition
+  [mqtt "drivers/{driver}/position"]
+  [history [duration "10m"] [maxMessages 2000]]
+  [field driver Driver]
+  [field receivedAt DateTime [receivedAt]]
+  [field latitude Latitude]
+  [field longitude Longitude]]
+
+[seed Vehicle [rows
+  [record [id "v1"] [plate "1A2 3456"] [kind CAR]]
+  [record [id "v2"] [plate "E-BIKE-09"] [kind BIKE]]]]
+[seed Driver [rows
+  [record [id "d1"] [identitySubject "idp:d1"] [name "Jana"] [rating 4.8] [vehicle "v1"]]
+  [record [id "d2"] [identitySubject "idp:d2"] [name "Omar"] [rating 4.6] [vehicle "v2"]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"]]
+  [record [id "ops"] [identitySubject "idp:ops"] [roles [list DISPATCH]] [name "Dispatch"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "rideshare"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [driver Driver
+    [jwt [issuer "https://identity.example.com"] [audience "rideshare"]]
+    [entity [eq Driver.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user driver anonymous]]
+[transport MQTT [auth driver]]
+[transport WebSocket [auth user driver]]
+
+[permissions User
+  [Trip
+    [READ [when [eq actor target.rider]]]
+    [CREATE [when [eq actor after.rider]]]]]
+[permissions Driver
+  [Trip
+    [READ [when [eq actor target.driver]]]
+    [UPDATE [when [eq actor after.driver]]]]
+  [DriverPosition [CREATE [when [eq actor after.driver]]]]]
+[permissions User
+  [DriverPosition [READ [when [eq actor target.driver.trips.rider]]]]]
+
+[type TripOutput [record
+  [field id TripID] [field status TripStatus] [field fare Fare] [field createdAt DateTime]]]
+[type PositionOutput [record
+  [field latitude Latitude] [field longitude Longitude] [field receivedAt DateTime]]]
+
+[query MyTrips
+  [input userId UserID]
+  [output [list TripOutput [max 20]]]
+  [http GET "/api/users/{userId}/trips"]
+  [user [entity $userId]]
+  [result [order [last user.trips 20] Trip.createdAt DESC]]]
+
+[query Trip
+  [input tripId TripID]
+  [output TripOutput]
+  [http GET "/api/trips/{tripId}"]
+  [result [entity $tripId]]]
+
+[query LiveDriver
+  [input driverId DriverID]
+  [output PositionOutput]
+  [websocket "/ws" [source DriverPosition]]
+  [driver [entity $driverId]]
+  [result [live driver.positions]]]
+
+[mutate RequestTrip
+  [input riderId UserID]
+  [input pickupLat Latitude]
+  [input pickupLng Longitude]
+  [input dropoffLat Latitude]
+  [input dropoffLng Longitude]
+  [input fare Fare]
+  [output TripOutput]
+  [http POST "/api/trips" [status 201]]
+  [atomic]
+  [rider [entity $riderId]]
+  [trip [create Trip [record
+    [id [new TripID]] [rider rider] [pickupLat $pickupLat] [pickupLng $pickupLng]
+    [dropoffLat $dropoffLat] [dropoffLng $dropoffLng]
+    [fare $fare] [status REQUESTED] [createdAt request.time]]]]
+  [result trip]]
+
+[mutate AcceptTrip
+  [input tripId TripID]
+  [input driverId DriverID]
+  [output TripOutput]
+  [http POST "/api/trips/{tripId}/accept"]
+  [atomic]
+  [trip [entity $tripId]]
+  [driver [entity $driverId]]
+  [assigned [set trip.driver driver]]
+  [matched [set trip.status MATCHED]]
+  [result trip]]

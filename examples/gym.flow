@@ -1,0 +1,147 @@
+# Neighborhood gym: members, plans, check-ins, and classes.
+
+[type UserID [id User]]
+[type PlanID [id Plan]]
+[type MembershipID [id Membership]]
+[type ClassID [id ClassSession]]
+[type BookingID [id Booking]]
+[type CheckInID [id CheckIn]]
+[type RequestID [id Request]]
+[type Capacity [integer [range 1 40]]]
+[type Price [decimal [range 1 [pow 10 5]] [scale 2]]]
+[type DurationMinutes [integer [range 30 120]]]
+
+[enum Role STAFF INSTRUCTOR]
+[enum PlanKind MONTHLY YEARLY DROP_IN]
+[enum MembershipStatus ACTIVE FROZEN CANCELLED]
+[enum ClassKind YOGA STRENGTH SPIN]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field email String]
+  [field memberships [list Membership] [inverse Membership.member]]
+  [field bookings [list Booking] [inverse Booking.member]]]
+
+[entity Plan
+  [field id PlanID]
+  [field name String]
+  [field kind PlanKind]
+  [field price Price]]
+
+[entity Membership
+  [field id MembershipID]
+  [field member User]
+  [field plan Plan]
+  [field status MembershipStatus]
+  [field startedAt DateTime]]
+
+[entity ClassSession
+  [field id ClassID]
+  [field title String]
+  [field kind ClassKind]
+  [field startsAt DateTime]
+  [field duration DurationMinutes]
+  [field capacity Capacity]
+  [field instructor User]
+  [field bookings [list Booking] [inverse Booking.session]]]
+
+[entity Booking
+  [field id BookingID]
+  [field member User]
+  [field session ClassSession]
+  [field createdAt DateTime]]
+
+[entity CheckIn
+  [field id CheckInID]
+  [field member User]
+  [field at DateTime]]
+
+[seed Plan [rows
+  [record [id "p1"] [name "Month"] [kind MONTHLY] [price 990.00]]
+  [record [id "p2"] [name "Year"] [kind YEARLY] [price 9900.00]]
+  [record [id "p3"] [name "Drop-in"] [kind DROP_IN] [price 180.00]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [email "petra@example.test"]]
+  [record [id "ins"] [identitySubject "idp:ins"] [roles [list INSTRUCTOR]] [name "Iva"] [email "iva@gym.test"]]
+  [record [id "st"] [identitySubject "idp:st"] [roles [list STAFF]] [name "Desk"] [email "desk@gym.test"]]]]
+[seed ClassSession [rows
+  [record [id "c1"] [title "Morning yoga"] [kind YOGA] [startsAt "2026-10-06T07:00:00Z"]
+    [duration 60] [capacity 16] [instructor "ins"]]
+  [record [id "c2"] [title "Spin 45"] [kind SPIN] [startsAt "2026-10-06T18:00:00Z"]
+    [duration 45] [capacity 20] [instructor "ins"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "gym"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Plan [READ [when true]]]
+  [ClassSession [READ [when true]]]]
+
+[permissions User
+  [Membership
+    [READ [when [or [eq actor target.member] [contains actor.roles STAFF]]]]
+    [CREATE [when [or [eq actor after.member] [contains actor.roles STAFF]]]]]
+  [Booking
+    [READ [when [or [eq actor target.member] [eq actor target.session.instructor]]]]
+    [CREATE [when [eq actor after.member]]]]
+  [CheckIn
+    [READ [when [or [eq actor target.member] [contains actor.roles STAFF]]]]
+    [CREATE [when [contains actor.roles STAFF]]]]]
+
+[type PlanOutput [record [field id PlanID] [field name String] [field kind PlanKind] [field price Price]]]
+[type ClassOutput [record
+  [field id ClassID] [field title String] [field kind ClassKind] [field startsAt DateTime]]]
+[type MembershipOutput [record [field id MembershipID] [field status MembershipStatus]]]
+[type BookingOutput [record [field id BookingID] [field createdAt DateTime]]]
+
+[query Plans
+  [output [list PlanOutput [max 10]]]
+  [http GET "/api/plans"]
+  [result [first [entities Plan] 10]]]
+
+[query Schedule
+  [output [list ClassOutput [max 50]]]
+  [http GET "/api/classes"]
+  [result [first [entities ClassSession] 50]]]
+
+[mutate StartMembership
+  [input memberId UserID]
+  [input planId PlanID]
+  [output MembershipOutput]
+  [http POST "/api/memberships" [status 201]]
+  [atomic]
+  [member [entity $memberId]]
+  [plan [entity $planId]]
+  [membership [create Membership [record
+    [id [new MembershipID]] [member member] [plan plan]
+    [status ACTIVE] [startedAt request.time]]]]
+  [result membership]]
+
+[mutate BookClass
+  [input memberId UserID]
+  [input sessionId ClassID]
+  [output BookingOutput]
+  [http POST "/api/bookings" [status 201]]
+  [atomic]
+  [member [entity $memberId]]
+  [session [entity $sessionId]]
+  [booking [create Booking [record
+    [id [new BookingID]] [member member] [session session] [createdAt request.time]]]]
+  [result booking]]
+
+[mutate CheckInMember
+  [input memberId UserID]
+  [output CheckIn]
+  [http POST "/api/check-ins" [status 201]]
+  [atomic]
+  [member [entity $memberId]]
+  [checkIn [create CheckIn [record
+    [id [new CheckInID]] [member member] [at request.time]]]]
+  [result checkIn]]

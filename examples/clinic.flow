@@ -1,0 +1,135 @@
+# Neighborhood clinic: patients, practitioners, slots, and visits.
+
+[type UserID [id User]]
+[type PractitionerID [id Practitioner]]
+[type SlotID [id Slot]]
+[type VisitID [id Visit]]
+[type NoteID [id ClinicalNote]]
+[type RequestID [id Request]]
+[type DurationMinutes [integer [range 10 90]]]
+
+[enum Role RECEPTION NURSE DOCTOR]
+[enum Specialty GP PEDIATRICS DERMATOLOGY]
+[enum SlotStatus OPEN BOOKED CANCELLED]
+[enum VisitStatus SCHEDULED IN_PROGRESS COMPLETED NO_SHOW]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field email String]
+  [field visits [list Visit] [inverse Visit.patient]]]
+
+[entity Practitioner
+  [field id PractitionerID]
+  [field name String]
+  [field specialty Specialty]
+  [field slots [list Slot] [inverse Slot.practitioner]]
+  [field visits [list Visit] [inverse Visit.practitioner]]]
+
+[entity Slot
+  [field id SlotID]
+  [field practitioner Practitioner]
+  [field startsAt DateTime]
+  [field duration DurationMinutes]
+  [field status SlotStatus]]
+
+[entity Visit
+  [field id VisitID]
+  [field patient User]
+  [field practitioner Practitioner]
+  [field slot Slot]
+  [field status VisitStatus]
+  [field createdAt DateTime]
+  [field notes [list ClinicalNote] [inverse ClinicalNote.visit]]]
+
+[entity ClinicalNote
+  [field id NoteID]
+  [field visit Visit]
+  [field author User]
+  [field body String]
+  [field createdAt DateTime]]
+
+[seed Practitioner [rows
+  [record [id "p1"] [name "MUDr. Novák"] [specialty GP]]
+  [record [id "p2"] [name "MUDr. Svobodová"] [specialty PEDIATRICS]]]]
+[seed Slot [rows
+  [record [id "s1"] [practitioner "p1"] [startsAt "2026-10-06T08:00:00Z"] [duration 20] [status OPEN]]
+  [record [id "s2"] [practitioner "p1"] [startsAt "2026-10-06T08:20:00Z"] [duration 20] [status OPEN]]
+  [record [id "s3"] [practitioner "p2"] [startsAt "2026-10-06T09:00:00Z"] [duration 30] [status OPEN]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"]]
+  [record [id "doc"] [identitySubject "idp:doc"] [roles [list DOCTOR]] [name "Clinic doctor"] [email "doc@example.test"]]
+  [record [id "desk"] [identitySubject "idp:desk"] [roles [list RECEPTION]] [name "Reception"] [email "desk@example.test"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "clinic"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Practitioner [READ [when true]]]
+  [Slot [READ [when [eq target.status OPEN]]]]]
+
+[permissions User
+  [User [READ [when [or [eq actor target] [contains actor.roles RECEPTION] [contains actor.roles DOCTOR]]]]]
+  [Visit
+    [READ [when [or
+      [eq actor target.patient]
+      [contains actor.roles DOCTOR]
+      [contains actor.roles RECEPTION]]]]
+    [CREATE [when [or [eq actor after.patient] [contains actor.roles RECEPTION]]]]]
+  [ClinicalNote
+    [READ [when [or [contains actor.roles DOCTOR] [contains actor.roles NURSE]]]]
+    [CREATE [when [contains actor.roles DOCTOR]]]]
+  [Slot [UPDATE [when [or [eq actor after.visit.patient] [contains actor.roles RECEPTION]]]]]]
+
+[type SlotOutput [record
+  [field id SlotID] [field startsAt DateTime] [field duration DurationMinutes] [field status SlotStatus]]]
+[type VisitOutput [record
+  [field id VisitID] [field status VisitStatus] [field createdAt DateTime]]]
+[type NoteOutput [record [field id NoteID] [field body String] [field createdAt DateTime]]]
+
+[query OpenSlots
+  [input practitionerId PractitionerID]
+  [output [list SlotOutput [max 50]]]
+  [http GET "/api/practitioners/{practitionerId}/slots"]
+  [practitioner [entity $practitionerId]]
+  [result [order [last practitioner.slots 50] Slot.startsAt ASC]]]
+
+[query MyVisits
+  [input userId UserID]
+  [output [list VisitOutput [max 20]]]
+  [http GET "/api/users/{userId}/visits"]
+  [user [entity $userId]]
+  [result [order [last user.visits 20] Visit.createdAt DESC]]]
+
+[mutate BookVisit
+  [input patientId UserID]
+  [input slotId SlotID]
+  [output VisitOutput]
+  [http POST "/api/visits" [status 201]]
+  [atomic]
+  [patient [entity $patientId]]
+  [slot [entity $slotId]]
+  [booked [set slot.status BOOKED]]
+  [visit [create Visit [record
+    [id [new VisitID]] [patient patient] [practitioner slot.practitioner]
+    [slot slot] [status SCHEDULED] [createdAt request.time]]]]
+  [result visit]]
+
+[mutate AddNote
+  [input visitId VisitID]
+  [input authorId UserID]
+  [input body String]
+  [output NoteOutput]
+  [http POST "/api/visits/{visitId}/notes" [status 201]]
+  [atomic]
+  [visit [entity $visitId]]
+  [author [entity $authorId]]
+  [note [create ClinicalNote [record
+    [id [new NoteID]] [visit visit] [author author] [body $body] [createdAt request.time]]]]
+  [result note]]

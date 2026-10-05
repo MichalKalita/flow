@@ -1,0 +1,156 @@
+# Issue tracker: projects, tickets, comments, and labels.
+
+[type UserID [id User]]
+[type ProjectID [id Project]]
+[type TicketID [id Ticket]]
+[type CommentID [id Comment]]
+[type LabelID [id Label]]
+[type RequestID [id Request]]
+[type StoryPoints [integer [range 1 13]]]
+
+[enum Role MAINTAINER]
+[enum TicketKind BUG FEATURE TASK]
+[enum TicketStatus OPEN IN_PROGRESS REVIEW DONE]
+[enum Priority LOW MEDIUM HIGH]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 1]]]
+  [field name String]
+  [field email String]
+  [field tickets [list Ticket] [inverse Ticket.reporter]]]
+
+[entity Project
+  [field id ProjectID]
+  [field key String [unique]]
+  [field name String]
+  [field tickets [list Ticket] [inverse Ticket.project]]
+  [field labels [list Label] [inverse Label.project]]]
+
+[entity Label
+  [field id LabelID]
+  [field project Project]
+  [field name String]]
+
+[entity Ticket
+  [field id TicketID]
+  [field project Project]
+  [field reporter User]
+  [field assignee [optional User]]
+  [field title String]
+  [field body String]
+  [field kind TicketKind]
+  [field status TicketStatus]
+  [field priority Priority]
+  [field points [optional StoryPoints]]
+  [field createdAt DateTime]
+  [field comments [list Comment] [inverse Comment.ticket]]]
+
+[entity Comment
+  [field id CommentID]
+  [field ticket Ticket]
+  [field author User]
+  [field body String]
+  [field createdAt DateTime]]
+
+[seed Project [rows
+  [record [id "p1"] [key "FLOW"] [name "Flow runtime"]]
+  [record [id "p2"] [key "ADMIN"] [name "Admin console"]]]]
+[seed Label [rows
+  [record [id "l1"] [project "p1"] [name "runtime"]]
+  [record [id "l2"] [project "p1"] [name "permissions"]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [email "petra@example.test"]]
+  [record [id "m1"] [identitySubject "idp:m1"] [roles [list MAINTAINER]] [name "Maintainer"] [email "ops@example.test"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "tracker"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Project [READ [when true]]]
+  [Label [READ [when true]]]]
+
+[permissions User
+  [Ticket
+    [READ [when true]]
+    [CREATE [when [eq actor after.reporter]]]
+    [UPDATE [when [or
+      [eq actor target.reporter]
+      [eq actor target.assignee]
+      [contains actor.roles MAINTAINER]]]]]
+  [Comment
+    [READ [when true]]
+    [CREATE [when [eq actor after.author]]]]]
+
+[type ProjectOutput [record [field id ProjectID] [field key String] [field name String]]]
+[type TicketOutput [record
+  [field id TicketID] [field title String] [field kind TicketKind]
+  [field status TicketStatus] [field priority Priority] [field createdAt DateTime]]]
+[type CommentOutput [record [field id CommentID] [field body String] [field createdAt DateTime]]]
+
+[query Projects
+  [output [list ProjectOutput [max 50]]]
+  [http GET "/api/projects"]
+  [result [first [entities Project] 50]]]
+
+[query ProjectTickets
+  [input projectId ProjectID]
+  [output [list TicketOutput [max 100]]]
+  [http GET "/api/projects/{projectId}/tickets"]
+  [project [entity $projectId]]
+  [result [order [last project.tickets 100] Ticket.createdAt DESC]]]
+
+[query Ticket
+  [input ticketId TicketID]
+  [output TicketOutput]
+  [http GET "/api/tickets/{ticketId}"]
+  [result [entity $ticketId]]]
+
+[mutate OpenTicket
+  [input reporterId UserID]
+  [input projectId ProjectID]
+  [input title String]
+  [input body String]
+  [input kind TicketKind]
+  [input priority Priority]
+  [output TicketOutput]
+  [http POST "/api/tickets" [status 201]]
+  [atomic]
+  [reporter [entity $reporterId]]
+  [project [entity $projectId]]
+  [ticket [create Ticket [record
+    [id [new TicketID]] [reporter reporter] [project project]
+    [title $title] [body $body] [kind $kind] [status OPEN]
+    [priority $priority] [createdAt request.time]]]]
+  [result ticket]]
+
+[mutate CommentOnTicket
+  [input ticketId TicketID]
+  [input authorId UserID]
+  [input body String]
+  [output CommentOutput]
+  [http POST "/api/tickets/{ticketId}/comments" [status 201]]
+  [atomic]
+  [ticket [entity $ticketId]]
+  [author [entity $authorId]]
+  [comment [create Comment [record
+    [id [new CommentID]] [ticket ticket] [author author]
+    [body $body] [createdAt request.time]]]]
+  [result comment]]
+
+[mutate AssignTicket
+  [input ticketId TicketID]
+  [input assigneeId UserID]
+  [output TicketOutput]
+  [http POST "/api/tickets/{ticketId}/assign"]
+  [atomic]
+  [ticket [entity $ticketId]]
+  [assignee [entity $assigneeId]]
+  [setAssignee [set ticket.assignee assignee]]
+  [progress [set ticket.status IN_PROGRESS]]
+  [result ticket]]

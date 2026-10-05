@@ -1,0 +1,154 @@
+# Neighborhood restaurant: tables, reservations, and a daily menu.
+
+[type UserID [id User]]
+[type TableID [id Table]]
+[type DishID [id Dish]]
+[type ReservationID [id Reservation]]
+[type OrderID [id Order]]
+[type RequestID [id Request]]
+[type SeatCount [integer [range 1 12]]]
+[type PartySize [integer [range 1 12]]]
+[type Price [decimal [range 1 [pow 10 5]] [scale 2]]]
+[type OrderTotal [decimal [range 1 [mul 30 [pow 10 5]]] [scale 2]]]
+[type Quantity [integer [range 1 20]]]
+
+[enum Role HOST KITCHEN]
+[enum ReservationStatus REQUESTED CONFIRMED SEATED CANCELLED]
+[enum Course STARTER MAIN DESSERT DRINK]
+[enum OrderStatus OPEN SERVED PAID]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field phone String]
+  [field reservations [list Reservation] [inverse Reservation.guest]]]
+
+[entity Table
+  [field id TableID]
+  [field label String]
+  [field seats SeatCount]
+  [field reservations [list Reservation] [inverse Reservation.table]]]
+
+[entity Dish
+  [field id DishID]
+  [field name String]
+  [field course Course]
+  [field price Price]
+  [field available Bool]]
+
+[entity Reservation
+  [field id ReservationID]
+  [field guest User]
+  [field table Table]
+  [field partySize PartySize]
+  [field startsAt DateTime]
+  [field status ReservationStatus]
+  [field createdAt DateTime]]
+
+[type OrderLine [record
+  [field dish Dish]
+  [field name String]
+  [field price Price]
+  [field quantity Quantity]]]
+
+[entity Ticket
+  [field id OrderID]
+  [field reservation Reservation]
+  [field items [list OrderLine [min 1] [max 30]]]
+  [field total OrderTotal]
+  [field status OrderStatus]
+  [field createdAt DateTime]]
+
+[seed Table [rows
+  [record [id "t1"] [label "Window 1"] [seats 2]]
+  [record [id "t2"] [label "Garden 4"] [seats 4]]
+  [record [id "t3"] [label "Banquet"] [seats 10]]]]
+[seed Dish [rows
+  [record [id "d1"] [name "Kulajda"] [course STARTER] [price 95.00] [available true]]
+  [record [id "d2"] [name "Svíčková"] [course MAIN] [price 289.00] [available true]]
+  [record [id "d3"] [name "Pilsner 0.5"] [course DRINK] [price 59.00] [available true]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [phone "+420111"]]
+  [record [id "host"] [identitySubject "idp:host"] [roles [list HOST]] [name "Host stand"] [phone "+420000"]]]]
+
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "restaurant"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user anonymous]]
+
+[permissions *
+  [Dish [READ [when true]]]
+  [Table [READ [when true]]]]
+
+[permissions User
+  [Reservation
+    [READ [when [or [eq actor target.guest] [contains actor.roles HOST]]]]
+    [CREATE [when [eq actor after.guest]]]
+    [UPDATE [when [contains actor.roles HOST]]]]
+  [Ticket
+    [READ [when [or [eq actor target.reservation.guest] [contains actor.roles HOST]]]]
+    [CREATE [when [contains actor.roles HOST]]]
+    [UPDATE [when [contains actor.roles KITCHEN]]]]]
+
+[type DishOutput [record [field id DishID] [field name String] [field course Course] [field price Price]]]
+[type ReservationOutput [record
+  [field id ReservationID] [field partySize PartySize]
+  [field startsAt DateTime] [field status ReservationStatus]]]
+[type MenuItem [record [field dishId DishID] [field quantity Quantity]]]
+
+[query Menu
+  [output [list DishOutput [max 100]]]
+  [http GET "/api/menu"]
+  [result [first [entities Dish] 100]]]
+
+[query MyReservations
+  [input userId UserID]
+  [output [list ReservationOutput [max 20]]]
+  [http GET "/api/users/{userId}/reservations"]
+  [user [entity $userId]]
+  [result [order [last user.reservations 20] Reservation.startsAt DESC]]]
+
+[mutate BookTable
+  [input guestId UserID]
+  [input tableId TableID]
+  [input partySize PartySize]
+  [input startsAt DateTime]
+  [output ReservationOutput]
+  [http POST "/api/reservations" [status 201]]
+  [atomic]
+  [guest [entity $guestId]]
+  [table [entity $tableId]]
+  [reservation [create Reservation [record
+    [id [new ReservationID]] [guest guest] [table table]
+    [partySize $partySize] [startsAt $startsAt]
+    [status REQUESTED] [createdAt request.time]]]]
+  [result reservation]]
+
+[mutate ConfirmReservation
+  [input reservationId ReservationID]
+  [output ReservationOutput]
+  [http POST "/api/reservations/{reservationId}/confirm"]
+  [atomic]
+  [reservation [entity $reservationId]]
+  [updated [set reservation.status CONFIRMED]]
+  [result reservation]]
+
+[mutate OpenTicket
+  [input reservationId ReservationID]
+  [input items [list MenuItem [min 1] [max 30]]]
+  [output Ticket]
+  [http POST "/api/tickets" [status 201]]
+  [atomic]
+  [reservation [entity $reservationId]]
+  [lines [map $items item
+    [dish [entity item.dishId]]
+    [snapshot [record [dish dish] [name dish.name] [price dish.price] [quantity item.quantity]]]]]
+  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
+  [ticket [create Ticket [record
+    [id [new OrderID]] [reservation reservation] [items lines.snapshot]
+    [total total] [status OPEN] [createdAt request.time]]]]
+  [result ticket]]
