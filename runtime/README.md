@@ -138,9 +138,13 @@ Integrační testy pokrývají objednávky, rollback, vlastnictví, autentizaci,
 
 ## Built-in observability and administration
 
-The production target is a VPS with one shared CPU and 2 GB RAM. HTTP, MQTT,
+The minimum host is a VPS with one shared CPU and 2 GB RAM. HTTP, MQTT,
 SQLite, the log writer, telemetry and the dashboard run in one process. No
 Prometheus server, exporter, external dashboard or monitoring database is required.
+On larger machines Tokio worker and blocking threads follow CPU count, and HTTP
+admission scales with CPU and RAM (16 in-flight per CPU, capped by 16 per 2 GiB),
+so a 2 GiB host stays at 16 concurrent application requests. Override with
+`FLOW_TOKIO_WORKERS`, `FLOW_TOKIO_BLOCKING` and `FLOW_HTTP_ADMISSION`.
 
 Set `FLOW_ADMIN_TOKEN` to a secret of at least 32 bytes before starting the server.
 The admin dashboard listens on `127.0.0.1:9090`; `FLOW_ADMIN_BIND` changes its
@@ -231,12 +235,14 @@ thread stacks, active requests and other shared allocations; they do not sum to 
 SQLite disk usage includes the main database, WAL and SHM files. Logical page
 size and telemetry/log disk usage are displayed separately.
 
-The CLI caps Tokio at two async workers and two blocking workers, plus one log
-writer. The public router admits at most 16 simultaneous requests and the admin
-API at most four, rejecting additional requests with HTTP 503. Database work is
-serialized. These limits bound concurrent request buffering, but large uploads
-and application queries can still dominate memory. Validate the actual workload
-on the target VPS; local tests are not a capacity guarantee.
+The CLI sizes Tokio workers and blocking threads from CPU count (at least two
+blocking threads), plus one log writer. The public router admits at least 16
+simultaneous requests and scales with CPU and RAM as above; the admin API admits
+four. Extra application requests return HTTP 503. Each project serializes
+database work on its own lock, so several projects can run in parallel on extra
+cores. These limits bound concurrent request buffering, but large uploads and
+application queries can still dominate memory. Validate the actual workload on
+the host; local tests are not a capacity guarantee.
 
 ### Transactional audit
 

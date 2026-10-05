@@ -15,8 +15,14 @@ pub fn router(runtime: Runtime) -> Router {
     router_shared(Arc::new(Mutex::new(runtime)))
 }
 pub fn router_shared(runtime: Arc<Mutex<Runtime>>) -> Router {
+    router_shared_limited(runtime, 16)
+}
+pub fn router_shared_limited(runtime: Arc<Mutex<Runtime>>, admission: usize) -> Router {
     let observer = runtime.lock().unwrap().observability.clone();
-    let admission = (Arc::new(tokio::sync::Semaphore::new(16)), observer);
+    let admission = (
+        Arc::new(tokio::sync::Semaphore::new(admission.max(1))),
+        observer,
+    );
     Router::new()
         .fallback(dispatch)
         .layer(middleware::from_fn_with_state(admission, admit))
@@ -301,8 +307,14 @@ fn json_response(status: u16, body: Value) -> Response {
 }
 
 pub fn router_projects(projects: Arc<crate::projects::Projects>) -> Router {
+    router_projects_limited(projects, 16)
+}
+pub fn router_projects_limited(
+    projects: Arc<crate::projects::Projects>,
+    admission: usize,
+) -> Router {
     let admission = (
-        Arc::new(tokio::sync::Semaphore::new(16)),
+        Arc::new(tokio::sync::Semaphore::new(admission.max(1))),
         projects.system.clone(),
     );
     Router::new()

@@ -8,9 +8,11 @@ use flow_runtime::{
 };
 use std::sync::{Arc, Mutex};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let workers = flow_runtime::resources::tokio_worker_threads();
+    let blocking = flow_runtime::resources::tokio_blocking_threads();
     tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .max_blocking_threads(2)
+        .worker_threads(workers)
+        .max_blocking_threads(blocking)
         .enable_all()
         .build()?
         .block_on(run())
@@ -123,14 +125,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             mqtt::serve(mqtt_listener, mqtt_projects.get("application").unwrap()).await
         }
     });
+    let workers = flow_runtime::resources::tokio_worker_threads();
+    let blocking = flow_runtime::resources::tokio_blocking_threads();
+    let admission = flow_runtime::resources::http_admission();
     println!(
-        "Flow HTTP listening on http://{} (SQLite: {database})",
+        "Flow HTTP listening on http://{} (SQLite: {database}; {workers} Tokio workers, {blocking} blocking, {admission} in-flight)",
         listener.local_addr()?
     );
     let public = if project_mode {
-        http::router_projects(projects.clone())
+        http::router_projects_limited(projects.clone(), admission)
     } else {
-        http::router_shared(projects.get("application").unwrap())
+        http::router_shared_limited(projects.get("application").unwrap(), admission)
     };
     axum::serve(listener, public)
         .with_graceful_shutdown(async {

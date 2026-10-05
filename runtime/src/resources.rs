@@ -218,6 +218,59 @@ pub fn host_memory() -> Value {
         })
     }
 }
+
+const MIN_HTTP_ADMISSION: usize = 16;
+const BASELINE_RAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+pub fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()?
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n >= 1)
+}
+
+pub fn tokio_worker_threads() -> usize {
+    env_usize("FLOW_TOKIO_WORKERS").unwrap_or_else(available_parallelism)
+}
+
+pub fn tokio_blocking_threads() -> usize {
+    env_usize("FLOW_TOKIO_BLOCKING").unwrap_or_else(|| tokio_worker_threads().max(2))
+}
+
+pub fn host_memory_limit_bytes() -> Option<u64> {
+    host_memory()
+        .get("limit_bytes")
+        .and_then(serde_json::Value::as_u64)
+}
+
+pub fn http_admission() -> usize {
+    env_usize("FLOW_HTTP_ADMISSION")
+        .unwrap_or_else(|| http_admission_from(available_parallelism(), host_memory_limit_bytes()))
+}
+
+pub fn http_admission_from(cores: usize, ram_bytes: Option<u64>) -> usize {
+    let cores = cores.max(1);
+    let by_cpu = cores.saturating_mul(16);
+    let by_ram = match ram_bytes {
+        Some(ram) if ram > 0 => {
+            let chunks = ram.div_ceil(BASELINE_RAM_BYTES).max(1);
+            usize::try_from(chunks)
+                .unwrap_or(usize::MAX)
+                .saturating_mul(16)
+        }
+        _ => by_cpu,
+    };
+    by_cpu.min(by_ram).max(MIN_HTTP_ADMISSION)
+}
+
 impl Runtime {
     pub fn storage_resources(&self) -> Value {
         let read = |pragma| {
@@ -261,5 +314,36 @@ impl Runtime {
                 "prepared_statements_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_STMT_USED)
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admission_stays_at_sixteen_on_the_minimum_host() {
+        assert_eq!(
+            http_admission_from(1, Some(BASELINE_RAM_BYTES)),
+            MIN_HTTP_ADMISSION
+        );
+    }
+
+    #[test]
+    fn admission_does_not_exceed_the_two_gib_budget_on_small_ram() {
+        assert_eq!(
+            http_admission_from(8, Some(BASELINE_RAM_BYTES)),
+            MIN_HTTP_ADMISSION
+        );
+    }
+
+    #[test]
+    fn admission_scales_with_cpu_and_ram() {
+        assert_eq!(http_admission_from(8, Some(8 * BASELINE_RAM_BYTES)), 128);
+        assert_eq!(
+            http_admission_from(1, Some(8 * BASELINE_RAM_BYTES)),
+            MIN_HTTP_ADMISSION
+        );
+        assert_eq!(http_admission_from(4, None), 64);
     }
 }

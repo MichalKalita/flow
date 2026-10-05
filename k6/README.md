@@ -9,11 +9,11 @@ reads, signed-in order and device calls, occasional `CreateOrder` /
 other sample projects. JWTs are HS256 tokens for the seeded identities
 `idp:u1`, `idp:u2` and `idp:u3`.
 
-The public HTTP router admits 16 in-flight application requests and SQLite
-serializes database work. The `traffic` profile stays at 8 VUs with think
-time. `stress` ramps past the admission cap so some requests return 503
-`overloaded`. `breakpoint.js` raises arrival rate until errors hit 1%, p50
-exceeds 250 ms, or p95 exceeds 1 s, then aborts.
+The public HTTP router admits at least 16 in-flight application requests and
+scales with CPU and RAM. SQLite work is serialized per project. The `traffic`
+profile stays at 8 VUs with think time. `stress` ramps past a small admission
+cap so some requests return 503 `overloaded`. `breakpoint.js` raises arrival
+rate until errors hit 1%, p50 exceeds 250 ms, or p95 exceeds 1 s, then aborts.
 
 ## Prerequisites
 
@@ -77,8 +77,8 @@ k6 run ./k6/breakpoint.js
 It stops at the first of: HTTP error rate ≥ 1%, p50 ≥ 250 ms, p95 ≥ 1 s.
 Sold-out `POST /demo/api/orders` (400) does not count as an HTTP error.
 If every stage finishes, the host stayed inside those limits up to the last
-stage (20 000 requests/s). The public router admits 16 in-flight requests, so
-error rate usually trips first once arrival outruns that cap.
+stage (20 000 requests/s). Error rate usually trips first once arrival outruns
+HTTP admission (`overloaded` 503).
 
 Override the target and signing key:
 
