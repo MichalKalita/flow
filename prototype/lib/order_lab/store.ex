@@ -37,6 +37,8 @@ defmodule OrderLab.Store do
     do: GenServer.call(__MODULE__, {:ws_authorize, endpoint, credentials, source, params})
 
   def file(id), do: GenServer.call(__MODULE__, {:file, id})
+  def retry_mqtt(id), do: GenServer.call(__MODULE__, {:retry_mqtt, id})
+  def deliver_mqtt, do: GenServer.call(__MODULE__, :deliver_mqtt, 30_000)
   def mqtt_retained, do: GenServer.call(__MODULE__, :mqtt_retained)
 
   def init(_) do
@@ -88,6 +90,7 @@ defmodule OrderLab.Store do
       next_at INTEGER NOT NULL,error_json TEXT,result_json TEXT);
     INSERT OR IGNORE INTO flow_jobs SELECT id,order_id,request_id,'Email.send_confirmation',input_json,state,attempts,max_attempts,retry_delay_ms,final_disposition,next_at,error_json,result_json FROM email_jobs;
     CREATE TABLE IF NOT EXISTS flow_files(id TEXT PRIMARY KEY,value_json TEXT NOT NULL,request_id TEXT NOT NULL REFERENCES requests(id),created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS mqtt_outbox(id TEXT PRIMARY KEY,request_id TEXT NOT NULL REFERENCES requests(id),source TEXT NOT NULL,params_json TEXT NOT NULL,topic TEXT NOT NULL,payload_json TEXT NOT NULL,retained INTEGER NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,accepted_at TEXT,sent_at TEXT,error TEXT);
     CREATE TABLE IF NOT EXISTS mqtt_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,topic TEXT NOT NULL,payload_json TEXT NOT NULL,received_at TEXT NOT NULL,retained INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS mqtt_source_topic ON mqtt_messages(source,topic,id);
     """)
@@ -408,12 +411,70 @@ defmodule OrderLab.Store do
     {:reply, result, state}
   end
 
+  def handle_call(:deliver_mqtt, _, state) do
+    if Process.whereis(OrderLab.MQTT) do
+      case query!(
+             state.db,
+             "SELECT * FROM mqtt_outbox WHERE state IN ('queued','accepted') ORDER BY rowid LIMIT 1"
+           ) do
+        [job] -> deliver_mqtt_job(state, job)
+        [] -> :ok
+      end
+    end
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:retry_mqtt, id}, _, state) do
+    result =
+      case query!(state.db, "SELECT accepted_at FROM mqtt_outbox WHERE id=? AND state='failed'", [
+             id
+           ]) do
+        [job] ->
+          status = if job["accepted_at"], do: "accepted", else: "queued"
+          write!(state.db, "UPDATE mqtt_outbox SET state=?,error=NULL WHERE id=?", [status, id])
+          {:ok, status}
+
+        [] ->
+          :not_found
+      end
+
+    {:reply, result, state}
+  end
+
   def handle_call(:mqtt_retained, _, state) do
-    {:reply,
-     query!(
-       state.db,
-       "SELECT topic,payload_json FROM mqtt_messages WHERE retained=1 ORDER BY id"
-     ), state}
+    rows =
+      query!(
+        state.db,
+        "SELECT source,topic,payload_json FROM mqtt_messages WHERE retained=1 ORDER BY id"
+      )
+      |> Enum.filter(fn row ->
+        try do
+          source = Map.fetch!(state.steps.mqtt, row["source"])
+          template = String.split(source.topic, "/")
+          parts = String.split(row["topic"], "/")
+          unless length(template) == length(parts), do: raise("Topic contract changed")
+
+          values =
+            Enum.zip(template, parts)
+            |> Enum.reduce(%{}, fn {pattern, value}, values ->
+              case Regex.run(~r/^\{([A-Za-z_][A-Za-z_0-9]*)\}$/, pattern) do
+                [_, name] -> Map.put(values, name, value)
+                nil -> if pattern == value, do: values, else: raise("Topic contract changed")
+              end
+            end)
+
+          parameters = Enum.map(source.params, &Map.fetch!(values, &1.name))
+          OrderLab.Language.Native.mqtt_target!(state.steps, source.name, parameters)
+          OrderLab.Language.Types.validate!(Jason.decode!(row["payload_json"]), source.payload)
+          true
+        rescue
+          _ -> false
+        end
+      end)
+      |> Enum.map(&Map.take(&1, ["topic", "payload_json"]))
+
+    {:reply, rows, state}
   end
 
   def handle_call({:reject, input, status, code, message, method, path}, _, %{db: db} = state) do
@@ -450,7 +511,10 @@ defmodule OrderLab.Store do
         |> Enum.map(&decode(&1, ["input_json", "error_json", "result_json"])),
       "workflow" => state.steps.source,
       "workflow_path" => state.steps.file,
-      "websocket" => OrderLab.PubSub.stats()
+      "websocket" => OrderLab.PubSub.stats(),
+      "mqtt_outbox" =>
+        query!(db, "SELECT * FROM mqtt_outbox ORDER BY rowid DESC LIMIT 100")
+        |> Enum.map(&decode(&1, ["params_json", "payload_json"]))
     }
 
     {:reply, result, state}
@@ -610,6 +674,111 @@ defmodule OrderLab.Store do
       end
 
     {:reply, result, state}
+  end
+
+  defp prepare_mqtt_job(state, job) do
+    source = Map.fetch!(state.steps.mqtt, job["source"])
+    params = Jason.decode!(job["params_json"])
+    parameters = Enum.map(source.params, &params[&1.name])
+
+    {_, checked, topic} =
+      OrderLab.Language.Native.mqtt_target!(state.steps, source.name, parameters)
+
+    unless checked == params and topic == job["topic"],
+      do: raise("Outbox source contract changed")
+
+    value =
+      Jason.decode!(job["payload_json"]) |> OrderLab.Language.Types.validate!(source.payload)
+
+    {:ok, source, params, parameters, topic, value}
+  rescue
+    error -> {:error, Exception.message(error)}
+  end
+
+  defp deliver_mqtt_job(state, job) do
+    case prepare_mqtt_job(state, job) do
+      {:error, message} ->
+        write!(state.db, "UPDATE mqtt_outbox SET state='failed',error=? WHERE id=?", [
+          message,
+          job["id"]
+        ])
+
+      {:ok, source, params, parameters, topic, value} ->
+        deliver_prepared_mqtt_job(state, job, source, params, parameters, topic, value)
+    end
+  end
+
+  defp deliver_prepared_mqtt_job(state, job, source, params, parameters, topic, value) do
+    db = state.db
+
+    try do
+      timestamp = job["accepted_at"] || now()
+
+      if job["state"] == "queued" do
+        exec!(db, "BEGIN IMMEDIATE")
+
+        if job["retained"] == 1,
+          do: write!(db, "UPDATE mqtt_messages SET retained=0 WHERE topic=?", [topic])
+
+        write!(
+          db,
+          "INSERT INTO mqtt_messages(source,topic,payload_json,received_at,retained) VALUES (?,?,?,?,?)",
+          [source.name, topic, json(value), timestamp, job["retained"]]
+        )
+
+        write!(db, "UPDATE mqtt_outbox SET state='accepted',accepted_at=? WHERE id=?", [
+          timestamp,
+          job["id"]
+        ])
+
+        exec!(db, "COMMIT")
+      end
+
+      OrderLab.Checkpoint.probe(
+        %{"id" => job["id"], "time" => timestamp, "path" => "mqtt_outbox"},
+        :mqtt_accepted
+      )
+
+      Enum.filter(state.steps.endpoints, &(&1.method == "MQTT" and &1.path == source.name))
+      |> Enum.each(fn endpoint ->
+        handle_call(
+          {:execute, endpoint, Map.put(params, "message", value), topic,
+           "mqtt-outbox:" <> job["id"]},
+          nil,
+          state
+        )
+      end)
+
+      OrderLab.PubSub.broadcast({source.name, parameters}, %{
+        "type" => "message",
+        "source" => source.name,
+        "params" => params,
+        "payload" => value,
+        "received_at" => timestamp
+      })
+
+      :ok = OrderLab.MQTT.forward(topic, job["payload_json"])
+
+      write!(db, "UPDATE mqtt_outbox SET state='sent',sent_at=?,error=NULL WHERE id=?", [
+        now(),
+        job["id"]
+      ])
+    rescue
+      error ->
+        SQL.execute(db, "ROLLBACK")
+        # Keep transport failures retryable; a contract failure needs inspection.
+        row = query!(db, "SELECT state FROM mqtt_outbox WHERE id=?", [job["id"]]) |> List.first()
+        status = if row["state"] == "queued", do: "failed", else: "accepted"
+
+        write!(db, "UPDATE mqtt_outbox SET state=?,error=? WHERE id=?", [
+          status,
+          Exception.message(error),
+          job["id"]
+        ])
+    catch
+      :exit, reason ->
+        write!(db, "UPDATE mqtt_outbox SET error=? WHERE id=?", [inspect(reason), job["id"]])
+    end
   end
 
   defp websocket_result(fun) do

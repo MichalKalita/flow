@@ -139,6 +139,38 @@ defmodule OrderLab.Language.Native do
               raise Failure, status: 422, code: error["code"], message: error["message"]
           end
 
+        :publish ->
+          {definition, params, topic} = mqtt_target!(program, args.source, args.parameters)
+          value = Types.validate!(args.value, definition.payload)
+          payload = Jason.encode!(value)
+
+          if byte_size(topic) + byte_size(payload) + 4 > 64_000,
+            do:
+              raise(Failure,
+                status: 422,
+                code: "mqtt_message_too_large",
+                message: "MQTT message exceeds 64 kB"
+              )
+
+          id = Evaluator.builtin("uuid", ["publish"])
+
+          query!(
+            db,
+            "INSERT INTO mqtt_outbox(id,request_id,source,params_json,topic,payload_json,retained,state,created_at) VALUES (?,?,?,?,?,?,?,'queued',?)",
+            [
+              id,
+              request["id"],
+              args.source,
+              Jason.encode!(params),
+              topic,
+              payload,
+              if(args.retain, do: 1, else: 0),
+              request["time"]
+            ]
+          )
+
+          %{"id" => id, "state" => "queued"}
+
         :queue ->
           op = Map.fetch!(operations(), args.operation)
           input = Types.validate!(args.input, op.input)
@@ -174,7 +206,7 @@ defmodule OrderLab.Language.Native do
     end
   end
 
-  def source(db, program, {name, parameters}, cutoff) do
+  def mqtt_target!(program, name, parameters) do
     definition = Map.fetch!(program.mqtt, name)
     unless length(parameters) == length(definition.params), do: raise("Wrong source arity")
 
@@ -194,6 +226,16 @@ defmodule OrderLab.Language.Native do
 
         String.replace(topic, "{#{param.name}}", encoded)
       end)
+
+    values =
+      Enum.zip(definition.params, parameters)
+      |> Map.new(fn {param, value} -> {param.name, value} end)
+
+    {definition, values, topic}
+  end
+
+  def source(db, program, {name, parameters}, cutoff) do
+    {definition, _, topic} = mqtt_target!(program, name, parameters)
 
     threshold =
       DateTime.from_iso8601(cutoff)

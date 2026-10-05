@@ -4,6 +4,8 @@ defmodule OrderLab.MQTT do
   import Bitwise
   def start_link(_), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
+  def forward(topic, payload), do: GenServer.call(__MODULE__, {:publish, topic, payload})
+
   def init(_) do
     port = System.get_env("MQTT_PORT", "1883") |> String.to_integer()
 

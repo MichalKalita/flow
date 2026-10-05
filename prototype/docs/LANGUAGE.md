@@ -96,7 +96,7 @@ TRANSACTION
 RESPONSE 201 WITH {note: note, payment: payment, job: job}
 ```
 
-Zápisy a `QUEUE` vyžadují aktivní transakci. `COMMIT` musí být právě jednou, mimo iteraci; po něm se nesmí provádět další účinky. Chyba před commitem vrací databázi do původního stavu. Vnořená transakce není podporována. `INSERT` vrací vložený záznam, `UPDATE` seznam změněných záznamů a `DELETE` seznam výsledků hostitelského adaptéru. Změny jsou hodnoty a nevymění automaticky dříve navázaný snapshot.
+Zápisy, `QUEUE` a `PUBLISH` vyžadují aktivní transakci. `COMMIT` musí být právě jednou, mimo iteraci; po něm se ve stejném transakčním bloku nesmí provádět další účinky. Chyba před commitem vrací databázi do původního stavu. Vnořená transakce není podporována. `INSERT` vrací vložený záznam, `UPDATE` seznam změněných záznamů a `DELETE` seznam výsledků hostitelského adaptéru. Změny jsou hodnoty a nevymění automaticky dříve navázaný snapshot.
 
 `CALL` provádí registrovanou externí operaci. Databázový rollback sám nevrací externí účinky; host musí respektovat kontrakt operace a případně zajistit kompenzaci. `QUEUE` deklaruje odložené volání, počet pokusů, prodlevu a osud po posledním neúspěchu (`RETAIN`/`DELETE`). Trvalá fronta `flow_jobs` se zapisuje ve stejné transakci jako obchodní změny. Worker provádí registrované operace a zaznamenává pokusy. Kontrakty jsou v `Native.operations/0`; vstupy a úspěšné výstupy se validují.
 
@@ -143,7 +143,7 @@ Scénář používá jméno typovaného zdroje a parametry. `PARAM` odpovídá `
 
 Zdroj vrací historii a případně poslední starší hodnotu. `HISTORY` určuje uchovávané okno, ale poslední zpráva a retained zprávy se uchovávají i mimo něj. Přesné okno proto vyžaduje explicitní `WHERE`. `LAST FROM` vrátí poslední známý stav. Dotazy zahrnují pouze zprávy přijaté do `request.time`; Store serializuje celý scénář. `ago(5, "minutes")` počítá od času vyhodnocení a podporuje `ms`, `seconds`, `minutes`, `hours`.
 
-MQTT 3.1.1 server na `127.0.0.1:1883` (`MQTT_PORT`) podporuje CONNECT, PUBLISH QoS 0/1, SUBSCRIBE (doručení QoS 0), UNSUBSCRIBE, retained zprávy, PING a DISCONNECT. QoS 1 potvrzuje až po validaci a uložení. Posledních 100 QoS 1 identifikátorů deduplikuje při DUP v rámci spojení. Neplatný payload nebo nedeklarovaný topic ukončí spojení bez PUBACK. Prázdný retained payload ruší retained stav. SQLite uchová historii i retained stav přes restart. Broker zatím nemá persistent sessions, QoS 2, will messages, TLS ani autentizaci. MQTT slouží také jako spouštěč `ON MQTT`; odchozí PUBLISH ještě není implementované.
+MQTT 3.1.1 server na `127.0.0.1:1883` (`MQTT_PORT`) podporuje CONNECT, PUBLISH QoS 0/1, SUBSCRIBE (doručení QoS 0), UNSUBSCRIBE, retained zprávy, PING a DISCONNECT. QoS 1 potvrzuje až po validaci a uložení. Posledních 100 QoS 1 identifikátorů deduplikuje při DUP v rámci spojení. Neplatný payload nebo nedeklarovaný topic ukončí spojení bez PUBACK. Prázdný retained payload ruší retained stav. SQLite uchová historii i retained stav přes restart. Broker zatím nemá persistent sessions, QoS 2, will messages, TLS ani autentizaci. MQTT slouží také jako spouštěč `ON MQTT`; odchozí typovaný PUBLISH používá transakční frontu popsanou níže.
 
 ## Tabulky, HTTP a ověření
 
@@ -294,8 +294,44 @@ Při startu Store vyhledá rozpracované požadavky s checkpointem a obnoví ty,
 
 Obnova podporuje podmíněné COMMIT, lokální rozsah větví, RETURN uvnitř transakce i další navazující transakce. Každý již potvrzený prefix zůstává potvrzený; pozdější chyba nemůže zpětně vrátit dřívější COMMIT. Pád před prvním commitem vrátí otevřenou SQLite transakci; čistě nativní scénář lze obnovit od počátečního checkpointu.
 
-Automatická obnova je povolena, pokud zbývající pokračování obsahuje jen výrazy, čtení, nativní transakční zápisy, QUEUE a operace deklarované jako pure/read. Pokud by pokračování mohlo znovu vykonat externí CALL bez bezpečného retry kontraktu, runtime jej automaticky nespustí. Požadavek zůstane running; opakování se stejným klíčem vrátí `409 outcome_unknown`. To se může stát například při pádu po vytvoření externí platby, ale před potvrzením první transakce. SQLite rollback nesmaže případný účinek u externího poskytovatele. Samostatný trvalý protokol pro externí operace a jejich idempotenci/kompenzaci zatím chybí.
+Automatická obnova je povolena, pokud zbývající pokračování obsahuje jen výrazy, čtení, nativní transakční zápisy, QUEUE, PUBLISH a operace deklarované jako pure/read. Pokud by pokračování mohlo znovu vykonat externí CALL bez bezpečného retry kontraktu, runtime jej automaticky nespustí. Požadavek zůstane running; opakování se stejným klíčem vrátí `409 outcome_unknown`. To se může stát například při pádu po vytvoření externí platby, ale před potvrzením první transakce. SQLite rollback nesmaže případný účinek u externího poskytovatele. Samostatný trvalý protokol pro externí operace a jejich idempotenci/kompenzaci zatím chybí.
 
 Checkpoint obsahuje fingerprint zdroje, verze formátu a registru operací. Změněný program nesmí automaticky převzít staré pokračování; obnova vyžaduje původní odpovídající program. Migrace rozpracovaných scénářů zatím není implementovaná. Syntaktická změna zdroje včetně komentáře mění fingerprint. Staré running požadavky bez checkpointu nemají automatickou obnovu. Nejde o HA ani o obnovu živých WebSocket spojení.
 
 E2E testy zastavují skutečný server pomocí SIGKILL přesně před a po COMMIT, restartují jej se stejnou databází a ověřují stav SQL, odpověď, pluginy a frontu. Testovací marker se aktivuje pouze explicitním nastavením `FLOW_E2E_CRASH_MARKER`, `FLOW_E2E_CRASH_PHASE` a `FLOW_E2E_CRASH_ROUTE`; normální běh tyto proměnné nepoužívá.
+
+
+## Typované odchozí MQTT zprávy
+
+PUBLISH používá tentýž typovaný zdroj jako příjem a dotazy; aplikace neskládá raw topic string:
+
+```text
+TYPE MowerAction = String WHERE value IN ["start", "stop"]
+MQTT DeviceCommand
+    TOPIC "devices/{device_id}/command"
+    PARAM device_id DeviceID
+    PAYLOAD {command_id: String, action: MowerAction}
+    HISTORY 24 HOURS
+
+HTTP POST /api/devices/:device_id/commands
+INPUT device_id DeviceID
+INPUT action MowerAction
+INPUT token String
+REQUIRE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id AND EXISTS user IN Users WHERE user.id = access.user_id ELSE 403 forbidden "Přístup k zařízení je zamítnut."
+TRANSACTION
+    outgoing = PUBLISH DeviceCommand(:device_id) WITH {command_id: uuid("command"), action: :action}
+    COMMIT
+RESPONSE 202 WITH outgoing
+```
+
+PUBLISH lze použít bez vazby nebo jako `jméno = PUBLISH …`; vrací `{id: String, state: String}` se stavem queued. Parametry mají přesné typy MQTT PARAM, payload má přesný typ PAYLOAD. Kompilátor odmítne neznámý zdroj, chybnou aritu, pole, typ či známou konstantu mimo rozsah. Runtime znovu validuje vypočítaný payload i hodnoty parametrů; `/`, `+`, `#` a NUL v parametru topicu odmítá. Zpráva včetně topicu má limit 64 kB. Neplatná hodnota vrátí transakci a neodešle žádnou kopii.
+
+Volitelný suffix `RETAIN BoolVýraz` řídí retained stav, výchozí je false. Například `PUBLISH DeviceStatus(:device_id) WITH {online: true, battery: 50} RETAIN true` uloží poslední hodnotu i pro pozdější MQTT subscriber. Příkaz se provádí pouze v aktivní TRANSACTION, stejně jako INSERT a QUEUE. V jedné transakci může být více PUBLISH i PUBLISH uvnitř FOR EACH. Rollback odstraní jejich frontové záznamy; síťový přenos se před commitem neprovádí.
+
+Worker zpracovává potvrzenou SQLite frontu mqtt_outbox. Stavy jsou queued → accepted → sent. Ve stavu accepted již existuje validovaná zpráva v nativní MQTT historii a případný retained stav; toto potvrzení je atomické se změnou stavu fronty. Po restartu se nativní záznam znovu nevloží. Navazující ON MQTT scénář používá stabilní idempotency klíč `mqtt-outbox:<id>`, takže potvrzené obchodní změny handleru se neopakují. Transportní zpráva se rozešle přes lokální broker a typované WebSocket odběry; výsledek handleru je samostatná obchodní operace, ne potvrzení fyzického provedení příkazu na zařízení.
+
+sent znamená dokončení lokálního rozeslání, nikoliv potvrzení od zařízení. Přenos připojeným MQTT subscriberům je QoS 0. Pád mezi rozesláním a označením sent může po obnově vytvořit další živou kopii; konzument potřebuje vlastní deduplikaci, například podle command_id z příkladu. Odpojení klienti mají k dispozici pouze retained hodnotu, pokud je povolená; fronta není trvalou frontou pro každého MQTT či WebSocket klienta. PUBLISH zatím necílí na externí broker.
+
+Před zpracováním se čekající zpráva znovu ověří podle aktuálního kontraktu. Retained hodnoty z historie se při novém MQTT subscribe také ověří; záznamy neplatné podle aktuálního kontraktu se neodešlou. Nekompatibilní změna zdroje nebo payloadu označí čekající záznam failed a uloží chybu, aniž odešle neplatná data. Admin → Živá zařízení ukazuje topic, přesný payload, stav, chybu a původní HTTP/MQTT požadavek. Po opravě kontraktu lze failed záznam obnovit tlačítkem nebo `POST /api/mqtt-outbox/:id/retry`; již sent záznam nelze tímto API zopakovat. Dočasné selhání přenosu ponechá accepted záznam pro další pokus.
+
+Stejný admin panel odesílá příkazy start/stop podle vybraného zařízení a tokenu. E2E testy používají skutečné MQTT subscriptions, WebSocket i Chrome a SIGKILL v queued a accepted fázi. Ověřují rollback, typy, autorizaci HTTP příkazu, native history, retained zprávu, ON MQTT a opravu odmítnuté zprávy po změně kontraktu.

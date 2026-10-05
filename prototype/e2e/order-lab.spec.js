@@ -42,10 +42,10 @@ async function crashServer() {
   const exited=new Promise(resolve=>server.once('exit',resolve));
   process.kill(-server.pid,'SIGKILL');await exited;
 }
-async function crashRequest(route,body,key,phase='after_commit') {
+async function crashRequest(route,body,key,phase='after_commit',probeRoute=route) {
   await stopServer();
   const marker=path.join(directory,'crash-'+key+'.json');
-  await startServer({FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:phase,FLOW_E2E_CRASH_ROUTE:route});
+  await startServer({FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:phase,FLOW_E2E_CRASH_ROUTE:probeRoute});
   const pending=fetch('http://127.0.0.1:4100'+route,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(body)}).catch(()=>null);
   await expect.poll(()=>fs.existsSync(marker)).toBe(true);
   const probe=JSON.parse(fs.readFileSync(marker,'utf8'));
@@ -116,6 +116,19 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/test-publish
+INPUT device_id DeviceID
+INPUT battery Battery
+INPUT delta Int = 0
+INPUT retained Bool = false
+INPUT fail Bool = false
+TRANSACTION
+    outgoing = PUBLISH DeviceStatus(:device_id) WITH {online: true, battery: :battery + :delta} RETAIN :retained
+    WHEN :fail
+        FAIL 409 rollback_publish "Do not send this message"
+    COMMIT
+RESPONSE 202 WITH outgoing
+
 HTTP POST /api/recovery
 INPUT name String
 INPUT branch Bool
@@ -540,6 +553,12 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
       'HTTP POST /bad\nINPUT file File\nCALL Image.resize WITH {image: :file, width: 2, height: 2}\nRETURN true',
       'HTTP POST /bad\nINPUT file File\nCALL Files.put WITH {file: :file}\nRETURN true',
       'WEBSOCKET /ws\n    SOURCE Missing',
+      'HTTP POST /bad\nINPUT id DeviceID\nPUBLISH DeviceStatus(:id) WITH {online: true, battery: 50}\nRETURN true',
+      'HTTP POST /bad\nTRANSACTION\n    PUBLISH Missing("x") WITH {}\n    COMMIT\nRETURN true',
+      'HTTP POST /bad\nTRANSACTION\n    PUBLISH DeviceStatus(7) WITH {online: true, battery: 50}\n    COMMIT\nRETURN true',
+      'HTTP POST /bad\nTRANSACTION\n    PUBLISH DeviceStatus("x") WITH {online: true, battery: 101}\n    COMMIT\nRETURN true',
+      'HTTP POST /bad\nTRANSACTION\n    PUBLISH DeviceStatus("x") WITH {online: true, battery: 50} RETAIN "yes"\n    COMMIT\nRETURN true',
+
       'WEBSOCKET /ws\n    AUTHORIZE "yes"\n    SOURCE DeviceStatus',
       'WEBSOCKET /ws\n    SOURCE DeviceStatus WHERE :device_id > 1',
       'TABLE T = {id: String, rating: Int}\nSEED T WITH [{id: "x", rating: "bad"}]',
@@ -830,6 +849,95 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect(after.plugin_calls.filter(c=>c.request_id===probe.request_id && c.plugin==='Payment')).toHaveLength(0);
     expect(sql(`SELECT status FROM requests WHERE id='${probe.request_id}'`)).toBe('running');
     expect(sql(`SELECT count(*) FROM flow_checkpoints WHERE request_id='${probe.request_id}'`)).toBe('1');
+  });
+
+  test('typed PUBLISH delivers a committed command to a real MQTT subscriber and exposes the outbox request', async ({request}) => {
+    const mqtt=await mqttClient();
+    try {
+      mqtt.socket.write(mqttPacket(0x82,Buffer.concat([Buffer.from([0,1]),mqttString('devices/mower1/command'),Buffer.from([0])])));expect((await mqtt.next()).header).toBe(0x90);
+      const response=await request.post('/api/devices/mower1/commands',{data:{action:'stop',token:'demo-petra'},headers:{'Idempotency-Key':'mqtt-command'}});expect(response.status()).toBe(202);const result=await response.json();
+      const packet=await mqtt.next();expect(packet.header).toBe(0x30);const n=packet.body.readUInt16BE();expect(packet.body.subarray(2,2+n).toString()).toBe('devices/mower1/command');const command=JSON.parse(packet.body.subarray(2+n));expect(command.action).toBe('stop');expect(command.command_id).toMatch(/^command_/);
+      await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.find(job=>job.id===result.id)?.state).toBe('sent');
+      const job=(await snapshot(request)).mqtt_outbox.find(job=>job.id===result.id);expect(job.request_id).toBe(result.request_id);expect(job.payload).toEqual(command);expect(job.params).toEqual({device_id:'mower1'});
+      expect((await request.post('/api/devices/mower1/commands',{data:{action:'dance',token:'demo-petra'}})).status()).toBe(422);
+      const replay=await request.post('/api/devices/mower1/commands',{data:{action:'stop',token:'demo-petra'},headers:{'Idempotency-Key':'mqtt-command'}});expect((await replay.json()).replayed).toBe(true);
+      expect((await snapshot(request)).mqtt_outbox.filter(job=>job.id===result.id)).toHaveLength(1);
+    } finally {mqtt.close();}
+  });
+
+  test('rollback and computed type failures send no MQTT or WebSocket copies; a committed PUBLISH runs ON MQTT once', async ({request}) => {
+    const ws=await wsClient();ws.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'mower1'}});expect((await ws.next()).type).toBe('subscribed');
+    const before=(await snapshot(request)).mqtt_outbox.length;
+    try {
+      let response=await request.post('/api/test-publish',{data:{device_id:'mower1',battery:17,fail:true}});expect(response.status()).toBe(409);
+      response=await request.post('/api/test-publish',{data:{device_id:'mower1',battery:99,delta:2}});expect(response.status()).toBe(422);
+      response=await request.post('/api/test-publish',{data:{device_id:'a/b',battery:50}});expect(response.status()).toBe(422);
+      expect((await snapshot(request)).mqtt_outbox.length).toBe(before);
+      response=await request.post('/api/test-publish',{data:{device_id:'mower1',battery:16},headers:{'Idempotency-Key':'outgoing-low-battery'}});expect(response.status()).toBe(202);const queued=await response.json();
+      expect((await ws.next()).payload.battery).toBe(16);
+      await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.find(job=>job.id===queued.id)?.state).toBe('sent');
+      const requests=(await snapshot(request)).requests.filter(r=>r.idempotency_key==='mqtt-outbox:'+queued.id);expect(requests).toHaveLength(1);expect(requests[0].status).toBe('committed');
+    } finally {ws.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('queued PUBLISH survives SIGKILL after its commit and retained delivery and native history contain one message', async ({request}) => {
+    const input={device_id:'crash-outbox',battery:57,retained:true};const probe=await crashRequest('/api/test-publish',input,'crash-outbox');
+    expect(sql(`SELECT state FROM mqtt_outbox WHERE request_id='${probe.request_id}'`)).toBe('queued');
+    await startServer();
+    await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.find(job=>job.request_id===probe.request_id)?.state).toBe('sent');
+    expect(sql("SELECT count(*) FROM mqtt_messages WHERE topic='devices/crash-outbox/status'" )).toBe('1');
+    const mqtt=await mqttClient();try {
+      mqtt.socket.write(mqttPacket(0x82,Buffer.concat([Buffer.from([0,1]),mqttString('devices/crash-outbox/status'),Buffer.from([0])])));expect((await mqtt.next()).header).toBe(0x90);const retained=await mqtt.next();expect(retained.header).toBe(0x31);const n=retained.body.readUInt16BE();expect(JSON.parse(retained.body.subarray(2+n))).toEqual({online:true,battery:57});
+    } finally {mqtt.close();}
+    const replay=await request.post('/api/test-publish',{data:input,headers:{'Idempotency-Key':'crash-outbox'}});expect((await replay.json()).replayed).toBe(true);
+    expect(sql(`SELECT count(*) FROM mqtt_outbox WHERE request_id='${probe.request_id}'`)).toBe('1');
+  });
+
+  test('accepted MQTT outbox resumes after SIGKILL without inserting another native message or running ON MQTT twice', async ({request}) => {
+    const input={device_id:'crash-accepted',battery:9,retained:true};await crashRequest('/api/test-publish',input,'crash-accepted','mqtt_accepted','mqtt_outbox');
+    expect(sql("SELECT state FROM mqtt_outbox WHERE topic='devices/crash-accepted/status'")).toBe('accepted');
+    expect(sql("SELECT count(*) FROM mqtt_messages WHERE topic='devices/crash-accepted/status'")).toBe('1');
+    await startServer();
+    await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.find(job=>job.topic==='devices/crash-accepted/status')?.state).toBe('sent');
+    expect(sql("SELECT count(*) FROM mqtt_messages WHERE topic='devices/crash-accepted/status'")).toBe('1');
+    expect(sql("SELECT count(*) FROM flow_records WHERE table_name='DeviceAlerts' AND json_extract(value_json,'$.device_id')='crash-accepted'")).toBe('1');
+    const response=await request.get('/api/device-alerts/crash-accepted');expect((await response.json()).alerts).toHaveLength(1);
+  });
+
+  test('Chrome sends a mower command and admin displays its exact outbox payload and originating HTTP request', async ({request,page}) => {
+    const mqtt=await mqttClient();
+    try {
+      mqtt.socket.write(mqttPacket(0x82,Buffer.concat([Buffer.from([0,1]),mqttString('devices/mower1/command'),Buffer.from([0])])));expect((await mqtt.next()).header).toBe(0x90);
+      await page.goto('/admin');await page.getByRole('button',{name:'Živá zařízení'}).click();
+      await page.getByRole('button',{name:'Zastavit sekačku'}).click();
+      await expect(page.locator('#device-command-result')).toContainText('HTTP 202');
+      const packet=await mqtt.next();const n=packet.body.readUInt16BE();const command=JSON.parse(packet.body.subarray(2+n));expect(command.action).toBe('stop');
+      await expect(page.locator('#mqtt-outbox')).toContainText(command.command_id);
+      const job=(await snapshot(request)).mqtt_outbox.find(job=>job.payload.command_id===command.command_id);expect(job.state).toBe('sent');
+      await page.locator(`#mqtt-outbox [data-request="${job.request_id}"]`).click();await expect(page.locator('#request-detail')).toContainText('/api/devices/mower1/commands');
+      await page.getByRole('button',{name:'Zavřít detail'}).click();
+      await page.locator('#device-id').fill('mower2');await page.getByRole('button',{name:'Spustit sekačku'}).click();await expect(page.locator('#device-command-result')).toContainText('HTTP 403');
+    } finally {mqtt.close();}
+  });
+
+  test('changed MQTT contracts block incompatible queued payloads and admin retry delivers them after the contract is restored', async ({request,page}) => {
+    const input={device_id:'changed-outbox',battery:58,retained:true};const probe=await crashRequest('/api/test-publish',input,'changed-outbox');
+    const id=sql(`SELECT id FROM mqtt_outbox WHERE request_id='${probe.request_id}'`);
+    const file=path.join(directory,'application.flow');const original=fs.readFileSync(file,'utf8');fs.writeFileSync(file,original.replace('TYPE Battery = Int WHERE value BETWEEN 0 AND 100','TYPE Battery = Int WHERE value BETWEEN 0 AND 50'));
+    await startServer();
+    await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.find(job=>job.id===id)?.state).toBe('failed');
+    expect(sql("SELECT count(*) FROM mqtt_messages WHERE topic='devices/changed-outbox/status'")).toBe('0');
+    const mqtt=await mqttClient();try {
+      mqtt.socket.write(mqttPacket(0x82,Buffer.concat([Buffer.from([0,1]),mqttString('devices/d1/status'),Buffer.from([0])])));expect((await mqtt.next()).header).toBe(0x90);
+      mqtt.socket.write(mqttPacket(0xC0));expect((await mqtt.next()).header).toBe(0xD0);
+    } finally {mqtt.close();}
+    await stopServer();fs.writeFileSync(file,original);await startServer();
+    await page.goto('/admin');await page.getByRole('button',{name:'Živá zařízení'}).click();await expect(page.locator(`[data-retry-mqtt="${id}"]`)).toBeVisible();
+    await page.locator(`[data-retry-mqtt="${id}"]`).click();
+    await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.find(job=>job.id===id)?.state).toBe('sent');
+    expect(sql("SELECT count(*) FROM mqtt_messages WHERE topic='devices/changed-outbox/status'")).toBe('1');
+    expect((await request.post(`/api/mqtt-outbox/${id}/retry`)).status()).toBe(404);
   });
 
   test('process restart preserves SQL state, request history, plugin calls and completed idempotency keys', async ({request}) => {

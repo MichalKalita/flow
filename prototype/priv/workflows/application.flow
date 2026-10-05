@@ -129,3 +129,21 @@ WEBSOCKET /ws
     AUTHORIZE EXISTS access IN DeviceAccess WHERE access.token = :token AND EXISTS user IN Users WHERE user.id = access.user_id
     SOURCE DeviceStatus WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
     SOURCE DevicePosition WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
+
+
+TYPE MowerAction = String WHERE value IN ["start", "stop"]
+MQTT DeviceCommand
+    TOPIC "devices/{device_id}/command"
+    PARAM device_id DeviceID
+    PAYLOAD {command_id: String, action: MowerAction}
+    HISTORY 24 HOURS
+
+HTTP POST /api/devices/:device_id/commands
+INPUT device_id DeviceID
+INPUT action MowerAction
+INPUT token String
+REQUIRE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id AND EXISTS user IN Users WHERE user.id = access.user_id ELSE 403 forbidden "Přístup k zařízení je zamítnut."
+TRANSACTION
+    outgoing = PUBLISH DeviceCommand(:device_id) WITH {command_id: uuid("command"), action: :action}
+    COMMIT
+RESPONSE 202 WITH outgoing

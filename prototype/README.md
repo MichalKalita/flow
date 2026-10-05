@@ -54,6 +54,8 @@ Admin → **Živá zařízení** otevírá WebSocket `/ws` a odebírá stav i po
 
 `POST /api/products/:product_id/photo` přijímá ověřený PNG/JPEG jako JSON/base64, zmenší jej a uloží spolu se záznamem v jedné transakci.
 
+Příkaz sekačce pošlete přes `POST /api/devices/mower1/commands` s JSON `{"token":"demo-petra","action":"stop"}`. Endpoint ve Flow ověří přístup a vloží typovaný `PUBLISH DeviceCommand(:device_id)` do transakční fronty. HTTP 202 potvrzuje přijetí; worker jej odešle na `devices/mower1/command`. Admin → Živá zařízení obsahuje tlačítka start/stop a historii odchozích MQTT zpráv. Zprávy přežijí restart a rollback je neodešle. Při pádu po přenosu může přijít opakovaná kopie; zařízení může deduplikovat podle command_id. Nekompatibilní čekající zprávu lze po opravě kontraktu zopakovat v adminu.
+
 `POST /api/language/check` validuje Flow zaslaný jako text bez spuštění.
 
 `GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `GET /health`.

@@ -392,6 +392,36 @@ defmodule OrderLab.Language.Parser do
 
   defp statement(line, rest, file), do: operation(line.tokens, nil, line, rest, file)
 
+  defp operation([{:word, "PUBLISH", _, _} | tokens], binding, line, rest, file) do
+    {target, tokens} = E.parse(tokens, file)
+
+    {source, parameters} =
+      case target do
+        {:builtin, name, args} -> {name, args}
+        _ -> error!("PUBLISH expects a typed MQTT source invocation", line, file)
+      end
+
+    {value, tokens} = E.parse(E.expect(tokens, "WITH", file), file)
+
+    {retain, tokens} =
+      case tokens do
+        [{:word, "RETAIN", _, _} | tokens] -> E.parse(tokens, file)
+        _ -> {{:literal, false}, tokens}
+      end
+
+    {binding, tokens} = optional_as(tokens, binding, file)
+    unless tokens == [], do: error!("Unexpected PUBLISH suffix", line, file)
+
+    {%{
+       kind: :publish,
+       source: source,
+       parameters: parameters,
+       value: value,
+       retain: retain,
+       binding: binding
+     }, rest}
+  end
+
   defp operation([{:word, "CALL", _, _} | tokens], binding, line, rest, file) do
     {name, tokens} = operation_name(tokens, file)
     {input, tokens} = E.parse(E.expect(tokens, "WITH", file), file)

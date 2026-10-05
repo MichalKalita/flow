@@ -276,6 +276,20 @@ defmodule OrderLab.Language.Runtime do
     continue(bind(ctx, node.binding, output))
   end
 
+  defp execute(%{kind: :publish} = node, ctx) do
+    writes_allowed!(ctx)
+
+    result =
+      ctx.host.(:publish, %{
+        source: node.source,
+        parameters: Enum.map(node.parameters, &evaluate(&1, ctx)),
+        value: evaluate(node.value, ctx),
+        retain: Evaluator.boolean!(evaluate(node.retain, ctx))
+      })
+
+    continue(bind(ctx, node.binding, result))
+  end
+
   defp execute(%{kind: :queue} = node, ctx) do
     writes_allowed!(ctx)
 

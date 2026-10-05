@@ -80,6 +80,13 @@ defmodule OrderLab.Router do
     end
   end
 
+  post "/api/mqtt-outbox/:id/retry" do
+    case OrderLab.Store.retry_mqtt(id) do
+      {:ok, state} -> send_json(conn, 202, %{"id" => id, "state" => state})
+      :not_found -> send_json(conn, 404, %{"error" => "failed_publish_not_found"})
+    end
+  end
+
   post "/api/language/check" do
     case read_body(conn, length: 256_000) do
       {:ok, body, conn} ->

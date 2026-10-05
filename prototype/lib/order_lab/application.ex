@@ -10,6 +10,7 @@ defmodule OrderLab.Application do
         OrderLab.Store,
         OrderLab.EmailWorker,
         OrderLab.MQTT,
+        OrderLab.MQTTWorker,
         {Bandit, plug: OrderLab.Router, ip: {127, 0, 0, 1}, port: port}
       ],
       strategy: :one_for_one,

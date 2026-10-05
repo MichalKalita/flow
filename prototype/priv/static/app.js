@@ -43,6 +43,7 @@ function render() {
   renderRequests();
   renderOrders();
   renderPlugins();
+  $('#mqtt-outbox').innerHTML = (data.mqtt_outbox || []).map(job => `<article class="panel"><div class="panel-title"><h2>${esc(job.source)}</h2><span class="tag">${esc(job.state)}</span></div><p>${esc(job.topic)}</p><pre>${pretty(job.payload)}</pre>${job.error ? `<p>${esc(job.error)}</p>` : ''}${job.state === 'failed' ? `<button class="button" data-retry-mqtt="${esc(job.id)}">Zopakovat po opravě kontraktu</button>` : ''}<button class="button" data-request="${esc(job.request_id)}">Původní požadavek →</button></article>`).join('') || '<p class="muted">Zatím žádné odchozí zprávy.</p>';
   $('#workflow-source').textContent = data.workflow;
   if (!initialized) {
     $('#user').innerHTML = data.users.map(u => `<option value="${esc(u.id)}">${esc(u.name)} · ${esc(u.country)}</option>`).join('');
@@ -122,6 +123,12 @@ document.addEventListener('click', async event => {
   if (nav) page(nav.dataset.page);
   const request = event.target.closest('[data-request]');
   if (request) await detail(request.dataset.request);
+  const mqttRetry = event.target.closest('[data-retry-mqtt]');
+  if (mqttRetry) {
+    mqttRetry.disabled = true;
+    try {await api(`/api/mqtt-outbox/${encodeURIComponent(mqttRetry.dataset.retryMqtt)}/retry`, {method:'POST'});await refresh();}
+    finally {mqttRetry.disabled = false;}
+  }
   const retry = event.target.closest('[data-retry]');
   if (retry) {
     retry.disabled = true;
@@ -191,3 +198,15 @@ $('#device-form').addEventListener('submit', event => {
   socket.onerror = () => { if (deviceSocket === socket) $('#device-connection').textContent = 'Chyba spojení'; };
 });
 $('#device-stop').addEventListener('click', () => { if (deviceSocket) deviceSocket.close(); });
+
+for (const button of document.querySelectorAll('[data-mower-action]')) {
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      const {status,body} = await api(`/api/devices/${encodeURIComponent($('#device-id').value.trim())}/commands`, {method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':crypto.randomUUID()},body:JSON.stringify({action:button.dataset.mowerAction,token:$('#device-token').value})});
+      $('#device-command-result').textContent = `HTTP ${status}\n${JSON.stringify(body,null,2)}`;
+      await refresh();
+    } catch { $('#device-command-result').textContent = 'Spojení se přerušilo; výsledek ověřte v přehledu požadavků.'; }
+    finally {button.disabled = false;}
+  });
+}

@@ -138,6 +138,7 @@ defmodule OrderLab.Language.Compiler do
           loop: false,
           catching: false,
           tables: tables,
+          mqtt: mqtt,
           operations: operations
         }
 
@@ -356,6 +357,19 @@ defmodule OrderLab.Language.Compiler do
     else
       bind(s, n.binding, op.output)
     end
+  end
+
+  defp check_node(%{kind: :publish} = n, s) do
+    effect!(s, true)
+    source = Map.get(s.mqtt, n.source) || fail("Unknown MQTT source #{n.source}")
+    unless length(n.parameters) == length(source.params), do: fail("Wrong PUBLISH source arity")
+
+    Enum.zip(n.parameters, source.params)
+    |> Enum.each(fn {value, param} -> Checker.expect_expr!(value, param.type, s.env) end)
+
+    Checker.expect_expr!(n.value, source.payload, s.env)
+    Checker.expect!(Checker.infer(n.retain, s.env), {:named, "Bool"})
+    bind(s, n.binding, {:record, %{"id" => {:named, "String"}, "state" => {:named, "String"}}})
   end
 
   defp check_node(%{kind: :insert} = n, s) do
