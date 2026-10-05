@@ -13,6 +13,7 @@
 [type AccessID [id DeviceAccess]]
 [type CommandID [id DeviceCommand]]
 [type RequestID [id Request]]
+[type JobID [id Job]]
 
 [type Quantity [integer [range 1 100]]]
 [type OrderQuantity [integer [range 1 5000]]]
@@ -268,8 +269,9 @@
   [field id PhotoID] [field file FileOutput] [field width PhotoSize] [field height PhotoSize]]]
 [type PaymentOutput [record [field url String]]]
 [type EmailOutput [record [field state String]]]
+[type QueueReceipt [record [field id JobID] [field state String]]]
 [type OrderReceipt [record
-  [field order OrderOutput] [field payment PaymentOutput] [field email EmailOutput]]]
+  [field order OrderOutput] [field payment PaymentOutput] [field email QueueReceipt]]]
 [type PhotoReceipt [record [field photo PhotoOutput] [field file FileOutput]]]
 [type CommandOutput [record [field id CommandID] [field action MowerAction]]]
 [type CartItem [record [field productId ProductID] [field quantity Quantity]]]

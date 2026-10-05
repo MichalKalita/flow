@@ -170,8 +170,14 @@ defmodule Flow.Checker do
 
       {"entity", [id]} ->
         case Schema.resolve(schema, infer.(id)) do
-          {:id, entity} -> {:named, entity}
-          _ -> Syntax.fail(id, :type_mismatch, "entity requires a branded ID")
+          {:id, entity} ->
+            unless schema.entities[entity] || schema.streams[entity],
+              do: Syntax.fail(id, :unknown_type, "ID is not a stored entity")
+
+            {:named, entity}
+
+          _ ->
+            Syntax.fail(id, :type_mismatch, "entity requires a branded ID")
         end
 
       {"entities", [name]} ->
@@ -354,7 +360,8 @@ defmodule Flow.Checker do
 
         stored =
           Map.reject(model.fields, fn {_, f} ->
-            f.options["inverse"] || f.options["stream"] || f.options["receivedAt"]
+            f.options["inverse"] || f.options["stream"] || f.options["receivedAt"] ||
+              f.options["generated"]
           end)
 
         compatible!(schema, infer.(value), {:record, stored}, value)
@@ -404,7 +411,14 @@ defmodule Flow.Checker do
           do: retry!(options, node),
           else: if(options != [], do: Syntax.fail(node, :arity, "invoke takes two arguments"))
 
-        contract.output
+        if op == "enqueue" do
+          unless match?({:record, _}, schema.types["QueueReceipt"]),
+            do: Syntax.fail(node, :unknown_type, "enqueue requires QueueReceipt record type")
+
+          {:named, "QueueReceipt"}
+        else
+          contract.output
+        end
 
       _ ->
         Syntax.fail(node, :invalid_expression, "Unknown expression or invalid arity #{operator}")

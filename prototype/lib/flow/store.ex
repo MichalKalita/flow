@@ -151,6 +151,18 @@ defmodule Flow.Store do
     |> Enum.map(fn [id] -> %Ref{entity: entity, id: %ID{entity: entity, value: id}} end)
   end
 
+  def lookup(db, entity, field, value) do
+    definitions = fields(db, entity)
+    unless Map.has_key?(definitions, field), do: raise(ArgumentError, "Invalid identity lookup")
+
+    case query(db, "SELECT id FROM #{quote_name(entity)} WHERE #{quote_name(field)} = ?", [
+           encode(value)
+         ]) do
+      [[id]] -> %Ref{entity: entity, id: %ID{entity: entity, value: id}}
+      _ -> nil
+    end
+  end
+
   def query(db, sql, params) do
     if db.trace, do: send(db.trace, {:flow_sql, sql, params})
     {:ok, statement} = SQL.prepare(db.connection, sql)

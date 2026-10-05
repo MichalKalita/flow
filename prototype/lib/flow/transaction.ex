@@ -8,6 +8,21 @@ defmodule Flow.Transaction do
 
   def create(session, entity, input) do
     definitions = Store.fields(session.db, entity)
+
+    input =
+      Enum.reduce(definitions, input, fn {name, definition}, input ->
+        cond do
+          definition.options["receivedAt"] ->
+            Map.put(input, name, Map.fetch!(session.context, "now"))
+
+          definition.options["generated"] ->
+            Map.put(input, name, %Flow.ID{entity: entity, value: random_id()})
+
+          true ->
+            input
+        end
+      end)
+
     input = Value.validate!(session.db.schema, {:record, definitions}, input)
     id = Map.fetch!(input, "id")
     reference = %Ref{entity: entity, id: id}
@@ -156,6 +171,8 @@ defmodule Flow.Transaction do
       changes(session)
       |> Enum.filter(&(&1.action == "CREATE" and &1.reference.entity == entity))
       |> Enum.map(& &1.reference)
+
+  def random_id, do: :crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false)
 
   defp check_references!(session, change) do
     Enum.each(change.after, fn {_, value} -> check_value!(session, value) end)

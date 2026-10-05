@@ -58,7 +58,26 @@ defmodule Flow.Schema do
             kind when kind in ["entity", "stream"] ->
               {fields, options} = Enum.split_with(args, fn n -> elem(S.form(n), 0) == "field" end)
               options = S.options(options, if(kind == "stream", do: ~w(mqtt history), else: []))
-              model = %{fields: Types.fields(fields, names), options: options, node: node}
+              fields = Types.fields(fields, names)
+
+              fields =
+                if kind == "stream" do
+                  fields
+                  |> Map.put_new("id", %{
+                    type: {:id, name},
+                    options: %{"generated" => true},
+                    node: node
+                  })
+                  |> Map.put_new("receivedAt", %{
+                    type: {:named, "DateTime"},
+                    options: %{"receivedAt" => true},
+                    node: node
+                  })
+                else
+                  fields
+                end
+
+              model = %{fields: fields, options: options, node: node}
 
               if kind == "entity",
                 do: put_in(schema.entities[name], model),
@@ -183,7 +202,7 @@ defmodule Flow.Schema do
   end
 
   defp check_type!(schema, {:id, entity}, _, node) do
-    unless entity == "Request" or Map.has_key?(schema.entities, entity) or
+    unless entity in ["Request", "Job"] or Map.has_key?(schema.entities, entity) or
              Map.has_key?(schema.streams, entity),
            do: S.fail(node || %{span: nil}, :invalid_id, "ID refers to unknown entity #{entity}")
   end

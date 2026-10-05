@@ -124,7 +124,7 @@ defmodule Flow.Value do
   end
 
   defp cast(_, {:record, _}, _, path, _), do: fail(path, "Expected record")
-  defp cast(_, {:image, _}, _, path, _), do: fail(path, "Image requires a decoded image value")
+  defp cast(_, {:image, limits}, value, _path, _), do: Flow.Image.decode!(value, limits)
 
   defp number(%Decimal{coef: coefficient} = value, _) when is_integer(coefficient), do: value
   defp number(value, _) when is_integer(value), do: Decimal.new(value)
