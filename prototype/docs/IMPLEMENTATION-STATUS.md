@@ -2,6 +2,8 @@
 
 Tento přehled ověřuje požadovaný Elixir prototyp na jednom stroji: skutečný jazyk pro aplikační scénáře, objednávku, pluginy, MQTT, autorizovaný WebSocket, admin a dokumentaci. Celý BLACKBOX návrh platformy obsahuje také další požadavky; tento prototyp není jeho hotovou implementací. Replikace a Lean byly pro tuto implementaci výslovně odloženy.
 
+Novější [požadavky na povinné brandy, konečné číselné rozsahy a limity všech kolekcí](../../LANGUAGE-REQUIREMENTS.md) zatím nejsou implementované. Níže uvedená podpora refinement typů a `LIMIT` jejich úplné splnění neznamená.
+
 | Požadavek | Implementace | Ověření |
 |---|---|---|
 | Obecný jazyk místo předem napsané objednávkové funkce | Lexer, parser, compiler, checker, evaluator a runtime v `lib/order_lab/language/`; AST interpretuje obecné příkazy | E2E rozšíří jediný zdroj o Notes, Reviews, Contacts, filtry, JOIN, iterace a CRUD bez změny Elixiru |

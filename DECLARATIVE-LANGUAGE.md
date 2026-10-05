@@ -2,6 +2,8 @@
 
 Status: Koncepční návrh. Název, syntaxe a úplná sémantika zatím nejsou určeny. Dokument doplňuje [BLACKBOX-REQUIREMENTS.md](BLACKBOX-REQUIREMENTS.md), jeho potvrzené požadavky nemění.
 
+Aktualizované závazné požadavky na brandované číselné typy, konečné rozsahy a limity kolekcí jsou v [LANGUAGE-REQUIREMENTS.md](LANGUAGE-REQUIREMENTS.md). V těchto oblastech nahrazují starší ilustrativní příklady níže.
+
 ## Účel a principy
 
 Uživatel nebo AI píše aplikační logiku jako deklarativní propojení hotových operací: endpointů, dotazů, transformací, změn stavu a služeb. Jazyk je lepidlo; implementace operací dodává platforma, pluginy a konektory napsané v běžných programovacích jazycích. Autor aplikace propojí objednávku, sklad, platbu a email, aniž by implementoval jejich technické provedení.
