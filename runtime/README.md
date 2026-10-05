@@ -91,8 +91,10 @@ address, but the CLI requires a loopback IP. For a remote VPS, forward that port
 ssh -L 9090:127.0.0.1:9090 user@server
 ```
 
-Open `http://127.0.0.1:9090` and enter the token. The token is kept only in the
-page's memory. The public application listener does not expose admin APIs.
+Open `http://127.0.0.1:9090` and enter the token. The token is stored in the
+tab's `sessionStorage`, so a reload keeps the session and closing the tab or
+using Disconnect admin clears it. The public application listener does not
+expose admin APIs.
 The Preact control plane has a left navigation menu with Overview, Traffic &
 latency, Streaming, Runtime & storage, Log explorer, Mutation audit, HTTP console,
 and Access tokens. Interactive SVG charts show request volume, errors, latency

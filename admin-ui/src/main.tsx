@@ -68,7 +68,29 @@ const currentPage = () =>
   pages.some((p) => p.id === location.hash.slice(1))
     ? location.hash.slice(1)
     : "overview";
-function Login({ onLogin }: { onLogin: (key: string) => void }) {
+const ADMIN_TOKEN_KEY = "flow.adminToken";
+function readAdminToken(): string {
+  try {
+    return sessionStorage.getItem(ADMIN_TOKEN_KEY)?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+function writeAdminToken(token: string) {
+  try {
+    if (token) sessionStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch {
+    /* sessionStorage can throw if the browser blocks it */
+  }
+}
+function Login({
+  onLogin,
+  error: sessionError = "",
+}: {
+  onLogin: (key: string) => void;
+  error?: string;
+}) {
   const [key, setKey] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
@@ -129,7 +151,7 @@ function Login({ onLogin }: { onLogin: (key: string) => void }) {
             required
             autoFocus
           />
-          <ErrorBanner message={error} />
+          <ErrorBanner message={error || sessionError} />
           <button class="button-primary w-full" disabled={busy || !key}>
             {busy ? "Connecting…" : "Open control plane"}
             <Icon name="arrow" size={17} />
@@ -137,7 +159,7 @@ function Login({ onLogin }: { onLogin: (key: string) => void }) {
         </form>
         <div class="login-foot">
           <Icon name="audit" size={15} />
-          Internal listener · credentials stay in memory
+          Internal listener · token stays in this tab
         </div>
       </div>
       <p class="login-caption">
@@ -147,7 +169,8 @@ function Login({ onLogin }: { onLogin: (key: string) => void }) {
   );
 }
 function App() {
-  const [token, setToken] = useState(""),
+  const [token, setToken] = useState(readAdminToken),
+    [authError, setAuthError] = useState(""),
     [page, setPage] = useState(currentPage),
     [minutes, setMinutes] = useState(60),
     [interval, setIntervalMs] = useState(5000),
@@ -156,6 +179,11 @@ function App() {
     [consoleEndpoint, setConsoleEndpoint] = useState(""),
     [logEndpoint, setLogEndpoint] = useState(""),
     [toast, setToast] = useState("");
+  const rememberToken = useCallback((value: string) => {
+    writeAdminToken(value);
+    setToken(value);
+    setAuthError("");
+  }, []);
   const api = useCallback<Api>(
     async <T,>(path: string, options: RequestInit = {}) => {
       const response = await fetch(path, {
@@ -166,6 +194,11 @@ function App() {
           ...options.headers,
         },
       });
+      if (response.status === 401) {
+        rememberToken("");
+        setAuthError("The admin token is not valid.");
+        throw Error("The admin token is not valid.");
+      }
       if (!response.ok) {
         let message = `HTTP ${response.status}`;
         try {
@@ -176,7 +209,7 @@ function App() {
       }
       return response.json() as Promise<T>;
     },
-    [token],
+    [token, rememberToken],
   );
   useEffect(() => {
     const handler = () => {
@@ -204,7 +237,7 @@ function App() {
       setToast("Clipboard unavailable. Select the text to copy it.");
     }
   };
-  if (!token) return <Login onLogin={setToken} />;
+  if (!token) return <Login onLogin={rememberToken} error={authError} />;
   return (
     <Authenticated
       key={token}
@@ -227,7 +260,7 @@ function App() {
       copy={copy}
       toast={toast}
       logout={() => {
-        setToken("");
+        rememberToken("");
         setAuthorization("");
         setConsoleEndpoint("");
         setLogEndpoint("");

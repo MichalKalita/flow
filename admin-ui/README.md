@@ -30,7 +30,8 @@ permission-aware HTTP calls, audit JSON decoding, archive log pagination and
 admin authentication. Failure screenshots and traces stay in ignored
 `test-results/`; use `bunx playwright show-trace <trace.zip>` to investigate.
 
-Application and admin credentials are held in page memory, never local storage.
+The admin token is stored in the tab's `sessionStorage`. Application JWTs stay in
+page memory and are never written to browser storage.
 The HTTP console sends real requests through the runtime's normal permissions.
 Logs are queried from bounded memory and rotated JSONL files; audit entries come
 from SQLite. Metrics polling pauses when the browser page is hidden.

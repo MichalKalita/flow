@@ -9,6 +9,25 @@ test.beforeEach(async ({ page }) => {
     page.getByRole("heading", { name: "Overview", exact: true }),
   ).toBeVisible();
 });
+test("admin token survives reload and is cleared on disconnect", async ({
+  page,
+}) => {
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("flow.adminToken")),
+  ).toBe(key);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Overview", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Admin access token")).toHaveCount(0);
+  await page.getByRole("button", { name: /disconnect admin/i }).click();
+  await expect(page.getByLabel("Admin access token")).toBeVisible();
+  expect(
+    await page.evaluate(() => sessionStorage.getItem("flow.adminToken")),
+  ).toBeNull();
+  await page.reload();
+  await expect(page.getByLabel("Admin access token")).toBeVisible();
+});
 test("navigation, performance charts, larger fonts and mobile layout", async ({
   page,
   request,
