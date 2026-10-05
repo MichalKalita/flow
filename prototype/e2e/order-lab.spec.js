@@ -143,6 +143,61 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+TYPE Contact = {id: String, email: String, nickname: String?}
+TABLE Contacts = Contact
+TABLE ContactsAudit = {id: String, text: String}
+HTTP POST /api/contacts
+INPUT contact Contact
+TRANSACTION
+    INSERT ContactsAudit WITH {id: uuid("audit"), text: :contact.id}
+    saved = INSERT Contacts WITH :contact
+    COMMIT
+RESPONSE 201 WITH saved
+
+HTTP POST /api/contacts/upsert
+INPUT contact Contact
+TRANSACTION
+    TRY
+        INSERT ContactsAudit WITH {id: uuid("audit"), text: "attempted insert"}
+        INSERT Contacts WITH :contact
+    CATCH failure
+        REQUIRE failure.code = "duplicate_record" ELSE 409 unexpected_conflict "Unexpected storage failure"
+        UPDATE Contacts AS c WHERE c.id = :contact.id SET {email: :contact.email}
+    saved = ONE FROM Contacts AS c WHERE c.id = :contact.id
+    COMMIT
+RETURN saved
+
+HTTP GET /api/contacts
+contacts = FROM Contacts AS c ORDER BY c.id ASC
+RETURN {contacts: contacts}
+HTTP GET /api/contacts-audit
+rows = FROM ContactsAudit AS a
+RETURN {rows: rows}
+
+HTTP POST /api/test-native-duplicate
+TRANSACTION
+    TRY
+        INSERT Products WITH {id: "p1", name: "Duplicate", price_cents: 1, stock: 1}
+    CATCH failure
+        REQUIRE failure.code = "duplicate_record" ELSE 409 unexpected_conflict "Unexpected storage failure"
+    COMMIT
+RETURN {caught: true}
+
+HTTP POST /api/test-order-constraint
+INPUT total Int
+INPUT user_id String = "u1"
+TRANSACTION
+    order = INSERT Orders WITH {id: uuid("constraint"), user_id: :user_id, request_id: request.id, created_at: request.time, items: [], total_cents: :total, payment_method: "card", payment_url: "", status: "awaiting_payment"}
+    COMMIT
+RETURN order
+
+HTTP DELETE /api/test-user/:id
+INPUT id String
+TRANSACTION
+    DELETE FROM Users AS u WHERE u.id = :id
+    COMMIT
+RETURN {deleted: true}
+
 HTTP POST /api/compensated
 INPUT fail Bool = true
 TRANSACTION
@@ -602,6 +657,38 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
   });
 
 
+
+  test('duplicate generic records return a business conflict and roll back preceding writes', async ({request}) => {
+    const contact={id:'contact-1',email:'first@example.test'};
+    const created=await request.post('/api/contacts',{data:{contact}});expect(created.status()).toBe(201);expect((await created.json()).nickname).toBeNull();
+    const before=await (await request.get('/api/contacts-audit')).json();
+    const duplicate=await request.post('/api/contacts',{data:{contact:{...contact,email:'second@example.test'}}});expect(duplicate.status()).toBe(409);expect((await duplicate.json()).error.code).toBe('duplicate_record');
+    expect((await (await request.get('/api/contacts-audit')).json()).rows).toEqual(before.rows);
+    expect((await (await request.get('/api/contacts')).json()).contacts).toEqual([{...contact,nickname:null}]);
+  });
+
+  test('TRY CATCH handles native and generic duplicate keys without leaking savepoint writes', async ({request}) => {
+    await request.post('/api/contacts',{data:{contact:{id:'upsert-1',email:'old@example.test'}}});
+    const before=await (await request.get('/api/contacts-audit')).json();
+    const updated=await request.post('/api/contacts/upsert',{data:{contact:{id:'upsert-1',email:'new@example.test'}}});expect(updated.status()).toBe(200);expect((await updated.json()).email).toBe('new@example.test');
+    expect((await (await request.get('/api/contacts-audit')).json()).rows).toEqual(before.rows);
+    const state=await snapshot(request);const physical=await request.post('/api/test-native-duplicate',{data:{}});expect(physical.status()).toBe(200);expect((await physical.json()).caught).toBe(true);expect((await snapshot(request)).products).toEqual(state.products);
+    const source='TABLE T = {id: String, text: String}\nHTTP POST /t\nTRANSACTION\n    UPDATE T AS t WHERE true SET {id: "changed"}\n    COMMIT\nRETURN {}';
+    const checked=await request.post('/api/language/check',{data:source,headers:{'Content-Type':'text/plain'}});expect(checked.status()).toBe(422);expect(JSON.stringify(await checked.json())).toContain('UPDATE cannot change id');
+  });
+
+  test('deleting a referenced native user returns a business conflict and preserves the user and order', async ({request}) => {
+    expect((await post(request,payload())).status).toBe(201);const before=await snapshot(request);
+    const response=await request.delete('/api/test-user/u1');expect(response.status()).toBe(409);expect((await response.json()).error.code).toBe('reference_conflict');
+    const after=await snapshot(request);expect(after.users).toEqual(before.users);expect(after.orders).toEqual(before.orders);expect((await request.get('/health')).status()).toBe(200);
+  });
+
+  test('native CHECK and missing references return typed storage failures without creating an order', async ({request}) => {
+    const before=await snapshot(request);
+    const invalid=await request.post('/api/test-order-constraint',{data:{total:0}});expect(invalid.status()).toBe(422);expect((await invalid.json()).error.code).toBe('constraint_violation');
+    const missing=await request.post('/api/test-order-constraint',{data:{total:1,user_id:'missing-user'}});expect(missing.status()).toBe(409);expect((await missing.json()).error.code).toBe('reference_conflict');
+    const after=await snapshot(request);expect(after.orders).toEqual(before.orders);expect(after.users).toEqual(before.users);expect((await request.get('/health')).status()).toBe(200);
+  });
 
   test('joined queries support conditional LEFT joins, multiple INNER joins and correlated collections', async ({request}) => {
     for(const data of [

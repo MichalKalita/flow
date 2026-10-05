@@ -289,7 +289,7 @@ defmodule OrderLab.Language.Native do
   end
 
   defp insert(db, program, name, value) do
-    Types.validate!(value, Map.fetch!(program.tables, name))
+    value = Types.validate!(value, Map.fetch!(program.tables, name))
 
     case Map.get(@physical, name) do
       {table, mapping} ->
@@ -322,8 +322,10 @@ defmodule OrderLab.Language.Native do
   end
 
   defp update(db, program, name, row, changed) do
-    value = Map.merge(row, changed)
-    Types.validate!(value, Map.fetch!(program.tables, name))
+    if Map.has_key?(changed, "id"),
+      do: raise(Failure, status: 409, code: "immutable_id", message: "UPDATE cannot change id")
+
+    value = Map.merge(row, changed) |> Types.validate!(Map.fetch!(program.tables, name))
 
     case Map.get(@physical, name) do
       {table, mapping} ->
@@ -372,12 +374,42 @@ defmodule OrderLab.Language.Native do
     try do
       :ok = SQL.bind(statement, args)
       {:ok, columns} = SQL.columns(db, statement)
-      {:ok, rows} = SQL.fetch_all(db, statement)
-      Enum.map(rows, &Map.new(Enum.zip(columns, &1)))
+
+      case SQL.fetch_all(db, statement) do
+        {:ok, rows} -> Enum.map(rows, &Map.new(Enum.zip(columns, &1)))
+        {:error, reason} -> database_failure!(reason)
+      end
     after
       SQL.release(db, statement)
     end
   end
+
+  defp database_failure!(reason) when is_binary(reason) do
+    cond do
+      String.starts_with?(reason, ["UNIQUE constraint failed", "PRIMARY KEY constraint failed"]) ->
+        raise Failure,
+          status: 409,
+          code: "duplicate_record",
+          message: "A record with this key already exists"
+
+      String.starts_with?(reason, "FOREIGN KEY constraint failed") ->
+        raise Failure,
+          status: 409,
+          code: "reference_conflict",
+          message: "The change conflicts with a referenced record"
+
+      String.starts_with?(reason, ["CHECK constraint failed", "NOT NULL constraint failed"]) ->
+        raise Failure,
+          status: 422,
+          code: "constraint_violation",
+          message: "The record violates a storage constraint"
+
+      true ->
+        raise "SQLite operation failed: #{reason}"
+    end
+  end
+
+  defp database_failure!(reason), do: raise("SQLite operation failed: #{inspect(reason)}")
 
   def exec!(db, sql) do
     case SQL.execute(db, sql) do

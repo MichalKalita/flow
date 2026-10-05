@@ -109,6 +109,32 @@ CATCH error
 
 `CATCH` zachytí obchodní chybu operace nebo `REQUIRE`/`FAIL`, nikoliv chybu jazyka. V transakci používá savepoint a vrací zápisy uvnitř `TRY`; nezruší předchozí změny. Chyba má pole `code`, `message`, `status`, `details`. Vazby vzniklé v úspěšném `TRY` jsou dostupné dál; vazby handleru jsou lokální. Commit uvnitř `TRY` typová kontrola odmítá. Vazby ze success větve lze použít dál pouze tehdy, když handler vždy ukončí scénář; jinak by na chybové větvi chyběly.
 
+### Konflikty záznamů
+
+Každá tabulka má neměnné String id. UPDATE pole id odmítne kompilátor i úložný adaptér. INSERT vrací validovaný a normalizovaný záznam; vynechaná volitelná pole mají hodnotu null, shodnou s pozdějším čtením tabulky.
+
+Duplicitní primární klíč vrací 409 duplicate_record, porušení existující nativní SQL reference vrací 409 reference_conflict a porušení SQL CHECK/NOT NULL vrací 422 constraint_violation. Tyto chyby lze zachytit v TRY/CATCH. Nezachycená chyba vrátí celou otevřenou transakci; zachycená chyba vrátí savepoint včetně předchozích zápisů v TRY. Nejde o obecný převod všech databázových chyb na obchodní chyby: vadné schéma či provozní problém nadále signalizují interní selhání.
+
+Příklad aktualizace existujícího záznamu po konfliktu vložení:
+
+```text
+TABLE Contacts = {id: String, email: String}
+HTTP POST /contacts
+INPUT contact {id: String, email: String}
+TRANSACTION
+    TRY
+        INSERT Contacts WITH :contact
+    CATCH failure
+        REQUIRE failure.code = "duplicate_record" ELSE 409 unexpected_conflict "Neočekávaná chyba"
+        UPDATE Contacts AS c WHERE c.id = :contact.id SET {email: :contact.email}
+    saved = ONE FROM Contacts AS c WHERE c.id = :contact.id
+    COMMIT
+RETURN saved
+```
+
+Reference a další SQL omezení zde odpovídají existujícím nativním tabulkám; deklarace libovolných cizích klíčů a UNIQUE polí ve Flow zatím nejsou implementovány. Každá obecná tabulka má unikátní id v rámci svého jména.
+
+
 ## Zápis zdroje
 
 Řetězce používají dvojité uvozovky a JSON escapování. `#` zahajuje komentář. Bloky používají mezery; tabulátory jsou chyba. Výrazy v závorkách, seznamech a záznamech mohou pokračovat na dalších řádcích. Vlastní funkce a libovolné nativní volání nejsou součástí jazyka. Runtime nyní používá pořadí deklarací jako konkrétní prováděcí plán; optimalizace musí zachovat datové závislosti a význam účinků.
