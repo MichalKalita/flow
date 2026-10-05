@@ -4,7 +4,7 @@ Flow deklaruje HTTP rozhraní, typy dat, dotazy, pravidla a účinky. Implementa
 
 ## Stav implementace
 
-Celá aplikace je v jediném `priv/workflows/application.flow`: typy, tabulky, MQTT zdroje a HTTP scénáře. Runtime jej při startu parsuje a typově kontroluje. `FLOW_PATH` nastaví cestu jiného jediného souboru. Změna vyžaduje restart. Lexer, parser, typová kontrola, validátor hodnot a interpreter jsou v `lib/order_lab/language/`. Objednávky i další CRUD scénáře používají stejný interpreter. `POST /api/language/check` přijímá zdroj jako text a vrací diagnostiku bez spuštění.
+Celá aplikace je v jediném `priv/workflows/application.flow`: typy, tabulky, počáteční data, MQTT zdroje, HTTP scénáře a autorizované WebSocket odběry. Runtime jej při startu parsuje a typově kontroluje. `FLOW_PATH` nastaví cestu jiného jediného souboru. Změna vyžaduje restart. Lexer, parser, typová kontrola, validátor hodnot a interpreter jsou v `lib/order_lab/language/`. Objednávky i další CRUD scénáře používají stejný interpreter. `POST /api/language/check` přijímá zdroj jako text a vrací diagnostiku bez spuštění.
 
 ## Typy a vstupy
 
@@ -284,3 +284,18 @@ SEED DeviceAccess WITH [{id: "petra-mower1", user_id: "u1", token: "demo-petra",
 ```
 
 SEED je top-level deklarace deterministického seznamu záznamů, typovaného podle tabulky. Kompilátor odmítne neznámou tabulku, chybný záznam či duplicitní id i napříč více SEED stejné tabulky. Runtime při startu vloží dosud neinicializované klíče v jedné SQLite transakci. Již existující záznam nepřepíše. Trvalá evidence klíčů zabrání obnovení později smazaného záznamu při restartu; odebrané oprávnění se tak samo nevrátí. Změna hodnoty v SEED nemění existující data; jejich úprava patří do explicitního UPDATE/DELETE scénáře.
+
+
+## Obnova vykonávání po pádu
+
+Interpreter ukládá do SQLite trvalé pokračování: validované vstupy, proměnné, stav větví a transakcí a dosud nevykonanou část scénáře. První checkpoint vzniká před tělem scénáře. Každý COMMIT zapisuje nový checkpoint a dosavadní pluginové diagnostiky do stejné transakce jako obchodní změny a frontu. Pokud proces spadne po commitu, pokračuje za touto hranicí; potvrzené INSERT, odečet skladu, souborový zápis ani QUEUE se neopakují. Platba provedená před takto potvrzeným commitem se také znovu nevolá.
+
+Při startu Store vyhledá rozpracované požadavky s checkpointem a obnoví ty, které lze bezpečně provést. Platí to i bez Idempotency-Key; klíč pouze umožňuje klientovi znovu získat výsledek. Původní `request.id`, `request.time`, hodnoty proměnných a zvolená větev se zachovají. Vytvoření odpovědi, její uložení do requests a odstranění checkpointu dokončí požadavek. Finální diagnostiky a výsledek se ukládají v jedné SQLite transakci. Restart před jejím potvrzením znovu použije poslední checkpoint.
+
+Obnova podporuje podmíněné COMMIT, lokální rozsah větví, RETURN uvnitř transakce i další navazující transakce. Každý již potvrzený prefix zůstává potvrzený; pozdější chyba nemůže zpětně vrátit dřívější COMMIT. Pád před prvním commitem vrátí otevřenou SQLite transakci; čistě nativní scénář lze obnovit od počátečního checkpointu.
+
+Automatická obnova je povolena, pokud zbývající pokračování obsahuje jen výrazy, čtení, nativní transakční zápisy, QUEUE a operace deklarované jako pure/read. Pokud by pokračování mohlo znovu vykonat externí CALL bez bezpečného retry kontraktu, runtime jej automaticky nespustí. Požadavek zůstane running; opakování se stejným klíčem vrátí `409 outcome_unknown`. To se může stát například při pádu po vytvoření externí platby, ale před potvrzením první transakce. SQLite rollback nesmaže případný účinek u externího poskytovatele. Samostatný trvalý protokol pro externí operace a jejich idempotenci/kompenzaci zatím chybí.
+
+Checkpoint obsahuje fingerprint zdroje, verze formátu a registru operací. Změněný program nesmí automaticky převzít staré pokračování; obnova vyžaduje původní odpovídající program. Migrace rozpracovaných scénářů zatím není implementovaná. Syntaktická změna zdroje včetně komentáře mění fingerprint. Staré running požadavky bez checkpointu nemají automatickou obnovu. Nejde o HA ani o obnovu živých WebSocket spojení.
+
+E2E testy zastavují skutečný server pomocí SIGKILL přesně před a po COMMIT, restartují jej se stejnou databází a ověřují stav SQL, odpověď, pluginy a frontu. Testovací marker se aktivuje pouze explicitním nastavením `FLOW_E2E_CRASH_MARKER`, `FLOW_E2E_CRASH_PHASE` a `FLOW_E2E_CRASH_ROUTE`; normální běh tyto proměnné nepoužívá.

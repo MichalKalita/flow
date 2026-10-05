@@ -101,6 +101,9 @@ defmodule OrderLab.Language.Native do
         :source ->
           source(db, program, args.name, request["time"])
 
+        :checkpoint ->
+          :ok
+
         :begin ->
           exec!(db, "BEGIN IMMEDIATE")
 

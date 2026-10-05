@@ -52,9 +52,29 @@ defmodule OrderLab.Language.Runtime do
         end
       )
 
-    context = %{env: env, host: host, transaction: false, committed: false, loop: false}
+    context = %{
+      env: env,
+      host: host,
+      transaction: false,
+      committed: false,
+      loop: false,
+      continuation: []
+    }
 
-    case block(endpoint.body, context) do
+    host.(:checkpoint, %{
+      checkpoint: Map.drop(%{context | continuation: [{:block, endpoint.body}]}, [:host])
+    })
+
+    finish(block(endpoint.body, context))
+  end
+
+  def resume(checkpoint, host) do
+    ctx = Map.put(checkpoint, :host, host)
+    finish(resume_frames(ctx.continuation, %{ctx | continuation: []}))
+  end
+
+  defp finish(result) do
+    case result do
       {:return, value, status, _} ->
         {status, value}
 
@@ -68,17 +88,36 @@ defmodule OrderLab.Language.Runtime do
   defp block([statement | rest], ctx) do
     result =
       try do
-        execute(statement, ctx)
+        execute(statement, %{ctx | continuation: [{:block, rest} | ctx.continuation]})
       rescue
         error in Error ->
           reraise %{error | file: statement.file, line: statement.line}, __STACKTRACE__
       end
 
     case result do
-      {:continue, ctx} -> block(rest, ctx)
+      {:continue, child} -> block(rest, %{child | continuation: ctx.continuation})
       {:return, _, _, _} = result -> result
     end
   end
+
+  defp resume_frames([], ctx), do: {:continue, ctx}
+
+  defp resume_frames([{:block, body} | frames], ctx) do
+    case block(body, %{ctx | continuation: frames}) do
+      {:continue, child} -> resume_frames(frames, child)
+      result -> result
+    end
+  end
+
+  defp resume_frames([:end_transaction | frames], ctx) do
+    unless ctx.committed,
+      do: raise(Error, message: "Invalid transaction checkpoint", stage: :runtime)
+
+    resume_frames(frames, %{ctx | transaction: false, committed: false})
+  end
+
+  defp resume_frames([{:end_when, env} | frames], ctx),
+    do: resume_frames(frames, %{ctx | env: env})
 
   defp execute(%{annotation: type} = node, ctx) do
     result = execute(Map.delete(node, :annotation), ctx)
@@ -113,7 +152,7 @@ defmodule OrderLab.Language.Runtime do
     branch =
       if Evaluator.boolean!(evaluate(node.condition, ctx)), do: node.body, else: node.otherwise
 
-    case block(branch, ctx) do
+    case block(branch, %{ctx | continuation: [{:end_when, ctx.env} | ctx.continuation]}) do
       {:continue, child} -> continue(%{ctx | committed: child.committed})
       result -> result
     end
@@ -163,7 +202,14 @@ defmodule OrderLab.Language.Runtime do
     ctx.host.(:begin, %{})
 
     try do
-      result = block(node.body, %{ctx | transaction: true, committed: false})
+      result =
+        block(node.body, %{
+          ctx
+          | transaction: true,
+            committed: false,
+            continuation: [:end_transaction | ctx.continuation]
+        })
+
       child = result_context(result)
 
       unless child.committed,
@@ -189,7 +235,7 @@ defmodule OrderLab.Language.Runtime do
           stage: :runtime
         )
 
-    ctx.host.(:commit, %{})
+    ctx.host.(:commit, %{checkpoint: Map.drop(%{ctx | committed: true}, [:host])})
     continue(%{ctx | committed: true})
   end
 

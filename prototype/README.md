@@ -35,7 +35,7 @@ Celá aplikace je v jediném `priv/workflows/application.flow`: typy s rozsahy, 
 
 Jedna SQLite transakce vytvoří cenový snapshot, podmíněně odečte sklad, získá demo payment URL a vloží emailovou úlohu. Selhání před commitem vše vrátí. Jeden Store proces serializuje operace; to je záměrné zjednodušení lokálního prototypu. SQLite má zapnuté WAL, foreign keys a `synchronous=FULL`.
 
-Email worker čte pouze potvrzené úlohy. Diagnostická historie se ukládá mimo objednávkovou transakci, takže rollback ji nemaže. Uchovává demo osobní údaje; admin nemá přihlášení a je určený jen pro lokální použití.
+Email worker čte pouze potvrzené úlohy. Diagnostiky úspěšně potvrzeného prefixu se ukládají společně s jeho commitem. Při běžné chybě se zbývající diagnostiky uloží po rollbacku, takže chyba nezmaže historii pokusů. Uchovává demo osobní údaje; admin nemá přihlášení a je určený jen pro lokální použití.
 
 ## HTTP API
 
@@ -72,4 +72,6 @@ Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, 
 
 ## Hranice prototypu
 
-Neobsahuje HA, obnovu libovolného přerušeného workflow, skutečné platby, autentizaci ani hot updates. Po dokončené operaci data přežijí restart. Pád mezi commitem a uložením HTTP výsledku může zanechat požadavek `running`; další pokus se stejným klíčem vrátí `outcome_unknown` místo slepého zopakování. Diagnostická historie není atomická s obchodním commitem. Simulovaný email může po pádu mezi provedením a potvrzením úlohy běžet znovu; skutečný poskytovatel by potřeboval idempotenci nebo jiný explicitní kontrakt.
+Neobsahuje HA, skutečné platby, přihlášení do HTTP adminu ani hot updates. WebSocket používá deklarativně ověřené lokální bearer tokeny. Interpreter má trvalé checkpointy a po restartu obnoví bezpečné pokračování za posledním COMMIT. Po pádu mezi commitem objednávky a uložením odpovědi se tak neopakuje objednávka, sklad ani platba; klient se stejným klíčem získá obnovený výsledek.
+
+Externí CALL bez bezpečného retry kontraktu nelze slepě zopakovat. Pokud takový CALL zůstává v pokračování, požadavek se automaticky neobnoví a stejný klíč vrátí `outcome_unknown`. Změněný zdroj rovněž nesmí převzít checkpoint původního programu. Diagnostiky nepotvrzeného externího pokusu mohou při tvrdém pádu zůstat neuložené. Simulovaný email může po pádu mezi provedením a potvrzením úlohy běžet znovu; skutečný poskytovatel by potřeboval idempotenci nebo jiný explicitní kontrakt. Podrobnosti popisuje [dokumentace obnovy](docs/LANGUAGE.md#obnova-vykonávání-po-pádu).

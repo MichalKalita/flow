@@ -56,6 +56,7 @@ defmodule OrderLab.Store do
       input_json TEXT NOT NULL, status TEXT NOT NULL, http_status INTEGER,
       response_json TEXT, order_id TEXT, error_code TEXT, duration_ms INTEGER,
       idempotency_key TEXT, input_hash TEXT, replayed_from TEXT);
+    CREATE TABLE IF NOT EXISTS flow_checkpoints(request_id TEXT PRIMARY KEY REFERENCES requests(id),fingerprint TEXT NOT NULL,value TEXT NOT NULL,created_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS requests_idempotency ON requests(idempotency_key);
     CREATE TABLE IF NOT EXISTS orders (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
@@ -150,7 +151,39 @@ defmodule OrderLab.Store do
         reraise error, __STACKTRACE__
     end
 
-    {:ok, %{db: db, steps: program}}
+    {:ok, %{db: db, steps: program}, {:continue, :recover}}
+  end
+
+  def handle_continue(:recover, state) do
+    fingerprint = OrderLab.Checkpoint.fingerprint(state.steps)
+
+    query!(
+      state.db,
+      "SELECT c.* FROM flow_checkpoints c JOIN requests r ON r.id=c.request_id WHERE r.status='running' ORDER BY r.rowid"
+    )
+    |> Enum.each(fn row ->
+      try do
+        checkpoint = OrderLab.Checkpoint.decode(row["value"])
+
+        if row["fingerprint"] == fingerprint and OrderLab.Checkpoint.safe?(checkpoint) do
+          started = System.monotonic_time(:millisecond)
+
+          {status, response, context} =
+            execute_scenario(state.db, state.steps, nil, nil, row["request_id"], checkpoint)
+
+          complete_request!(state.db, row["request_id"], status, response, context, started)
+        end
+      rescue
+        error ->
+          require Logger
+
+          Logger.error(
+            "Checkpoint recovery failed for #{row["request_id"]}: #{Exception.message(error)}"
+          )
+      end
+    end)
+
+    {:noreply, state}
   end
 
   def handle_call({:websocket, path}, _, state),
@@ -488,30 +521,7 @@ defmodule OrderLab.Store do
           execute_scenario(db, state.steps, endpoint, input, request_id)
       end
 
-    Enum.each(Map.get(context, :calls, []), &save_call!(db, &1))
-    duration = System.monotonic_time(:millisecond) - started
-
-    response =
-      if is_map(response),
-        do: Map.put(response, "request_id", request_id),
-        else: %{"result" => response, "request_id" => request_id}
-
-    order_id = get_in(response, ["order", "id"])
-    code = get_in(response, ["error", "code"])
-
-    write!(
-      db,
-      "UPDATE requests SET status=?,http_status=?,response_json=?,order_id=?,error_code=?,duration_ms=? WHERE id=?",
-      [
-        if(status < 400, do: "committed", else: "failed"),
-        status,
-        json(response),
-        order_id,
-        code,
-        duration,
-        request_id
-      ]
-    )
+    response = complete_request!(db, request_id, status, response, context, started)
 
     {:reply, {status, response}, state}
   end
@@ -609,10 +619,53 @@ defmodule OrderLab.Store do
     _ -> {:error, "invalid_input", "Invalid WebSocket input"}
   end
 
-  defp execute_scenario(db, program, endpoint, input, request_id) do
+  defp complete_request!(db, request_id, status, response, context, started) do
+    exec!(db, "BEGIN IMMEDIATE")
+
+    try do
+      Enum.each(Map.get(context, :calls, []), &save_call!(db, &1))
+      duration = System.monotonic_time(:millisecond) - started
+
+      response =
+        if is_map(response),
+          do: Map.put(response, "request_id", request_id),
+          else: %{"result" => response, "request_id" => request_id}
+
+      order_id = get_in(response, ["order", "id"])
+      code = get_in(response, ["error", "code"])
+
+      write!(
+        db,
+        "UPDATE requests SET status=?,http_status=?,response_json=?,order_id=?,error_code=?,duration_ms=? WHERE id=?",
+        [
+          if(status < 400, do: "committed", else: "failed"),
+          status,
+          json(response),
+          order_id,
+          code,
+          duration,
+          request_id
+        ]
+      )
+
+      write!(db, "DELETE FROM flow_checkpoints WHERE request_id=?", [request_id])
+      exec!(db, "COMMIT")
+      response
+    rescue
+      error ->
+        SQL.execute(db, "ROLLBACK")
+        reraise error, __STACKTRACE__
+    end
+  end
+
+  defp execute_scenario(db, program, endpoint, input, request_id, checkpoint \\ nil) do
     key = {:flow_calls, request_id}
     Process.put(key, [])
-    request = %{"id" => request_id, "time" => now()}
+
+    request =
+      if checkpoint,
+        do: checkpoint.env["request"],
+        else: %{"id" => request_id, "time" => now(), "path" => endpoint.path}
 
     invoke = fn operation, module, input ->
       [plugin, method] = String.split(operation, ".", parts: 2)
@@ -621,11 +674,44 @@ defmodule OrderLab.Store do
       result
     end
 
-    host = OrderLab.Language.Native.host(db, program, request, invoke)
+    native = OrderLab.Language.Native.host(db, program, request, invoke)
+
+    save_checkpoint = fn value ->
+      write!(
+        db,
+        "INSERT INTO flow_checkpoints(request_id,fingerprint,value,created_at) VALUES (?,?,?,?) ON CONFLICT(request_id) DO UPDATE SET fingerprint=excluded.fingerprint,value=excluded.value,created_at=excluded.created_at",
+        [
+          request_id,
+          OrderLab.Checkpoint.fingerprint(program),
+          OrderLab.Checkpoint.encode(value),
+          now()
+        ]
+      )
+    end
+
+    host = fn action, args ->
+      case action do
+        :checkpoint ->
+          save_checkpoint.(args.checkpoint)
+
+        :commit ->
+          save_checkpoint.(args.checkpoint)
+          Enum.each(Process.get(key), &save_call!(db, &1))
+          OrderLab.Checkpoint.probe(request, :before_commit)
+          native.(:commit, args)
+          Process.put(key, [])
+          OrderLab.Checkpoint.probe(request, :after_commit)
+
+        other ->
+          native.(other, args)
+      end
+    end
 
     try do
       {status, result} =
-        OrderLab.Language.Runtime.run(endpoint, input, program.types, host, request)
+        if checkpoint,
+          do: OrderLab.Language.Runtime.resume(checkpoint, host),
+          else: OrderLab.Language.Runtime.run(endpoint, input, program.types, host, request)
 
       {status, result, %{calls: Process.get(key)}}
     rescue

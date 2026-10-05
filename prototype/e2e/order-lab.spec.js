@@ -12,13 +12,13 @@ let successRequest;
 let successOrder;
 let savedPhoto;
 
-async function startServer() {
+async function startServer(extraEnv={}) {
   server = spawn('mix', ['run', '--no-halt'], {
     cwd: root,
     detached: true,
     env: {...process.env, PORT:'4100', MQTT_PORT:'18830', FLOW_PATH:path.join(directory,'application.flow'), DATABASE_PATH:path.join(directory, 'e2e.sqlite3'),
       ...(fs.existsSync(path.join(root,'.mix')) ? {MIX_HOME:path.join(root,'.mix')} : {}),
-      ...(fs.existsSync(path.join(root,'.hex')) ? {HEX_HOME:path.join(root,'.hex')} : {})},
+      ...(fs.existsSync(path.join(root,'.hex')) ? {HEX_HOME:path.join(root,'.hex')} : {}), ...extraEnv},
     stdio: ['ignore','pipe','pipe']
   });
   server.stdout.on('data', d => serverOutput += d.toString());
@@ -32,11 +32,27 @@ async function startServer() {
 }
 
 async function stopServer() {
-  if (!server || server.exitCode !== null) return;
+  if (!server || server.exitCode !== null || server.signalCode !== null) return;
   const exited = new Promise(resolve => server.once('exit', resolve));
   process.kill(-server.pid, 'SIGTERM');
   await exited;
 }
+
+async function crashServer() {
+  const exited=new Promise(resolve=>server.once('exit',resolve));
+  process.kill(-server.pid,'SIGKILL');await exited;
+}
+async function crashRequest(route,body,key,phase='after_commit') {
+  await stopServer();
+  const marker=path.join(directory,'crash-'+key+'.json');
+  await startServer({FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:phase,FLOW_E2E_CRASH_ROUTE:route});
+  const pending=fetch('http://127.0.0.1:4100'+route,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(body)}).catch(()=>null);
+  await expect.poll(()=>fs.existsSync(marker)).toBe(true);
+  const probe=JSON.parse(fs.readFileSync(marker,'utf8'));
+  await crashServer();await pending;
+  return probe;
+}
+function sql(query) {return execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),query],{encoding:'utf8'}).trim();}
 
 const payload = (overrides = {}) => ({user_id:'u1',items:[{product_id:'p1',quantity:1}],payment_method:'card',...overrides});
 async function snapshot(request) { const r=await request.get('/api/admin'); expect(r.status()).toBe(200); return r.json(); }
@@ -100,6 +116,21 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/recovery
+INPUT name String
+INPUT branch Bool
+TRANSACTION
+    first = INSERT Notes WITH {id: uuid("recovery"), text: :name, rating: 4, tags: []}
+    WHEN :branch
+        local = "only inside branch"
+        COMMIT
+    ELSE
+        COMMIT
+TRANSACTION
+    second = INSERT Notes WITH {id: uuid("recovery"), text: concat([:name, "-second"]), rating: 5, tags: []}
+    COMMIT
+RETURN {first: first, second: second, original_time: request.time}
+
 HTTP DELETE /api/test-device-access/:id
 INPUT id String
 TRANSACTION
@@ -742,6 +773,63 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const changed=await wsClient('changed-david-token');
     try {changed.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'mower2'},latest:true});expect((await changed.next()).type).toBe('subscribed');expect((await changed.next()).payload.battery).toBe(63);}finally{changed.close();}
     await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('SIGKILL after order COMMIT recovers its response without repeating payment, inventory or queued email', async ({request}) => {
+    const before=await snapshot(request);const input=payload({items:[{product_id:'p2',quantity:1}]});
+    const probe=await crashRequest('/api/orders',input,'crash-order');
+    expect(sql(`SELECT status FROM requests WHERE id='${probe.request_id}'`)).toBe('running');
+    const committedId=sql(`SELECT id FROM orders WHERE request_id='${probe.request_id}'`);expect(committedId).toBeTruthy();
+    expect(sql(`SELECT count(*) FROM plugin_calls WHERE request_id='${probe.request_id}' AND plugin='Payment'`)).toBe('1');
+    await startServer();
+    const replay=await post(request,input,'crash-order');expect(replay.status).toBe(201);expect(replay.body.replayed).toBe(true);expect(replay.body.order.id).toBe(committedId);
+    const after=await snapshot(request);expect(after.orders.length).toBe(before.orders.length+1);
+    expect(after.products.find(p=>p.id==='p2').stock).toBe(before.products.find(p=>p.id==='p2').stock-1);
+    expect(after.plugin_calls.filter(c=>c.request_id===probe.request_id && c.plugin==='Payment')).toHaveLength(1);
+    expect(after.email_jobs.filter(j=>j.request_id===probe.request_id)).toHaveLength(1);
+    expect(sql(`SELECT count(*) FROM flow_checkpoints WHERE request_id='${probe.request_id}'`)).toBe('0');
+  });
+
+  test('durable continuation preserves branch scopes and resumes sequential transactions from the committed boundary', async ({request}) => {
+    for(const branch of [true,false]) {
+      const name='crash-branch-'+branch;const probe=await crashRequest('/api/recovery',{name,branch},name);
+      const first=sql(`SELECT id FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text')='${name}'`);expect(first).toBeTruthy();
+      await startServer();
+      const response=await request.post('/api/recovery',{data:{name,branch},headers:{'Idempotency-Key':name}});expect(response.status()).toBe(200);const result=await response.json();
+      expect(result.replayed).toBe(true);expect(result.first.id).toBe(first);expect(result.second.text).toBe(name+'-second');
+      expect(sql(`SELECT count(*) FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text') IN ('${name}','${name}-second')`)).toBe('2');
+      expect(result.original_time).toBe(probe.request_time);
+    }
+  });
+
+  test('SIGKILL before COMMIT rolls back partial writes and restarts a safe native scenario once', async ({request}) => {
+    const name='crash-before';await crashRequest('/api/recovery',{name,branch:true},name,'before_commit');
+    expect(sql(`SELECT count(*) FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text')='${name}'`)).toBe('0');
+    await startServer();
+    const response=await request.post('/api/recovery',{data:{name,branch:true},headers:{'Idempotency-Key':name}});expect(response.status()).toBe(200);expect((await response.json()).replayed).toBe(true);
+    expect(sql(`SELECT count(*) FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text') IN ('${name}','${name}-second')`)).toBe('2');
+  });
+
+  test('a changed application cannot resume an old checkpoint until the matching source is restored', async ({request}) => {
+    const name='crash-version';await crashRequest('/api/recovery',{name,branch:false},name);
+    const file=path.join(directory,'application.flow');const original=fs.readFileSync(file,'utf8');fs.writeFileSync(file,original+'\n# incompatible program fingerprint\n');
+    await startServer();
+    let response=await request.post('/api/recovery',{data:{name,branch:false},headers:{'Idempotency-Key':name}});expect(response.status()).toBe(409);expect((await response.json()).error.code).toBe('outcome_unknown');
+    await stopServer();fs.writeFileSync(file,original);await startServer();
+    response=await request.post('/api/recovery',{data:{name,branch:false},headers:{'Idempotency-Key':name}});expect(response.status()).toBe(200);expect((await response.json()).replayed).toBe(true);
+    expect(sql(`SELECT count(*) FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text') IN ('${name}','${name}-second')`)).toBe('2');
+  });
+
+  test('a crash before order COMMIT never blindly repeats an external operation with an unknown outcome', async ({request}) => {
+    const before=await snapshot(request);const input=payload({items:[{product_id:'p2',quantity:1}]});
+    const probe=await crashRequest('/api/orders',input,'crash-external','before_commit');
+    expect(sql(`SELECT count(*) FROM orders WHERE request_id='${probe.request_id}'`)).toBe('0');
+    await startServer();
+    const replay=await post(request,input,'crash-external');expect(replay.status).toBe(409);expect(replay.body.error.code).toBe('outcome_unknown');
+    const after=await snapshot(request);expect(after.orders).toEqual(before.orders);expect(after.products).toEqual(before.products);
+    expect(after.plugin_calls.filter(c=>c.request_id===probe.request_id && c.plugin==='Payment')).toHaveLength(0);
+    expect(sql(`SELECT status FROM requests WHERE id='${probe.request_id}'`)).toBe('running');
+    expect(sql(`SELECT count(*) FROM flow_checkpoints WHERE request_id='${probe.request_id}'`)).toBe('1');
   });
 
   test('process restart preserves SQL state, request history, plugin calls and completed idempotency keys', async ({request}) => {
