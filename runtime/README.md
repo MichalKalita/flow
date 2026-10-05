@@ -25,9 +25,15 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/api/orders
 ```
 
-`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje devět HTTP operací a dva WebSocket odběry a eventový automat. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
+`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje deset HTTP operací a dva WebSocket odběry a eventový automat. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
 
-Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Pluginy, obrázky a fronta ještě nejsou přeneseny. Jejich operace se při kompilaci odmítnou. `[publish]` uloží streamový záznam do SQLite, odkud se doručí aktuálně autorizovaným MQTT/WebSocket odběrům. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
+Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Externí fronta ještě není přenesena. Volání externích pluginů se zatím odmítá. Nativní pluginy `Payment.createUrl`, `Image.resize` a `Files.put` už fungují podle deklarovaných kontraktů. `[publish]` uloží streamový záznam do SQLite, odkud se doručí aktuálně autorizovaným MQTT/WebSocket odběrům. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
+
+## Fotografie a pluginy
+
+`POST /api/products/{productId}/photo` přijímá JSON s `photo` jako base64 PNG/JPEG, volitelně `width` a `height`. Rozměry a byte limit se kontrolují skutečným dekódováním. `Image.resize` zachová poměr stran, `Files.put` uloží PNG BLOB spolu s entitami `File` a `Photo` v jedné SQLite transakci. Pluginy mají vlastní pozitivní `INVOKE` granty; právo na volání nepřeskočí práva k entitám ani polím argumentů.
+
+Seedovaný katalogový administrátor má JWT subject `idp:catalog-admin`. Uživatel bez role `CATALOG_ADMIN` nemůže fotografii uložit. Výsledné `File.url` vede na `/api/files/{id}`; download znovu ověří aktuální `READ File` před čtením BLOBu. Neautorizovaný upload nezanechá metadata ani soubor.
 
 ## MQTT a WebSocket
 

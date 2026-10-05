@@ -50,6 +50,8 @@ struct Session<'a> {
     steps: usize,
     now: String,
     sql: Vec<String>,
+    invocations: Vec<(String, Value)>,
+    blobs: BTreeMap<String, Vec<u8>>,
 }
 impl Runtime {
     pub fn open(source: &str, path: &str, config: Config) -> Result<Self> {
@@ -81,6 +83,21 @@ impl Runtime {
                     ),
                 ));
             }
+        }
+        for (name, method) in &program.plugins {
+            let expected = match name.as_str() {
+                "Payment.createUrl" | "Image.resize" => "pure",
+                "Files.put" => "transactional",
+                _ => {
+                    return Err(Error::new(
+                        "configuration",
+                        format!("No native implementation for {name}"),
+                    ));
+                }
+            };
+            if method.mode != expected {
+                return Err(Error::new("configuration", "Native plugin mode mismatch"));
+            };
         }
         let db = Connection::open(path)?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;")?;
@@ -143,6 +160,9 @@ impl Runtime {
                         ))?;
                     }
                 }
+            }
+            if program.plugins.contains_key("Files.put") {
+                db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_blobs(file_id TEXT PRIMARY KEY REFERENCES File(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,bytes BLOB NOT NULL);")?;
             }
             for (entity, rows) in &program.seeds {
                 for node in rows {
@@ -243,6 +263,8 @@ impl Runtime {
                     steps: 0,
                     now: now.clone(),
                     sql: vec![],
+                    invocations: vec![],
+                    blobs: BTreeMap::new(),
                 };
                 let mut scope = Scope {
                     defs: operation.bindings.clone(),
@@ -284,6 +306,39 @@ impl Runtime {
         }
         Ok(())
     }
+    pub fn file_bytes(&self, id: &str, credential: Option<&str>) -> Result<Vec<u8>> {
+        if !self.program.plugins.contains_key("Files.put") {
+            return Err(err("not_found"));
+        };
+        let (actor_type, actor) =
+            authenticate(&self.program, &self.db, &self.config, credential, "HTTP")?;
+        let mut session = Session {
+            p: &self.program,
+            db: &self.db,
+            actor,
+            actor_type,
+            changes: BTreeMap::new(),
+            cache: BTreeMap::new(),
+            permission_stack: BTreeSet::new(),
+            steps: 0,
+            now: Utc::now().to_rfc3339(),
+            sql: vec![],
+            invocations: vec![],
+            blobs: BTreeMap::new(),
+        };
+        let target = Value::reference("File", id);
+        if !session.allowed("READ", &target, None)? {
+            return Err(err("not_found"));
+        };
+        self.db
+            .query_row(
+                "SELECT bytes FROM _flow_blobs WHERE file_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| err("not_found"))
+    }
     pub fn authenticate_transport(&self, credential: Option<&str>, transport: &str) -> Result<()> {
         authenticate(&self.program, &self.db, &self.config, credential, transport).map(|_| ())
     }
@@ -315,12 +370,9 @@ impl Runtime {
         credential: Option<&str>,
         transport: &str,
     ) -> Result<String> {
-        let definition = self
-            .program
-            .streams
-            .get(stream)
-            .ok_or_else(|| err("not_found"))?
-            .clone();
+        if !self.program.streams.contains_key(stream) {
+            return Err(err("not_found"));
+        };
         self.db.execute_batch("BEGIN IMMEDIATE;")?;
         let result = (|| -> Result<_> {
             let (actor_type, actor) =
@@ -336,45 +388,14 @@ impl Runtime {
                 steps: 0,
                 now: Utc::now().to_rfc3339(),
                 sql: vec![],
+                invocations: vec![],
+                blobs: BTreeMap::new(),
             };
             let fields = Value::from_json(&input)?.fields()?.clone();
             let reference = session.create(stream, fields)?;
             session.authorize()?;
             session.apply()?;
             self.run_events(vec![reference.clone()])?;
-            let cutoff = (Utc::now() - chrono::Duration::seconds(definition.duration)).to_rfc3339();
-            self.db.execute(
-                &format!(
-                    "DELETE FROM {} WHERE json_extract(receivedAt,'$') < ?1",
-                    q(stream)
-                ),
-                [cutoff],
-            )?;
-            let groups = definition
-                .topic
-                .split('/')
-                .filter_map(|s| s.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
-                .collect::<Vec<_>>();
-            let mut predicates = vec![];
-            let mut group_values = vec![];
-            for field in groups {
-                predicates.push(format!("{}=?{}", q(field), group_values.len() + 1));
-                group_values.push(storage(&session.raw(&reference, field)?)?);
-            }
-            let where_clause = if predicates.is_empty() {
-                String::new()
-            } else {
-                format!("WHERE {}", predicates.join(" AND "))
-            };
-            let sql = format!(
-                "DELETE FROM {} WHERE id IN (SELECT id FROM {} {} ORDER BY rowid DESC LIMIT -1 OFFSET {})",
-                q(stream),
-                q(stream),
-                where_clause,
-                definition.max_messages
-            );
-            self.db
-                .execute(&sql, rusqlite::params_from_iter(group_values))?;
             reference.text()
         })();
         match result {
@@ -442,6 +463,8 @@ impl Runtime {
                 steps: 0,
                 now: Utc::now().to_rfc3339(),
                 sql: vec![],
+                invocations: vec![],
+                blobs: BTreeMap::new(),
             };
             let mut messages = vec![];
             for (name, stream) in &self.program.streams {
@@ -538,6 +561,8 @@ impl Runtime {
                 steps: 0,
                 now: now.clone(),
                 sql: vec![],
+                invocations: vec![],
+                blobs: BTreeMap::new(),
             };
             let input = Value::from_json(&input)?;
             let inputs = input.fields()?;
@@ -868,6 +893,11 @@ impl Session<'_> {
     fn raw(&mut self, target: &Value, field: &str) -> Result<Value> {
         self.step()?;
         match target {
+            Value::Image(image) => match field {
+                "width" => Ok(integer(image.width as usize)),
+                "height" => Ok(integer(image.height as usize)),
+                _ => Err(err("invalid_input")),
+            },
             Value::List(v) => Ok(Value::List(
                 v.iter()
                     .map(|v| self.raw(v, field))
@@ -1150,13 +1180,19 @@ impl Session<'_> {
             "eq" | "ne" => {
                 let a = self.eval(arg(0)?, scope, policy)?;
                 let b = self.eval(arg(1)?, scope, policy)?;
+                if matches!((&a,&b),(Value::BrandedNumber(a,_),Value::BrandedNumber(b,_)) if a!=b) {
+                    return Err(err("invalid_input"));
+                };
                 Ok(Value::Bool(equal(&a, &b) == (n.head() == "eq")))
             }
             "gt" | "ge" | "lt" | "le" => {
                 let a = self.eval(arg(0)?, scope, policy)?;
                 let b = self.eval(arg(1)?, scope, policy)?;
                 let ordering = match (&a, &b) {
-                    (Value::Num(a), Value::Num(b)) => a.cmp(b),
+                    (Value::Num(a), Value::Num(b))
+                    | (Value::BrandedNumber(_, a), Value::Num(b))
+                    | (Value::Num(a), Value::BrandedNumber(_, b)) => a.cmp(b),
+                    (Value::BrandedNumber(a, x), Value::BrandedNumber(b, y)) if a == b => x.cmp(y),
                     (Value::Str(a), Value::Str(b)) => a.cmp(b),
                     _ => return Err(err("invalid_input")),
                 };
@@ -1253,6 +1289,11 @@ impl Session<'_> {
             }
             "as" => {
                 let value = self.eval(arg(1)?, scope, policy)?;
+                let value = if let Value::BrandedNumber(_, number) = value {
+                    Value::Num(number)
+                } else {
+                    value
+                };
                 self.p
                     .validate(&Type::Named(arg(0)?.text()?.into()), value, None)
             }
@@ -1269,6 +1310,65 @@ impl Session<'_> {
                     0..limit.min(values.len())
                 };
                 Ok(Value::List(values[range].to_vec()))
+            }
+            "invoke" => {
+                let name = arg(0)?.text()?;
+                let method = self
+                    .p
+                    .plugins
+                    .get(name)
+                    .ok_or_else(|| err("invalid_program"))?
+                    .clone();
+                let input = self.eval(arg(1)?, scope, policy)?;
+                let input = self.materialize(&Type::Record(method.inputs), input)?;
+                let output = match name {
+                    "Payment.createUrl" => Value::record(BTreeMap::from([(
+                        "url".into(),
+                        Value::Str(format!(
+                            "/payments/{}",
+                            input
+                                .fields()?
+                                .get("orderId")
+                                .ok_or_else(|| err("invalid_input"))?
+                                .text()?
+                        )),
+                    )])),
+                    "Image.resize" => {
+                        let fields = input.fields()?;
+                        let Value::Image(image) =
+                            fields.get("image").ok_or_else(|| err("invalid_input"))?
+                        else {
+                            return Err(err("invalid_input"));
+                        };
+                        let width =
+                            count(fields.get("width").ok_or_else(|| err("invalid_input"))?)?;
+                        let height =
+                            count(fields.get("height").ok_or_else(|| err("invalid_input"))?)?;
+                        Value::Image(image.resize(width as u32, height as u32)?)
+                    }
+                    "Files.put" => {
+                        let Value::Image(image) = input
+                            .fields()?
+                            .get("file")
+                            .ok_or_else(|| err("invalid_input"))?
+                        else {
+                            return Err(err("invalid_input"));
+                        };
+                        let id = uuid::Uuid::new_v4().to_string();
+                        let reference = self.create(
+                            "File",
+                            BTreeMap::from([
+                                ("id".into(), Value::Id("File".into(), id.clone())),
+                                ("url".into(), Value::Str(format!("/api/files/{id}"))),
+                            ]),
+                        )?;
+                        self.blobs.insert(id, image.bytes.clone());
+                        reference
+                    }
+                    _ => return Err(err("invalid_program")),
+                };
+                self.invocations.push((name.into(), input));
+                self.p.validate(&method.output, output, None)
             }
             "live" => self.eval(arg(0)?, scope, policy),
             "single" => {
@@ -1297,7 +1397,12 @@ impl Session<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 pairs.sort_by(|(a, _), (b, _)| {
                     let ordering = match (a, b) {
-                        (Value::Num(a), Value::Num(b)) => a.cmp(b),
+                        (Value::Num(a), Value::Num(b))
+                        | (Value::BrandedNumber(_, a), Value::Num(b))
+                        | (Value::Num(a), Value::BrandedNumber(_, b)) => a.cmp(b),
+                        (Value::BrandedNumber(a, x), Value::BrandedNumber(b, y)) if a == b => {
+                            x.cmp(y)
+                        }
                         _ => a
                             .text()
                             .unwrap_or_default()
@@ -1569,6 +1674,45 @@ impl Session<'_> {
         change.changed.insert(field.into());
         Ok(())
     }
+    fn materialize(&mut self, t: &Type, value: Value) -> Result<Value> {
+        let resolved = self.p.resolve(t)?.clone();
+        let value = match resolved {
+            Type::Record(fields) => {
+                if let Value::Record {
+                    fields: values,
+                    kind: None,
+                    parent: None,
+                } = &value
+                    && values.keys().any(|key| !fields.contains_key(key))
+                {
+                    return Err(err("invalid_input"));
+                };
+                let mut output = BTreeMap::new();
+                for (name, field) in fields {
+                    let missing = matches!(&value,Value::Record{fields,kind:None,parent:None} if !fields.contains_key(&name));
+                    let field_value = if missing {
+                        Value::Null
+                    } else {
+                        self.field(&value, &name, false)?
+                    };
+                    output.insert(name, self.materialize(&field.ty, field_value)?);
+                }
+                Value::record(output)
+            }
+            Type::List(inner, _, _) => {
+                let values = self.visible(value.list()?.to_vec())?;
+                Value::List(
+                    values
+                        .into_iter()
+                        .map(|value| self.materialize(&inner, value))
+                        .collect::<Result<_>>()?,
+                )
+            }
+            Type::Optional(inner) if value != Value::Null => self.materialize(&inner, value)?,
+            _ => value,
+        };
+        self.p.validate(t, value, None)
+    }
     fn authorize(&mut self) -> Result<()> {
         for change in self.changes.values().cloned().collect::<Vec<_>>() {
             let before = if change.action == "CREATE" {
@@ -1613,6 +1757,15 @@ impl Session<'_> {
                 self.references(value)?;
             }
         }
+        for (name, args) in self.invocations.clone() {
+            let facts = BTreeMap::from([
+                ("args".into(), args),
+                ("transaction".into(), Value::Str("transaction".into())),
+            ]);
+            if !self.granted("INVOKE", &name, &Value::Null, Some(facts))? {
+                return Err(err("forbidden"));
+            };
+        }
         Ok(())
     }
     fn references(&self, v: &Value) -> Result<()> {
@@ -1641,6 +1794,12 @@ impl Session<'_> {
         Ok(())
     }
     fn project(&mut self, t: &Type, value: Value) -> Result<Value> {
+        if matches!(t, Type::Named(_)) && matches!(self.p.resolve(t)?, Type::Number { .. }) {
+            return self
+                .p
+                .validate(t, value, None)
+                .map_err(|_| err("invalid_output"));
+        };
         let t = self.p.resolve(t)?.clone();
         match t {
             Type::Optional(inner) => {
@@ -1726,6 +1885,51 @@ impl Session<'_> {
                 }
                 _ => return Err(err("invalid_program")),
             }
+        }
+        for (id, bytes) in &self.blobs {
+            self.db.execute(
+                "INSERT INTO _flow_blobs(file_id,bytes) VALUES(?1,?2)",
+                rusqlite::params![id, bytes],
+            )?;
+        }
+        for ((entity, _), change) in &self.changes {
+            let Some(stream) = self.p.streams.get(entity) else {
+                continue;
+            };
+            if change.action != "CREATE" {
+                continue;
+            };
+            let now = chrono::DateTime::parse_from_rfc3339(&self.now)
+                .map_err(|_| err("invalid_input"))?;
+            let cutoff = (now - chrono::Duration::seconds(stream.duration)).to_rfc3339();
+            self.db.execute(
+                &format!(
+                    "DELETE FROM {} WHERE json_extract(receivedAt,'$') < ?1",
+                    q(entity)
+                ),
+                [cutoff],
+            )?;
+            let mut predicates = vec![];
+            let mut values = vec![];
+            for field in stream
+                .topic
+                .split('/')
+                .filter_map(|s| s.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
+            {
+                predicates.push(format!("{}=?{}", q(field), values.len() + 1));
+                values.push(storage(
+                    change
+                        .after
+                        .get(field)
+                        .ok_or_else(|| err("invalid_program"))?,
+                )?);
+            }
+            let clause = if predicates.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", predicates.join(" AND "))
+            };
+            self.db.execute(&format!("DELETE FROM {} WHERE id IN (SELECT id FROM {} {} ORDER BY rowid DESC LIMIT -1 OFFSET {})",q(entity),q(entity),clause,stream.max_messages),rusqlite::params_from_iter(values))?;
         }
         Ok(())
     }

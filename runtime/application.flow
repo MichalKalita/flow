@@ -322,7 +322,9 @@
     [stock [set product.stock remaining]]]]
   [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
   [orderId [new OrderID]]
-  [payment [record [url [concat "/payments/" orderId]]]]
+  [payment [invoke Payment.createUrl [record
+    [orderId orderId] [amount total] [currency "CZK"]
+    [country user.country] [method $paymentMethod]]]]
   [order [create Order [record
     [id orderId] [user user] [requestId request.id] [createdAt request.time]
     [items lines.snapshot] [total total] [paymentMethod $paymentMethod]
@@ -378,3 +380,37 @@
 
 
 [seed Service [rows [record [id "device-automation"] [keyHash "b2430e50684c45ecef24f0f00985f1287ea9cf4d7d86f2949eb9ea6849cc299d"] [roles [list DEVICE_AUTOMATION]]]]]
+
+[type ProductPhoto [image [maxBytes 10485760] [maxWidth 8000] [maxHeight 8000]]]
+[plugin Payment
+  [createUrl
+    [input orderId OrderID] [input amount OrderTotal] [input currency String]
+    [input country String] [input method PaymentMethod] [output PaymentOutput] [pure]]]
+[plugin Image
+  [resize [input image ProductPhoto] [input width PhotoSize] [input height PhotoSize]
+    [output ProductPhoto] [pure]]]
+[plugin Files [put [input file ProductPhoto] [output File] [transactional]]]
+[mutate UploadPhoto
+  [input productId ProductID] [input photo ProductPhoto]
+  [input width PhotoSize [default 800]] [input height PhotoSize [default 600]]
+  [output PhotoReceipt]
+  [http POST "/api/products/{productId}/photo" [status 201]]
+  [atomic]
+  [product [entity $productId]]
+  [resized [invoke Image.resize [record [image $photo] [width $width] [height $height]]]]
+  [file [invoke Files.put [record [file resized]]]]
+  [photo [create Photo [record [id [new PhotoID]] [product product]
+    [file file] [width [as PhotoSize resized.width]] [height [as PhotoSize resized.height]]]]]
+  [result [record [photo photo] [file file]]]]
+[permissions User
+[Payment.createUrl [INVOKE [when [and
+    [eq args.currency "CZK"]
+    [any [creates transaction Order] order [and
+      [eq order.user actor] [eq order.id args.orderId]
+      [eq order.total args.amount] [eq order.user.country args.country]
+      [eq order.paymentMethod args.method]]]]]]]
+[Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]
+[Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
+[permissions Service [Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]] [Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
+
+[seed User [rows [record [id "catalog-admin"] [identitySubject "idp:catalog-admin"] [roles [list CATALOG_ADMIN]] [name "Catalog admin"] [email "catalog@example.test"] [country "CZ"]]]]

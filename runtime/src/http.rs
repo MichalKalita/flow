@@ -94,6 +94,22 @@ async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) 
                     .into_response(),
             );
         }
+        if method == "GET" && path.starts_with("/api/files/") {
+            let id = decode(path.trim_start_matches("/api/files/"))?;
+            if id.is_empty() || id.contains('/') {
+                return Err(Error::new("not_found", "File missing"));
+            };
+            let bytes = runtime
+                .lock()
+                .map_err(|_| Error::new("internal", "Runtime lock failed"))?
+                .file_bytes(&id, authorization.as_deref())?;
+            return Ok(Response::builder()
+                .status(200)
+                .header("content-type", "image/png")
+                .header("cache-control", "no-store")
+                .body(Body::from(bytes))
+                .unwrap());
+        }
         let (name, status, mut inputs) = {
             let guard = runtime
                 .lock()
@@ -121,9 +137,9 @@ async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) 
                 )?;
             }
         }
-        let bytes = to_bytes(body, 1024 * 1024)
+        let bytes = to_bytes(body, 16 * 1024 * 1024)
             .await
-            .map_err(|_| Error::new("invalid_input", "Body exceeds 1 MiB"))?;
+            .map_err(|_| Error::new("invalid_input", "Body exceeds 16 MiB"))?;
         if !bytes.is_empty() {
             let content_type = parts
                 .headers

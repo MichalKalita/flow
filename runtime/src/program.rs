@@ -9,6 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 pub enum Type {
+    Image {
+        max_bytes: usize,
+        width: u32,
+        height: u32,
+    },
     String,
     Bool,
     DateTime,
@@ -34,6 +39,12 @@ pub struct Field {
 #[derive(Clone, Debug)]
 pub struct Entity {
     pub fields: BTreeMap<String, Field>,
+}
+#[derive(Clone, Debug)]
+pub struct Method {
+    pub inputs: BTreeMap<String, Field>,
+    pub output: Type,
+    pub mode: String,
 }
 #[derive(Clone, Debug)]
 pub struct Stream {
@@ -81,6 +92,7 @@ pub struct Auth {
 #[derive(Clone, Debug)]
 pub struct Program {
     pub types: BTreeMap<String, Type>,
+    pub plugins: BTreeMap<String, Method>,
     pub entities: BTreeMap<String, Entity>,
     pub operations: Vec<Operation>,
     pub grants: Vec<Grant>,
@@ -189,6 +201,23 @@ fn ty(n: &Node) -> Result<Type> {
         });
     };
     Ok(match n.head() {
+        "image" => {
+            let max_bytes = constant(opt(n, "maxBytes")?.arg(0)?)?
+                .to_integer()
+                .to_usize()
+                .filter(|v| *v > 0 && *v <= 64 * 1024 * 1024)
+                .ok_or_else(|| fail("Invalid image byte limit"))?;
+            let width = size(opt(n, "maxWidth")?.arg(0)?)? as u32;
+            let height = size(opt(n, "maxHeight")?.arg(0)?)? as u32;
+            if width == 0 || height == 0 {
+                return Err(fail("Image dimensions must be positive"));
+            };
+            Type::Image {
+                max_bytes,
+                width,
+                height,
+            }
+        }
         "id" => Type::Id(ident(n.arg(0)?.text()?)?),
         "integer" | "decimal" => {
             let range = opt(n, "range")?;
@@ -223,6 +252,7 @@ impl Program {
         let nodes = parse(source)?;
         let mut p = Self {
             types: BTreeMap::new(),
+            plugins: BTreeMap::new(),
             entities: BTreeMap::new(),
             operations: vec![],
             grants: vec![],
@@ -291,6 +321,7 @@ impl Program {
                             unique: false,
                             generated: true,
                         });
+                        fs.get_mut("receivedAt").unwrap().generated = true;
                     }
                     unique(&mut p.entities, name, Entity { fields: fs })?;
                 }
@@ -376,12 +407,49 @@ impl Program {
                     }
                 }
                 "plugin" => {
-                    return Err(fail(
-                        "This minimal HTTP runtime has no plugin host; remove plugin declarations",
-                    ));
+                    let plugin = ident(n.arg(0)?.text()?)?;
+                    for method in &n.args()?[1..] {
+                        let name = format!("{plugin}.{}", ident(method.head())?);
+                        let mut inputs = BTreeMap::new();
+                        for input in method.args()?.iter().filter(|n| n.head() == "input") {
+                            unique(
+                                &mut inputs,
+                                ident(input.arg(0)?.text()?)?,
+                                Field {
+                                    ty: ty(input.arg(1)?)?,
+                                    relation: None,
+                                    unique: false,
+                                    generated: false,
+                                },
+                            )?;
+                        }
+                        let output = ty(opt(method, "output")?.arg(0)?)?;
+                        let mode = if method.option("pure").is_some() {
+                            "pure"
+                        } else if method.option("transactional").is_some() {
+                            "transactional"
+                        } else {
+                            "external"
+                        };
+                        unique(
+                            &mut p.plugins,
+                            name,
+                            Method {
+                                inputs,
+                                output,
+                                mode: mode.into(),
+                            },
+                        )?;
+                    }
                 }
                 _ => return Err(fail(format!("Unknown declaration {}", n.head()))),
             }
+        }
+        for method in p.plugins.values() {
+            for field in method.inputs.values() {
+                p.check_type(&field.ty, false, &mut BTreeSet::new())?;
+            }
+            p.check_type(&method.output, false, &mut BTreeSet::new())?;
         }
         for name in p.types.keys() {
             if p.entities.contains_key(name) {
@@ -449,7 +517,9 @@ impl Program {
                 let mut rules = vec![];
                 for rule in target.args()? {
                     let action = rule.head().to_owned();
-                    if !["READ", "USE", "CREATE", "UPDATE", "DELETE"].contains(&action.as_str()) {
+                    if !["READ", "USE", "CREATE", "UPDATE", "DELETE", "INVOKE"]
+                        .contains(&action.as_str())
+                    {
                         return Err(fail("Unknown action"));
                     };
                     let condition = opt(rule, "when")?.arg(0)?.clone();
@@ -468,7 +538,7 @@ impl Program {
                         .transpose()?
                         .unwrap_or_default();
                     for included in &includes {
-                        if !["READ", "USE", "CREATE", "UPDATE", "DELETE"]
+                        if !["READ", "USE", "CREATE", "UPDATE", "DELETE", "INVOKE"]
                             .contains(&included.as_str())
                         {
                             return Err(fail("Unknown inherited action"));
@@ -625,7 +695,11 @@ impl Program {
             if event.is_some() && !inputs.is_empty() {
                 return Err(fail("Event handlers cannot take request inputs"));
             };
+            for binding in bindings.values() {
+                p.check_plugins(binding, mutation)?;
+            }
             let result = opt(n, "result")?.arg(0)?.clone();
+            p.check_plugins(&result, mutation)?;
             check_expr(&result, false)?;
             if stream.is_some() && result.head() != "live" {
                 return Err(fail("WebSocket result requires live collection"));
@@ -711,6 +785,37 @@ impl Program {
         }
         Ok(p)
     }
+    fn check_plugins(&self, node: &Node, mutation: bool) -> Result<()> {
+        if node.head() == "invoke" {
+            let name = node.arg(0)?.text()?;
+            let method = self
+                .plugins
+                .get(name)
+                .ok_or_else(|| fail("Unknown plugin method"))?;
+            if method.mode == "external" || (!mutation && method.mode != "pure") {
+                return Err(fail("Invocation mode does not match operation"));
+            };
+        }
+        if node.head() == "record" {
+            for field in node.args()? {
+                self.check_plugins(field.arg(0)?, mutation)?;
+            }
+            return Ok(());
+        };
+        if node.head() == "map" {
+            self.check_plugins(node.arg(0)?, mutation)?;
+            for binding in &node.args()?[2..] {
+                self.check_plugins(binding.arg(0)?, mutation)?;
+            }
+            return Ok(());
+        };
+        if let Node::List(nodes) = node {
+            for node in nodes.iter().skip(1) {
+                self.check_plugins(node, mutation)?;
+            }
+        }
+        Ok(())
+    }
     pub fn resolve<'a>(&'a self, t: &'a Type) -> Result<&'a Type> {
         if let Type::Named(n) = t
             && let Some(t) = self.types.get(n)
@@ -758,6 +863,9 @@ impl Program {
         Ok(())
     }
     fn permission_target(&self, target: &str) -> Result<()> {
+        if self.plugins.contains_key(target) {
+            return Ok(());
+        };
         let (entity, field) = target
             .split_once('.')
             .map(|(a, b)| (a, Some(b)))
@@ -778,6 +886,15 @@ impl Program {
         let invalid = || Error::new("invalid_input", format!("Value does not match {t:?}"));
         Ok(match t {
             Type::Named(name) => {
+                if let Type::Number { .. } = self.resolve(t)? {
+                    if matches!(&value,Value::BrandedNumber(brand,_) if brand!=name) {
+                        return Err(invalid());
+                    };
+                    let number = value.number()?.clone();
+                    self.validate(self.resolve(t)?, Value::Num(number.clone()), None)?;
+                    return Ok(Value::BrandedNumber(name.clone(), number));
+                }
+
                 if self.entities.contains_key(name) {
                     let id = match value {
                         Value::Ref { entity, id, .. } if entity == *name => id,
@@ -807,6 +924,28 @@ impl Program {
                 };
                 Value::Id(entity.clone(), id)
             }
+            Type::Image {
+                max_bytes,
+                width,
+                height,
+            } => {
+                let bytes = match value {
+                    Value::Image(image) => image.bytes,
+                    Value::Str(encoded) => {
+                        use base64::Engine as _;
+                        if encoded.len() > max_bytes.saturating_mul(4) / 3 + 8 {
+                            return Err(invalid());
+                        };
+                        base64::engine::general_purpose::STANDARD
+                            .decode(encoded)
+                            .map_err(|_| invalid())?
+                    }
+                    _ => return Err(invalid()),
+                };
+                Value::Image(crate::media::Image::decode(
+                    bytes, *max_bytes, *width, *height,
+                )?)
+            }
             Type::String => match value {
                 Value::Str(s) => Value::Str(s),
                 _ => return Err(invalid()),
@@ -821,9 +960,7 @@ impl Program {
                 Value::Str(d.with_timezone(&chrono::Utc).to_rfc3339())
             }
             Type::Number { min, max, scale } => {
-                let Value::Num(n) = value else {
-                    return Err(invalid());
-                };
+                let n = value.number()?.clone();
                 let scaled = &n * Number::from_integer(BigInt::from(10).pow(*scale));
                 if &n < min || &n > max || !scaled.is_integer() {
                     return Err(invalid());
@@ -962,7 +1099,7 @@ fn check_expr(n: &Node, policy: bool) -> Result<()> {
             | "live" => (1, 1),
             "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "add" | "sub" | "mul" | "div"
             | "contains" | "can" | "as" | "set" | "create" | "publish" | "last" | "first"
-            | "since" | "creates" => (2, 2),
+            | "since" | "creates" | "invoke" => (2, 2),
             "only" => (1, 1000),
             "any" | "all" | "where" | "flatMap" | "sum" | "order" => (3, 3),
             "map" => (3, 1000),
@@ -1030,7 +1167,9 @@ fn collect_symbols<'a>(n: &'a Node, out: &mut Vec<&'a str>) {
                 return;
             }
             let skip = match n.head() {
-                "new" | "entities" | "creates" | "as" | "create" | "publish" | "can" => 2,
+                "new" | "entities" | "creates" | "as" | "create" | "publish" | "can" | "invoke" => {
+                    2
+                }
                 _ => 1,
             };
             for child in ns.iter().skip(skip) {

@@ -70,7 +70,7 @@ fn source_compiles_and_public_projection_is_narrow() {
             .iter()
             .filter(|o| o.method != "WS" && o.event.is_none())
             .count(),
-        9
+        10
     );
     let mut r = runtime();
     let (products, trace) = r.execute_traced("Products", json!({}), None).unwrap();
@@ -161,7 +161,7 @@ fn failed_permissions_and_stock_validation_roll_back() {
         r.execute("CreateOrder", order("u2", 2), Some(&auth))
             .unwrap_err()
             .code,
-        "forbidden"
+        "not_found"
     );
     let receipt = r
         .execute("CreateOrder", order("u1", 12), Some(&auth))
@@ -274,5 +274,83 @@ fn extreme_exponents_and_constants_return_errors_without_panicking() {
     assert!(
         Program::compile("[type Huge [integer [range 0 [pow [pow [pow 10 100] 100] 100]]]]")
             .is_err()
+    );
+}
+
+fn png() -> String {
+    use base64::Engine as _;
+    let image = image::DynamicImage::new_rgb8(16, 12);
+    let mut bytes = std::io::Cursor::new(vec![]);
+    image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(bytes.into_inner())
+}
+#[test]
+fn photo_plugins_store_real_png_atomically_and_enforce_permissions() {
+    let mut runtime = runtime();
+    let admin = token("idp:catalog-admin");
+    let user = token("idp:u1");
+    let input = json!({"productId":"p1","photo":png(),"width":8,"height":6});
+    assert_eq!(
+        runtime
+            .execute("UploadPhoto", input.clone(), Some(&user))
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert_eq!(
+        runtime
+            .execute("ProductPhotos", json!({"productId":"p1"}), Some(&user))
+            .unwrap(),
+        json!([])
+    );
+    let receipt = runtime.execute("UploadPhoto", input, Some(&admin)).unwrap();
+    assert_eq!(receipt["photo"]["width"], 8);
+    assert_eq!(receipt["photo"]["height"], 6);
+    let id = receipt["file"]["id"].as_str().unwrap();
+    let bytes = runtime.file_bytes(id, Some(&user)).unwrap();
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!((image.width(), image.height()), (8, 6));
+    assert_eq!(runtime.file_bytes(id, None).unwrap_err().code, "not_found");
+    assert_eq!(
+        runtime
+            .execute("ProductPhotos", json!({"productId":"p1"}), Some(&user))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .execute(
+                "UploadPhoto",
+                json!({"productId":"p1","photo":"invalid-base64","width":8,"height":6}),
+                Some(&admin)
+            )
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+}
+
+#[test]
+fn numeric_brands_require_explicit_conversion() {
+    let source = r#"[type Price [decimal [range 0.01 1000] [scale 2]]] [type Weight [decimal [range 0.01 1000] [scale 2]]]
+    [auth [anonymous Anonymous]] [transport HTTP [auth anonymous]]
+    [query Wrong [input value Weight] [output Price] [http GET "/wrong"] [result $value]]
+    [query Convert [input value Weight] [output Price] [http GET "/convert"] [result [as Price $value]]]"#;
+    let mut runtime = Runtime::open(source, ":memory:", Config::default()).unwrap();
+    assert_eq!(
+        runtime
+            .execute("Wrong", json!({"value":1.25}), None)
+            .unwrap_err()
+            .code,
+        "invalid_output"
+    );
+    assert_eq!(
+        runtime
+            .execute("Convert", json!({"value":1.25}), None)
+            .unwrap(),
+        json!(1.25)
     );
 }

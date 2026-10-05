@@ -7,10 +7,12 @@ use std::collections::BTreeMap;
 pub type Number = BigRational;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    Image(crate::media::Image),
     Null,
     Bool(bool),
     Str(String),
     Num(Number),
+    BrandedNumber(String, Number),
     Id(String, String),
     Ref {
         entity: String,
@@ -42,13 +44,13 @@ impl Value {
     pub fn text(&self) -> Result<String> {
         match self {
             Self::Str(s) | Self::Id(_, s) | Self::Ref { id: s, .. } => Ok(s.clone()),
-            Self::Num(n) => decimal(n),
+            Self::Num(n) | Self::BrandedNumber(_, n) => decimal(n),
             _ => Err(Error::new("invalid_input", "Expected text")),
         }
     }
     pub fn number(&self) -> Result<&Number> {
         match self {
-            Self::Num(n) => Ok(n),
+            Self::Num(n) | Self::BrandedNumber(_, n) => Ok(n),
             _ => Err(Error::new("invalid_input", "Expected number")),
         }
     }
@@ -93,10 +95,14 @@ impl Value {
     pub fn json(&self) -> Result<serde_json::Value> {
         use serde_json::Value as J;
         Ok(match self {
+            Self::Image(image) => {
+                use base64::Engine as _;
+                J::String(base64::engine::general_purpose::STANDARD.encode(&image.bytes))
+            }
             Self::Null => J::Null,
             Self::Bool(v) => J::Bool(*v),
             Self::Str(s) | Self::Id(_, s) | Self::Ref { id: s, .. } => J::String(s.clone()),
-            Self::Num(n) => serde_json::from_str(&decimal(n)?)?,
+            Self::Num(n) | Self::BrandedNumber(_, n) => serde_json::from_str(&decimal(n)?)?,
             Self::List(v) => J::Array(v.iter().map(Self::json).collect::<Result<_>>()?),
             Self::Record { fields, .. } => J::Object(
                 fields
@@ -207,6 +213,9 @@ pub fn count(v: &Value) -> Result<usize> {
 }
 pub fn equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::BrandedNumber(a, x), Value::BrandedNumber(b, y)) => a == b && x == y,
+        (Value::BrandedNumber(_, x), Value::Num(y))
+        | (Value::Num(y), Value::BrandedNumber(_, x)) => x == y,
         (
             Value::Ref {
                 entity: a, id: x, ..

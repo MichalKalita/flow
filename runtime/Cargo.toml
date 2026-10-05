@@ -17,6 +17,7 @@ ring = "0.17"
 base64 = "0.22"
 sha2 = "0.10"
 percent-encoding = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"
