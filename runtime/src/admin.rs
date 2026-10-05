@@ -121,6 +121,7 @@ async fn overview(State(state): State<Admin>) -> Response {
         let automations=runtime.program.operations.iter().filter_map(|op|op.event.as_ref().map(|event|json!({"name":op.name,"source":event.source,"actor":event.actor_id}))).collect::<Vec<_>>();
         let mut resources=runtime.storage_resources();
         resources["process"]=process;
+        resources["host"]=crate::resources::host_memory();
         resources["observability"]=runtime.observability.resources();
         Json(json!({"endpoints":endpoints,"streams":streams,"automations":automations,"metrics":runtime.observability.snapshot(),"resources":resources,"version":env!("CARGO_PKG_VERSION")}))
     }).await {

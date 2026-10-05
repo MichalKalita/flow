@@ -35,6 +35,12 @@ export type ProcessMemory = {
   cpu_seconds?: number;
   source?: string;
 };
+export type HostMemory = {
+  limit_bytes?: number | null;
+  physical_bytes?: number | null;
+  available_bytes?: number | null;
+  source?: string;
+};
 export type ServicePoint = {
   minute: number;
   counts: Record<string, number>;
@@ -68,6 +74,7 @@ export type Overview = {
   };
   resources: {
     process: ProcessMemory;
+    host?: HostMemory;
     sqlite: Record<string, number | boolean | null>;
     observability: Record<string, number | string | null>;
   };

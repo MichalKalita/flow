@@ -12,6 +12,16 @@ const BOUNDS: [f64; 15] = [
     1., 2., 5., 10., 20., 50., 100., 200., 500., 1000., 2000., 5000., 10000., 30000., 60000.,
 ];
 const HISTORY: usize = 360;
+pub const LOG_QUEUE_LIMIT: usize = 512;
+pub const LOG_BUFFER_LIMIT: usize = 200;
+pub const LOG_ROTATE_BYTES: u64 = 256 * 1024 * 1024;
+pub const LOG_ARCHIVE_COUNT: u32 = 3;
+pub const LOG_DISK_LIMIT_BYTES: u64 = LOG_ROTATE_BYTES * (LOG_ARCHIVE_COUNT as u64 + 1);
+pub fn log_file_names() -> Vec<String> {
+    let mut names = vec!["application.jsonl".into()];
+    names.extend((1..=LOG_ARCHIVE_COUNT).map(|i| format!("application.{i}.jsonl")));
+    names
+}
 #[derive(Clone, Default)]
 pub struct Observability(Arc<Mutex<Data>>);
 enum Command {
@@ -189,7 +199,7 @@ impl Observability {
             Err(e) => return Err(e),
         }
         this.0.lock().unwrap().directory = Some(path.clone());
-        let (tx, rx) = mpsc::sync_channel::<Command>(512);
+        let (tx, rx) = mpsc::sync_channel::<Command>(LOG_QUEUE_LIMIT);
         this.0.lock().unwrap().writer = Some(tx);
         let worker = Arc::downgrade(&this.0);
         std::thread::spawn(move || {
@@ -212,9 +222,9 @@ impl Observability {
                         data.queued_events = data.queued_events.saturating_sub(1);
                     }
                     let result = (|| -> std::io::Result<()> {
-                        if size >= 8 * 1024 * 1024 {
+                        if size >= LOG_ROTATE_BYTES {
                             log.flush()?;
-                            for i in (1..=3).rev() {
+                            for i in (1..=LOG_ARCHIVE_COUNT).rev() {
                                 let from = if i == 1 {
                                     path.join("application.jsonl")
                                 } else {
@@ -312,7 +322,7 @@ impl Observability {
                 data.queued_events += 1;
             }
         }
-        if data.logs.len() == 200 {
+        if data.logs.len() == LOG_BUFFER_LIMIT {
             data.logs.pop_front();
         }
         data.logs.push_back(event);
@@ -376,17 +386,24 @@ impl Observability {
                 .map(crate::resources::heap_bytes)
                 .sum::<usize>();
         let disk = d.directory.as_ref().and_then(|path| {
-            let mut files = vec![
-                path.join("application.jsonl"),
-                path.join("metrics.json"),
-                path.join("metrics.tmp"),
-            ];
-            files.extend((1..=3).map(|i| path.join(format!("application.{i}.jsonl"))));
-            files
+            let log_files = log_file_names()
+                .into_iter()
+                .map(|name| path.join(name))
+                .collect::<Vec<_>>();
+            let log_disk = log_files
                 .iter()
                 .map(crate::resources::file_bytes)
                 .collect::<Option<Vec<_>>>()
-                .map(|sizes| sizes.iter().sum::<u64>())
+                .map(|sizes| sizes.iter().sum::<u64>())?;
+            let mut files = log_files;
+            files.push(path.join("metrics.json"));
+            files.push(path.join("metrics.tmp"));
+            let total = files
+                .iter()
+                .map(crate::resources::file_bytes)
+                .collect::<Option<Vec<_>>>()
+                .map(|sizes| sizes.iter().sum::<u64>())?;
+            Some((log_disk, total))
         });
         json!({
             "estimated_metrics_bytes": metrics + d.service.estimated_bytes(),
@@ -394,9 +411,11 @@ impl Observability {
             "estimated_log_queue_bytes": d.queued_bytes,
             "log_writer_buffer_bytes": if d.writer.is_some() { 65536 } else { 0 },
             "queued_log_events": d.queued_events,
-            "disk_bytes": disk,
-            "log_buffer_limit": 200,
-            "log_queue_limit": 512,
+            "log_disk_bytes": disk.map(|(logs, _)| logs),
+            "disk_bytes": disk.map(|(_, total)| total),
+            "log_buffer_limit": LOG_BUFFER_LIMIT,
+            "log_queue_limit": LOG_QUEUE_LIMIT,
+            "log_disk_limit_bytes": LOG_DISK_LIMIT_BYTES,
             "history_minutes": HISTORY,
             "estimate_note": "Estimates include collection capacity and payloads; exclude allocator overhead, fragmentation, active requests, thread stacks and shared runtime allocations."
         })

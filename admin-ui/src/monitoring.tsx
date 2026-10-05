@@ -205,7 +205,10 @@ export function OverviewPage({ data, minutes, onConsole, onLogs }: Props) {
               <span>Log writer queue</span>
               <strong>
                 {data.resources.observability.queued_log_events ?? 0}
-                <small> / 512</small>
+                <small>
+                  {" / "}
+                  {data.resources.observability.log_queue_limit ?? 512}
+                </small>
               </strong>
             </div>
             <div>
@@ -618,7 +621,7 @@ export function ResourcesPage({ data, minutes }: Props) {
     ["Prepared statements", db.prepared_statements_bytes, "SQLite counter"],
     ["Metrics & history", o.estimated_metrics_bytes, "Estimated heap capacity"],
     [
-      "Log ring buffer",
+      "Dashboard log cache",
       o.estimated_log_buffer_bytes,
       "Estimated heap capacity",
     ],
@@ -706,10 +709,14 @@ export function ResourcesPage({ data, minutes }: Props) {
         >
           <div class="resource-budget">
             <ResourceBar
-              label="Process RSS / target VPS RAM"
-              value={r.process.rss_bytes ?? 0}
-              total={2 * 1024 ** 3}
-              detail={`${bytes(r.process.rss_bytes)} / 2 GiB`}
+              label="Process RSS / host RAM"
+              value={Number(r.process.rss_bytes ?? 0)}
+              total={Number(r.host?.limit_bytes ?? 0)}
+              detail={`${bytes(r.process.rss_bytes)} / ${bytes(r.host?.limit_bytes)}${
+                r.host?.available_bytes != null
+                  ? ` · ${bytes(r.host.available_bytes)} available`
+                  : ""
+              }`}
             />
           </div>
           <div class="table-wrap">
@@ -733,22 +740,39 @@ export function ResourcesPage({ data, minutes }: Props) {
             </table>
           </div>
           <div class="panel-note">
-            Estimates exclude allocator overhead, shared allocations, active
-            requests and thread stacks. Components do not add up to RSS.
+            RAM limit is physical memory, or the cgroup memory cap when the
+            process is constrained. Estimates exclude allocator overhead, shared
+            allocations, active requests and thread stacks. Components do not
+            add up to RSS.
           </div>
         </Panel>
         <Panel
           title="Storage & backpressure"
-          description="Current file sizes and operational limits"
+          description="Disk log retention, SQLite files, and in-memory backpressure"
         >
+          <div class="resource-budget">
+            <ResourceBar
+              label="Disk logs"
+              value={Number(o.log_disk_bytes ?? 0)}
+              total={Number(o.log_disk_limit_bytes ?? 0)}
+              color={colors.blue}
+              detail={`${bytes(o.log_disk_bytes)} / ${bytes(o.log_disk_limit_bytes)} rotating JSONL`}
+            />
+          </div>
           <div class="health-list">
             {[
               ["SQLite database", bytes(db.main_bytes)],
               ["Write-ahead log (WAL)", bytes(db.wal_bytes)],
               ["Shared-memory file", bytes(db.shm_bytes)],
               ["Logical SQLite pages", bytes(db.logical_bytes)],
-              ["Log queue depth", `${o.queued_log_events} / 512`],
-              ["Log buffer", `200 entries`],
+              [
+                "Dashboard log cache",
+                `${o.log_buffer_limit ?? 200} recent events in RAM`,
+              ],
+              [
+                "Log writer queue",
+                `${o.queued_log_events ?? 0} / ${o.log_queue_limit ?? 512} waiting to flush`,
+              ],
               ["Metric history", "6 hours · minute buckets"],
               ["HTTP in flight", `${s.gauges.http_inflight ?? 0} / 16`],
             ].map(([label, value]) => (
@@ -759,9 +783,11 @@ export function ResourcesPage({ data, minutes }: Props) {
             ))}
           </div>
           <div class="panel-note">
-            Audit data remains in SQLite. Log and metric storage is separate. A
-            full log queue drops operational log entries rather than blocking
-            business transactions.
+            Application logs rotate on disk up to the shown limit. The dashboard
+            cache keeps the newest events in RAM for the live explorer. The
+            writer queue is in-memory backpressure before those lines hit disk;
+            a full queue drops operational log entries rather than blocking
+            transactions. Audit data remains in SQLite.
           </div>
         </Panel>
       </div>

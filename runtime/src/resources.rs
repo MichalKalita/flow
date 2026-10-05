@@ -104,6 +104,120 @@ pub fn process_memory() -> Value {
         })
     }
 }
+fn finite_bytes(n: u64) -> Option<u64> {
+    (n > 0 && n < (1u64 << 60)).then_some(n)
+}
+#[cfg(target_os = "linux")]
+fn meminfo_bytes(status: &str, field: &str) -> Option<u64> {
+    status.lines().find_map(|line| {
+        line.strip_prefix(field)
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|n| n * 1024)
+    })
+}
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit() -> Option<u64> {
+    let cgroup = fs::read_to_string("/proc/self/cgroup").ok()?;
+    if let Some(path) = cgroup.lines().find_map(|line| line.strip_prefix("0::")) {
+        let mut dir = std::path::PathBuf::from("/sys/fs/cgroup");
+        let relative = path.trim().trim_start_matches('/');
+        if !relative.is_empty() {
+            dir.push(relative);
+        }
+        loop {
+            if let Ok(value) = fs::read_to_string(dir.join("memory.max")) {
+                let value = value.trim();
+                if value != "max"
+                    && let Ok(n) = value.parse::<u64>()
+                    && let Some(n) = finite_bytes(n)
+                {
+                    return Some(n);
+                }
+            }
+            if !dir.pop() || dir.as_os_str() == "/sys/fs" {
+                break;
+            }
+        }
+    }
+    for line in cgroup.lines() {
+        let mut parts = line.splitn(3, ':');
+        let Some(_) = parts.next() else { continue };
+        let Some(controllers) = parts.next() else {
+            continue;
+        };
+        let Some(path) = parts.next() else { continue };
+        if !controllers.split(',').any(|c| c == "memory") {
+            continue;
+        }
+        let mut dir = std::path::PathBuf::from("/sys/fs/cgroup/memory");
+        let relative = path.trim().trim_start_matches('/');
+        if !relative.is_empty() {
+            dir.push(relative);
+        }
+        loop {
+            if let Ok(value) = fs::read_to_string(dir.join("memory.limit_in_bytes"))
+                && let Ok(n) = value.trim().parse::<u64>()
+                && let Some(n) = finite_bytes(n)
+            {
+                return Some(n);
+            }
+            if !dir.pop() || dir.as_os_str() == "/sys/fs/cgroup" {
+                break;
+            }
+        }
+    }
+    None
+}
+pub fn host_memory() -> Value {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let physical = meminfo_bytes(&meminfo, "MemTotal:");
+        let available = meminfo_bytes(&meminfo, "MemAvailable:");
+        let cgroup = cgroup_memory_limit();
+        let (limit, source) = match (cgroup, physical) {
+            (Some(cgroup), Some(physical)) if cgroup < physical => {
+                (Some(cgroup), "cgroup memory limit")
+            }
+            (Some(cgroup), None) => (Some(cgroup), "cgroup memory limit"),
+            (_, Some(_)) => (physical, "/proc/meminfo MemTotal"),
+            _ => (None, "unavailable"),
+        };
+        json!({
+            "limit_bytes": limit,
+            "physical_bytes": physical,
+            "available_bytes": available,
+            "source": source
+        })
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let physical = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .and_then(finite_bytes);
+        json!({
+            "limit_bytes": physical,
+            "physical_bytes": physical,
+            "available_bytes": null,
+            "source": "sysctl hw.memsize"
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        json!({
+            "limit_bytes": null,
+            "physical_bytes": null,
+            "available_bytes": null,
+            "source": "unavailable on this platform"
+        })
+    }
+}
 impl Runtime {
     pub fn storage_resources(&self) -> Value {
         let read = |pragma| {

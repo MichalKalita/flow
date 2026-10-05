@@ -47,6 +47,13 @@ test("navigation, performance charts, larger fonts and mobile layout", async ({
     await expect(
       page.getByRole("heading", { name, exact: true, level: 1 }),
     ).toBeVisible();
+    if (name === "Runtime & storage") {
+      await expect(page.getByText("Process RSS / host RAM")).toBeVisible();
+      await expect(page.getByText("Disk logs")).toBeVisible();
+      await expect(page.getByText("Dashboard log cache").first()).toBeVisible();
+      await expect(page.getByText(/waiting to flush/)).toBeVisible();
+      await expect(page.getByText("target VPS RAM")).toHaveCount(0);
+    }
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByLabel("Open navigation").click();

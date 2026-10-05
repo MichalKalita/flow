@@ -83,7 +83,22 @@ fn resource_report_measures_sqlite_files_and_separates_estimates() {
     let estimates = runtime.observability.resources();
     assert!(estimates["estimated_metrics_bytes"].as_u64().unwrap() > 0);
     assert!(estimates["estimated_log_buffer_bytes"].as_u64().unwrap() > 0);
-    assert_eq!(estimates["log_queue_limit"], 512);
+    assert_eq!(
+        estimates["log_queue_limit"].as_u64().unwrap(),
+        flow_runtime::observability::LOG_QUEUE_LIMIT as u64
+    );
+    assert_eq!(
+        estimates["log_buffer_limit"].as_u64().unwrap(),
+        flow_runtime::observability::LOG_BUFFER_LIMIT as u64
+    );
+    assert_eq!(
+        estimates["log_disk_limit_bytes"].as_u64().unwrap(),
+        flow_runtime::observability::LOG_DISK_LIMIT_BYTES
+    );
+    assert_eq!(
+        flow_runtime::observability::LOG_DISK_LIMIT_BYTES,
+        1024 * 1024 * 1024
+    );
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(
         flow_runtime::resources::process_memory()["rss_bytes"]
@@ -91,6 +106,15 @@ fn resource_report_measures_sqlite_files_and_separates_estimates() {
             .unwrap()
             > 0
     );
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let host = flow_runtime::resources::host_memory();
+        let limit = host["limit_bytes"].as_u64().unwrap();
+        assert!(limit >= 512 * 1024 * 1024);
+        if let Some(physical) = host["physical_bytes"].as_u64() {
+            assert!(limit <= physical);
+        }
+    }
     drop(runtime);
     std::fs::remove_file(path).unwrap();
 }

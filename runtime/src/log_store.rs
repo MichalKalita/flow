@@ -169,12 +169,7 @@ pub fn query(
     let mut found = resume.is_none();
     let mut continuation = None;
     if !full && let Some(directory) = directory {
-        for name in [
-            "application.jsonl",
-            "application.1.jsonl",
-            "application.2.jsonl",
-            "application.3.jsonl",
-        ] {
+        for name in crate::observability::log_file_names() {
             let path = directory.join(name);
             let mut file = match File::open(Path::new(&path)) {
                 Ok(f) => f,

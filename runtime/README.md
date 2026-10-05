@@ -123,7 +123,7 @@ SQLite operation spans cover the entire operation, including authentication,
 transaction execution and commit/rollback; nested read/apply spans give more
 specific timings. Request IDs are returned in `X-Request-ID`. Logs exclude
 request bodies, credentials and plugin arguments. The dashboard retains the
-last 200 events in memory; older entries remain in rotating disk files.
+last 200 events in memory as a live cache; older entries remain in rotating disk files.
 Log explorer filters by text, kind, level, endpoint, status and time, and pages
 back through archives. Each query scans at most 4 MiB and returns at most 200 rows;
 a continuation cursor resumes bounded scans. Archive rotation preserves cursors
@@ -131,9 +131,10 @@ until the underlying file is removed. Details show request IDs for correlation.
 Audit filters entity, action and transport, with before/after snapshots decoded
 to their logical JSON values, including records created by older versions.
 
-A single background writer uses a bounded 512-event queue and a 64 KiB write
-buffer, flushed every second. At 8 MiB, the log rotates through three archives
-(approximately 32 MiB total, plus at most one event). A full queue drops disk log
+A single background writer uses a bounded 512-event in-memory queue and a 64 KiB write
+buffer, flushed every second. That queue is backpressure, not log retention: it holds
+events waiting to hit disk. At 256 MiB, the log rotates through three archives
+(approximately 1 GiB total, plus at most one event). A full queue drops disk log
 entries instead of blocking request execution; the dashboard reports dropped
 logs and storage errors. Logging failures do not undo successful business data.
 
@@ -158,12 +159,14 @@ SQLite. A malformed metrics snapshot fails startup; back up or remove the
 snapshot explicitly if resetting telemetry is intended. Do not share a telemetry
 directory between multiple runtime processes.
 
-The dashboard reports process RSS (and peak RSS on Linux), SQLite page-cache,
-schema and statement allocations, and estimated memory used by metrics,
-history, the log buffer and writer queue. Linux reads `/proc/self/status`; macOS
-uses `ps` for development. Component estimates include collection capacity and
-payloads, but exclude allocator bookkeeping, fragmentation, thread stacks,
-active requests and other shared allocations; they do not sum to RSS.
+The dashboard reports process RSS (and peak RSS on Linux) against the host RAM
+limit: cgroup `memory.max` when the process is constrained, otherwise physical
+memory (`/proc/meminfo` MemTotal on Linux, `sysctl hw.memsize` on macOS). It also
+shows SQLite page-cache, schema and statement allocations, and estimated memory
+used by metrics, history, the dashboard log cache and writer queue. Linux reads
+`/proc/self/status`; macOS uses `ps` for development. Component estimates include
+collection capacity and payloads, but exclude allocator bookkeeping, fragmentation,
+thread stacks, active requests and other shared allocations; they do not sum to RSS.
 SQLite disk usage includes the main database, WAL and SHM files. Logical page
 size and telemetry/log disk usage are displayed separately.
 
