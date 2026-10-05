@@ -89,7 +89,7 @@ defmodule Flow.Transaction do
       {:record,
        Map.new(contract.inputs, fn {key, input} -> {key, %{type: input.type, options: %{}}} end)}
 
-    args = Value.validate!(session.db.schema, type, args)
+    args = Flow.Input.materialize(session, type, args)
     put(session, :invocations, invocations(session) ++ [%{method: method, args: args}])
     args
   end

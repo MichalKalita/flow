@@ -56,4 +56,12 @@ defmodule Flow.Codec do
   defp external(_, value), do: value
   defp json(value) when is_binary(value), do: Jason.decode!(value, floats: :decimals)
   defp json(value), do: value
+
+  def unembed(%Embedded{value: value}), do: unembed(value)
+  def unembed(values) when is_list(values), do: Enum.map(values, &unembed/1)
+
+  def unembed(values) when is_map(values) and not is_struct(values),
+    do: Map.new(values, fn {k, v} -> {k, unembed(v)} end)
+
+  def unembed(value), do: value
 end

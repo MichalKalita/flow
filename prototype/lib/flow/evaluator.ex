@@ -49,7 +49,8 @@ defmodule Flow.Evaluator do
         key = {:binding, scope, name}
 
         case :ets.lookup(runtime.session.cache, key) do
-          [{_, {:value, value}}] ->
+          [{_, {:value, value, reads}}] ->
+            Flow.Reads.propagate(runtime.session, reads)
             value
 
           [{_, :evaluating}] ->
@@ -58,8 +59,14 @@ defmodule Flow.Evaluator do
           [] ->
             :ets.insert(runtime.session.cache, {key, :evaluating})
             [{_, {bindings, scope_env}}] = :ets.lookup(runtime.session.cache, {:scope, scope})
-            value = evaluate(runtime, Map.fetch!(bindings, name), scope_env)
-            :ets.insert(runtime.session.cache, {key, {:value, value}})
+
+            {value, reads} =
+              Flow.Reads.capture(runtime.session, fn ->
+                evaluate(runtime, Map.fetch!(bindings, name), scope_env)
+              end)
+
+            :ets.insert(runtime.session.cache, {key, {:value, value, reads}})
+            Flow.Reads.propagate(runtime.session, reads)
             value
         end
 
@@ -98,6 +105,16 @@ defmodule Flow.Evaluator do
     value = &eval.(&1, env)
 
     case {operator, args} do
+      {"use", [path]} ->
+        [root | fields] = String.split(Syntax.symbol(path), ".")
+        initial = resolve(runtime, env, root)
+
+        fields
+        |> Enum.reduce(initial, fn field, current ->
+          Access.using_field(session, current, field)
+        end)
+        |> then(&Flow.Input.use_value(session, &1))
+
       {"entity", [id]} ->
         %ID{entity: entity} = id = value.(id)
         reference = %Ref{entity: entity, id: id}
@@ -207,8 +224,14 @@ defmodule Flow.Evaluator do
       {"enqueue", [method, input, retry]} ->
         method = Syntax.symbol(method)
         contract = runtime.program.plugins[method]
-        args = Transaction.invocation(session, method, value.(input), contract)
-        Flow.Queue.stage(session, method, args, retry)
+
+        {args, reads} =
+          Flow.Reads.capture(session, fn ->
+            Transaction.invocation(session, method, value.(input), contract)
+          end)
+
+        Flow.Reads.propagate(session, reads)
+        Flow.Queue.stage(session, method, args, retry, reads)
 
       _ ->
         raise ArgumentError, "Unsupported operation #{operator}"

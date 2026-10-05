@@ -2,7 +2,7 @@ defmodule Flow.Queue do
   @moduledoc "Transactional encrypted outbox. Retries must reauthenticate and reauthorize the original actor."
   alias Flow.{Syntax, Types, Checker, ID, Transaction, Store}
 
-  def stage(session, method, args, retry) do
+  def stage(session, method, args, retry, reads \\ []) do
     {"retry", options} = Syntax.form(retry)
 
     options =
@@ -18,7 +18,8 @@ defmodule Flow.Queue do
       method: method,
       args: args,
       max_attempts: Decimal.to_integer(Types.constant(options["attempts"])),
-      delay: Checker.duration!(options["delay"])
+      delay: Checker.duration!(options["delay"]),
+      reads: Flow.Reads.encode(reads)
     }
 
     :ets.insert(session.cache, {{:queue, id}, job})
@@ -49,6 +50,7 @@ defmodule Flow.Queue do
         "method" => job.method,
         "args" => job.args,
         "credential" => credential,
+        "reads" => job.reads,
         "creates" => proof,
         "updates" =>
           Enum.filter(Transaction.changes(session), &(&1.action == "UPDATE"))
@@ -139,6 +141,7 @@ defmodule Flow.Queue do
             context,
             fn session ->
               Transaction.restore_proof(session, payload)
+              Flow.Reads.authorize!(session, payload["reads"] || [])
               :ets.insert(session.cache, {:credential, credential})
               method = payload["method"]
               contract = Map.fetch!(runtime.program.plugins, method)
@@ -151,6 +154,7 @@ defmodule Flow.Queue do
 
               restored_args =
                 Flow.Codec.decode(runtime.program.schema, input_type, payload["args"])
+                |> Flow.Codec.unembed()
 
               args = Transaction.invocation(session, method, restored_args, contract)
               Transaction.authorize!(session)
@@ -199,7 +203,8 @@ defmodule Flow.Queue do
           :done ->
             {"DONE", nil}
 
-          {:failure, code} when code in [:unauthenticated, :forbidden, :invalid_job] ->
+          {:failure, code}
+          when code in [:unauthenticated, :forbidden, :invalid_job, :not_found] ->
             {"BLOCKED", Atom.to_string(code)}
 
           {:failure, code} ->

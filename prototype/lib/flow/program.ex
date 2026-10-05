@@ -65,9 +65,9 @@ defmodule Flow.Program do
         {_, components} = Syntax.form(node)
         {inputs, rest} = Enum.split_with(components, &(elem(Syntax.form(&1), 0) == "input"))
         inputs = inputs!(inputs, names, schema)
-        opts = Syntax.options(rest, ~w(output pure transactional))
+        opts = Syntax.options(rest, ~w(output pure transactional release))
         [output] = Syntax.args(opts["output"] || node, "output", 1)
-        for key <- ~w(pure transactional), opt = opts[key], do: Syntax.args(opt, key, 0)
+        for key <- ~w(pure transactional release), opt = opts[key], do: Syntax.args(opt, key, 0)
 
         if opts["pure"] && opts["transactional"],
           do: Syntax.fail(node, :invalid_plugin, "Plugin cannot be both pure and transactional")
@@ -83,6 +83,7 @@ defmodule Flow.Program do
           inputs: inputs,
           output: Types.compile(output, names),
           mode: mode,
+          release: not is_nil(opts["release"]),
           node: node
         })
       end)

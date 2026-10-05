@@ -172,6 +172,24 @@ defmodule Flow.Checker do
     infer = &infer(&1, context)
 
     case {operator, args} do
+      {"use", [%{kind: :symbol} = path]} ->
+        unless Map.get(context, :allow_use, false),
+          do:
+            Syntax.fail(
+              node,
+              :invalid_use,
+              "use is only allowed inside arguments of a release plugin"
+            )
+
+        parts = String.split(Syntax.symbol(path), ".")
+
+        if length(parts) < 2,
+          do: Syntax.fail(path, :invalid_use, "use requires a protected field path")
+
+        target = %{path | value: Enum.drop(parts, -1) |> Enum.join(".")}
+        reference!(schema, infer.(target), target)
+        infer.(path)
+
       {"can", [action, target]} ->
         policy!(context, node)
         action!(action)
@@ -473,20 +491,21 @@ defmodule Flow.Checker do
         {:named, "Bool"}
 
       {op, [method, value | options]} when op in ~w(invoke enqueue) ->
-        effect!(context, node)
-
         contract =
           context.plugins[Syntax.symbol(method)] ||
             Syntax.fail(method, :unknown_plugin, "Unknown plugin method")
 
+        if op == "enqueue" or contract.mode != :pure, do: effect!(context, node)
+        input_type = infer(value, Map.put(context, :allow_use, contract.release))
+
         compatible!(
           schema,
-          infer.(value),
+          input_type,
           {:shape, Map.new(contract.inputs, fn {k, v} -> {k, v.type} end)},
           value
         )
 
-        reject_extra_fields!(schema, infer.(value), contract.inputs, value)
+        reject_extra_fields!(schema, input_type, contract.inputs, value)
 
         if op == "invoke" and contract.mode == :external,
           do: Syntax.fail(node, :unsafe_effect, "External plugins require enqueue")

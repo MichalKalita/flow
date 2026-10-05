@@ -92,7 +92,7 @@ defmodule Flow.QueueTest do
                })
              )
 
-    assert {:ok, [%{state: "BLOCKED", error: "forbidden"}]} = Runtime.process_jobs(runtime)
+    assert {:ok, [%{state: "BLOCKED", error: "not_found"}]} = Runtime.process_jobs(runtime)
     refute_received {:delivered, _, _}
   end
 

@@ -73,7 +73,12 @@ defmodule Flow.Access do
            ),
            do: denied!()
 
-    raw_field(session, reference, field) |> visible(session)
+    raw_field(session, reference, field)
+    |> visible(session)
+    |> then(fn value ->
+      Flow.Reads.add(session, reference, field, "READ")
+      value
+    end)
   end
 
   def field(session, %Embedded{} = embedded, field) do
@@ -89,7 +94,12 @@ defmodule Flow.Access do
            ),
            do: denied!()
 
-    raw_field(session, embedded, field) |> visible(session)
+    raw_field(session, embedded, field)
+    |> visible(session)
+    |> then(fn value ->
+      Flow.Reads.add(session, embedded, field, "READ")
+      value
+    end)
   end
 
   def field(session, values, field) when is_list(values),
@@ -99,6 +109,39 @@ defmodule Flow.Access do
     do: Map.fetch!(map, field)
 
   def field(_, _, _), do: raise(ArgumentError, "Cannot read field")
+
+  def using_field(session, values, field) when is_list(values),
+    do: Enum.map(values, &using_field(session, &1, field))
+
+  def using_field(session, target, field) do
+    type = target_type(target) || raise ArgumentError, "use requires a protected field"
+    evaluate = evaluator(session, session.principal, policy_target(session, target), MapSet.new())
+
+    read =
+      Permissions.field_allowed?(
+        session.policy,
+        session.principal.type,
+        type,
+        field,
+        "READ",
+        evaluate
+      )
+
+    use =
+      Permissions.field_allowed?(
+        session.policy,
+        session.principal.type,
+        type,
+        field,
+        "USE",
+        evaluate
+      )
+
+    unless read or use, do: denied!()
+    value = raw_field(session, target, field)
+    Flow.Reads.add(session, target, field, if(read, do: "READ", else: "USE"))
+    value
+  end
 
   def visible(values, session) when is_list(values) do
     Enum.filter(values, fn value ->
