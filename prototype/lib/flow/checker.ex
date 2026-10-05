@@ -30,6 +30,11 @@ defmodule Flow.Checker do
 
   def compatible?(_schema, type, type), do: true
 
+  def compatible?(schema, {:optional, actual}, {:optional, expected}),
+    do: compatible?(schema, actual, expected)
+
+  def compatible?(_schema, {:list, :empty, 0, 0}, {:list, _, 0, _}), do: true
+
   def compatible?(schema, actual, {:optional, inner}),
     do: actual == :null or compatible?(schema, actual, inner)
 
@@ -277,7 +282,7 @@ defmodule Flow.Checker do
         {:list, {:shape, result}, min, max}
 
       {"groupSum", [collection, key, quantity, brand]} ->
-        {inner, _, max} = list!(infer.(collection), collection)
+        {inner, collection_min, max} = list!(infer.(collection), collection)
         key = Syntax.identifier(key)
         quantity = Syntax.identifier(quantity)
         key_type = field!(context, inner, key, node)
@@ -290,7 +295,8 @@ defmodule Flow.Checker do
         unless numeric?(schema, brand),
           do: Syntax.fail(node, :type_mismatch, "groupSum requires numeric output brand")
 
-        {:list, {:shape, %{key => key_type, quantity => brand}}, 0, max}
+        {:list, {:shape, %{key => key_type, quantity => brand}},
+         if(collection_min > 0, do: 1, else: 0), max}
 
       {"last", [collection, count]} ->
         {inner, _, max} = list!(infer.(collection), collection)

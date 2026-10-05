@@ -233,7 +233,7 @@
 [plugin Payment
   [createUrl
     [input orderId OrderID] [input amount OrderTotal] [input currency String]
-    [input country String] [input method PaymentMethod] [output PaymentOutput]]]
+    [input country String] [input method PaymentMethod] [output PaymentOutput] [pure]]]
 [plugin Email
   [sendConfirmation
     [input orderId OrderID] [input to String] [input subject String]
@@ -242,7 +242,7 @@
     [input simulateFailure Bool] [output EmailOutput]]]
 [plugin Image
   [resize [input image ProductPhoto] [input width PhotoSize] [input height PhotoSize]
-    [output ProductPhoto]]]
+    [output ProductPhoto] [pure]]]
 [plugin Files [put [input file ProductPhoto] [output File] [transactional]]]
 
 # Výstupní typy určují projekci. Význam a typovou správnost ověří až validátor.
@@ -356,7 +356,7 @@
   [resized [invoke Image.resize [record [image $photo] [width $width] [height $height]]]]
   [file [invoke Files.put [record [file resized]]]]
   [photo [create Photo [record [id [new PhotoID]] [product product]
-    [file file] [width resized.width] [height resized.height]]]]
+    [file file] [width [as PhotoSize resized.width]] [height [as PhotoSize resized.height]]]]]
   [result [record [photo photo] [file file]]]]
 
 [mutate SendCommand
