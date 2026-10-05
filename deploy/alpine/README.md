@@ -25,14 +25,16 @@ FLOW_DATABASE='/data/flow/data/projects'
 FLOW_OBSERVABILITY_DIR='/data/flow/data/observability'
 FLOW_HTTP_BIND='0.0.0.0:80'
 FLOW_MQTT_BIND='127.0.0.1:1883'
-FLOW_ADMIN_BIND='127.0.0.1:9090'
+FLOW_ADMIN_BIND='0.0.0.0:9090'
+FLOW_ADMIN_ALLOW_REMOTE=1
 FLOW_TOKIO_WORKERS=2
 FLOW_TOKIO_BLOCKING=2
 FLOW_HTTP_ADMISSION=8
 ```
 
-HTTP is available on the LAN on port 80. Admin and MQTT listen only on loopback. The admin
-API still requires `FLOW_ADMIN_TOKEN`. Each hosted project retains its own database,
+HTTP is available on the LAN on port 80, and the separate admin listener is
+available on port 9090 with explicit network opt-in. MQTT listens only on loopback.
+The admin API still requires `FLOW_ADMIN_TOKEN`. Each hosted project retains its own database,
 actors, permissions, and observability files.
 
 ## Building ARM64 on a development machine
@@ -79,7 +81,8 @@ output to Alpine syslog, whose default rotation retains two 200 KiB files. Runti
 application logs and telemetry use their own bounded stores outside SQLite.
 OpenRC stops the runtime with SIGINT so it can flush observability and shut down.
 
-For dashboard access from a development machine:
+Open `http://PI_ADDRESS:9090` on the local network and use the configured admin
+token. An SSH tunnel remains available for loopback access from a development machine:
 
 ```sh
 ssh -N -L 127.0.0.1:19090:127.0.0.1:9090 root@PI_ADDRESS
@@ -87,7 +90,7 @@ ssh -N -L 127.0.0.1:19090:127.0.0.1:9090 root@PI_ADDRESS
 
 Open `http://127.0.0.1:19090` and use the configured admin token. The Pi's SSH
 configuration permits local forwarding only to `127.0.0.1:9090`, retains key-only
-authentication, and does not expose the admin listener on the LAN.
+authentication. The admin API requires its token through either access path.
 
 ## Deployment verification
 

@@ -60,9 +60,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let admin_bind = std::env::var("FLOW_ADMIN_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9090".into())
         .parse::<std::net::SocketAddr>()?;
-    if !admin_bind.ip().is_loopback() {
+    let admin_allow_remote =
+        std::env::var("FLOW_ADMIN_ALLOW_REMOTE").is_ok_and(|value| value == "1");
+    if !admin_bind.ip().is_loopback() && !admin_allow_remote {
         return Err(
-            "Admin listener must bind to loopback; use an SSH tunnel for remote access".into(),
+            "Admin listener must bind to loopback unless FLOW_ADMIN_ALLOW_REMOTE=1 is explicitly set"
+                .into(),
         );
     }
     let observer = Observability::disk(

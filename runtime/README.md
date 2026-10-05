@@ -93,7 +93,7 @@ WebSocket upgrade `/ws` uses the Authorization header and adapters permitted by
 its transport declaration. Subscribe with:
 
 ```json
-{"id":"status","query":"LiveDeviceStatus","input":{"deviceId":1}}
+{ "id": "status", "query": "LiveDeviceStatus", "input": { "deviceId": 1 } }
 ```
 
 Replies contain `{"id":"status","data":{"online":true,"battery":12}}`.
@@ -148,7 +148,10 @@ so a 2 GiB host stays at 16 concurrent application requests. Override with
 
 Set `FLOW_ADMIN_TOKEN` to a secret of at least 32 bytes before starting the server.
 The admin dashboard listens on `127.0.0.1:9090`; `FLOW_ADMIN_BIND` changes its
-address, but the CLI requires a loopback IP. For a remote VPS, forward that port:
+address. Non-loopback addresses require the explicit opt-in
+`FLOW_ADMIN_ALLOW_REMOTE=1`; token authentication and the separate admin listener
+remain required. Use a trusted network or a TLS proxy when enabling network access.
+For a remote VPS, forward the default loopback listener:
 
 ```sh
 ssh -L 9090:127.0.0.1:9090 user@server
