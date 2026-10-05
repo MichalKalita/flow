@@ -10,6 +10,8 @@ defmodule OrderLab.Store do
   def reject(input, status, code, message, method, path),
     do: GenServer.call(__MODULE__, {:reject, input, status, code, message, method, path})
 
+  def deliver_compensations, do: GenServer.call(__MODULE__, :deliver_compensations, 30_000)
+  def retry_compensation(id), do: GenServer.call(__MODULE__, {:retry_compensation, id})
   def deliver, do: GenServer.call(__MODULE__, :deliver, 30_000)
   def retry_email(id), do: GenServer.call(__MODULE__, {:retry_email, id})
 
@@ -82,6 +84,7 @@ defmodule OrderLab.Store do
     """)
 
     exec!(db, """
+    CREATE TABLE IF NOT EXISTS flow_effect_commits(effect_id TEXT PRIMARY KEY,request_id TEXT NOT NULL REFERENCES requests(id));
     CREATE TABLE IF NOT EXISTS runtime_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS flow_seed_keys(table_name TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(table_name,id));
     CREATE TABLE IF NOT EXISTS flow_records(table_name TEXT NOT NULL,id TEXT NOT NULL,value_json TEXT NOT NULL,PRIMARY KEY(table_name,id));
@@ -495,6 +498,7 @@ defmodule OrderLab.Store do
       "workflow_path" => state.steps.file,
       "websocket" => OrderLab.PubSub.stats(),
       "external_operations" => OrderLab.EffectJournal.list(state.effects),
+      "compensations" => OrderLab.Compensations.list(state.effects),
       "mqtt_outbox" =>
         query!(db, "SELECT * FROM mqtt_outbox ORDER BY rowid DESC LIMIT 100")
         |> Enum.map(&decode(&1, ["params_json", "payload_json"]))
@@ -666,6 +670,115 @@ defmodule OrderLab.Store do
       end
 
     {:reply, result, state}
+  end
+
+  def handle_call({:retry_compensation, id}, _, state),
+    do: {:reply, OrderLab.Compensations.retry!(state.effects, id), state}
+
+  def handle_call(:deliver_compensations, _, state) do
+    OrderLab.Compensations.candidates(state.effects)
+    |> Enum.find_value(fn row ->
+      committed =
+        query!(state.db, "SELECT effect_id FROM flow_effect_commits WHERE effect_id=?", [
+          row["effect_id"]
+        ])
+
+      parent =
+        query!(state.db, "SELECT id,path,created_at,status FROM requests WHERE id=?", [
+          row["request_id"]
+        ])
+
+      cond do
+        committed != [] ->
+          OrderLab.Compensations.finish!(state.effects, row, "accepted")
+          nil
+
+        match?([%{"status" => "running"}], parent) or parent == [] ->
+          nil
+
+        true ->
+          case OrderLab.EffectJournal.outcome(state.effects, row["effect_id"]) do
+            {:error, _} ->
+              OrderLab.Compensations.finish!(state.effects, row, "not_required")
+              nil
+
+            :absent ->
+              OrderLab.Compensations.finish!(state.effects, row, "not_required")
+              nil
+
+            _ ->
+              deliver_compensation(state, row, hd(parent))
+              true
+          end
+      end
+    end)
+
+    {:reply, :ok, state}
+  end
+
+  defp deliver_compensation(state, row, parent) do
+    attempt = OrderLab.Compensations.attempt!(state.effects, row)
+    input = Jason.decode!(row["input_json"])
+    compensation_input = %{"creation_key" => row["effect_id"], "input" => input}
+    contract = Map.get(OrderLab.Language.Native.operations(), row["operation"])
+    plugin = List.first(String.split(row["operation"], "."))
+
+    perform = fn ->
+      unless contract && Map.has_key?(contract, :compensation) &&
+               OrderLab.Compensations.compatible?(row),
+             do: raise("Compensation contract or provider configuration changed")
+
+      apply(contract.module, contract.compensation, [
+        compensation_input,
+        %{"idempotency_key" => row["effect_id"] <> ":cancel"}
+      ])
+    end
+
+    {result, call} =
+      invoke(
+        fn _ ->
+          try do
+            case perform.() do
+              {:ok, %{"cancelled" => true} = output} -> {:ok, output}
+              _ -> raise "Cancellation was not confirmed"
+            end
+          rescue
+            exception ->
+              {:error,
+               %{"code" => "compensation_unknown", "message" => Exception.message(exception)}}
+          end
+        end,
+        plugin,
+        if(contract && Map.has_key?(contract, :compensation),
+          do: Atom.to_string(contract.compensation),
+          else: "compensate"
+        ),
+        compensation_input,
+        row["request_id"],
+        input["order_id"],
+        attempt
+      )
+
+    OrderLab.Checkpoint.probe(
+      %{"id" => parent["id"], "path" => parent["path"], "time" => parent["created_at"]},
+      :after_compensation_effect
+    )
+
+    exec!(state.db, "BEGIN IMMEDIATE")
+
+    try do
+      save_call!(state.db, call)
+      exec!(state.db, "COMMIT")
+    rescue
+      error ->
+        SQL.execute(state.db, "ROLLBACK")
+        reraise error, __STACKTRACE__
+    end
+
+    case result do
+      {:ok, output} -> OrderLab.Compensations.finish!(state.effects, row, "completed", output)
+      {:error, error} -> OrderLab.Compensations.fail!(state.effects, row, error, attempt)
+    end
   end
 
   defp deliver_plugin_job(state, job, input, attempt) do
@@ -972,28 +1085,44 @@ defmodule OrderLab.Store do
           position = Process.get(cursor).call
           Process.put(cursor, %{Process.get(cursor) | call: position + 1})
 
-          OrderLab.EffectJournal.invoke!(
-            effects,
-            request,
-            position,
-            site,
-            operation,
-            input,
-            fn id ->
-              invoke(
-                fn value ->
-                  module.call(value, %{"idempotency_key" => id})
-                  |> validate_plugin_result!(contract)
-                end,
-                plugin,
-                method,
-                input,
-                request_id,
-                input["order_id"],
-                1
-              )
-            end
-          )
+          effect_id = OrderLab.EffectJournal.effect_id(request_id, position)
+
+          if Map.has_key?(contract, :compensation),
+            do: OrderLab.Compensations.register!(effects, effect_id, request_id, operation, input)
+
+          journal_result =
+            OrderLab.EffectJournal.invoke!(
+              effects,
+              request,
+              position,
+              site,
+              operation,
+              input,
+              fn id ->
+                invoke(
+                  fn value ->
+                    module.call(value, %{"idempotency_key" => id})
+                    |> validate_plugin_result!(contract)
+                  end,
+                  plugin,
+                  method,
+                  input,
+                  request_id,
+                  input["order_id"],
+                  1
+                )
+              end
+            )
+
+          if Map.has_key?(contract, :compensation) and match?({{:ok, _}, _}, journal_result) do
+            write!(
+              db,
+              "INSERT OR IGNORE INTO flow_effect_commits(effect_id,request_id) VALUES (?,?)",
+              [effect_id, request_id]
+            )
+          end
+
+          journal_result
         else
           invoke(module, plugin, method, input, request_id, input["order_id"], 1)
         end

@@ -1,5 +1,35 @@
 defmodule OrderLab.Plugins.Payment do
   @moduledoc "Payment adapter with a local demo and optional idempotent HTTP provider."
+  def cancel_url(input, context) do
+    case System.get_env("PAYMENT_PROVIDER_URL") do
+      nil ->
+        {:ok, %{"cancelled" => true, "creation_key" => input["creation_key"]}}
+
+      url ->
+        headers = [{~c"idempotency-key", String.to_charlist(context["idempotency_key"])}]
+
+        case :httpc.request(
+               :post,
+               {String.to_charlist(String.trim_trailing(url, "/") <> "/cancel"), headers,
+                ~c"application/json", Jason.encode!(input)},
+               [timeout: 5000, connect_timeout: 2000, autoredirect: false], body_format: :binary) do
+          {:ok, {{_, status, _}, _, body}} when status in 200..299 ->
+            case Jason.decode(body) do
+              {:ok, %{"cancelled" => true} = result} ->
+                {:ok, result}
+
+              _ ->
+                raise OrderLab.ExternalUnknown,
+                  message: "Payment cancellation outcome is not confirmed"
+            end
+
+          _ ->
+            raise OrderLab.ExternalUnknown,
+              message: "Payment cancellation outcome is not confirmed"
+        end
+    end
+  end
+
   def call(input, context) do
     case call(input) do
       {:error, _} = error ->

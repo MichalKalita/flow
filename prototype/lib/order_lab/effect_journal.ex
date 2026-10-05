@@ -21,7 +21,23 @@ defmodule OrderLab.EffectJournal do
       Base.encode16(:crypto.strong_rand_bytes(24), case: :lower)
     ])
 
+    OrderLab.Compensations.setup!(db)
     db
+  end
+
+  def effect_id(request_id, position), do: "effect_" <> hash({request_id, position})
+
+  def outcome(db, id) do
+    case query!(db, "SELECT state,result FROM effects WHERE id=?", [id]) do
+      [%{"state" => "completed", "result" => result}] ->
+        OrderLab.Checkpoint.decode(result) |> elem(0)
+
+      [] ->
+        :absent
+
+      _ ->
+        :pending
+    end
   end
 
   def identity(db),

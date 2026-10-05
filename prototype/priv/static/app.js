@@ -44,6 +44,7 @@ function render() {
   renderOrders();
   renderPlugins();
   $('#external-operations').innerHTML = (data.external_operations || []).map(operation => `<article class="panel"><div class="panel-title"><h2>${esc(operation.operation)}</h2><span class="tag">${esc(operation.state)} · ${operation.attempts} pokusů</span></div><p>${esc(operation.id)}</p><pre>${pretty(operation.input)}</pre>${operation.state === 'pending' ? (operation.job_id ? (data.email_jobs.find(job => job.id === operation.job_id)?.state === 'failed' ? `<button class="button" data-retry-job="${esc(operation.job_id)}">Zopakovat úlohu</button>` : `<span class="muted">Obnova probíhá automaticky.</span>`) : `<button class="button" data-resume="${esc(operation.request_id)}">Obnovit požadavek</button>`) : ''}<button class="button" data-request="${esc(operation.request_id)}">Původní požadavek →</button></article>`).join('') || '<p class="muted">Zatím žádné externí operace.</p>';
+  $('#compensations').innerHTML = (data.compensations || []).map(item => `<article class="panel"><div class="panel-title"><h2>${esc(item.operation)}</h2><span class="tag">${esc(item.state)} · ${item.attempts} pokusů</span></div><p>${esc(item.effect_id)}</p><pre>${pretty(item.input)}</pre>${item.error ? `<p>${esc(item.error.message)}</p>` : ''}${item.state === 'failed' ? `<button class="button" data-retry-compensation="${esc(item.effect_id)}">Zopakovat zrušení</button>` : ''}<button class="button" data-request="${esc(item.request_id)}">Původní požadavek →</button></article>`).join('') || '<p class="muted">Zatím žádné kompenzace.</p>';
   $('#mqtt-outbox').innerHTML = (data.mqtt_outbox || []).map(job => `<article class="panel"><div class="panel-title"><h2>${esc(job.source)}</h2><span class="tag">${esc(job.state)}</span></div><p>${esc(job.topic)}</p><pre>${pretty(job.payload)}</pre>${job.error ? `<p>${esc(job.error)}</p>` : ''}${job.state === 'failed' ? `<button class="button" data-retry-mqtt="${esc(job.id)}">Zopakovat po opravě kontraktu</button>` : ''}<button class="button" data-request="${esc(job.request_id)}">Původní požadavek →</button></article>`).join('') || '<p class="muted">Zatím žádné odchozí zprávy.</p>';
   $('#workflow-source').textContent = data.workflow;
   if (!initialized) {
@@ -129,6 +130,12 @@ document.addEventListener('click', async event => {
     resume.disabled = true;
     try {await api(`/api/requests/${encodeURIComponent(resume.dataset.resume)}/resume`, {method:'POST'});await refresh();}
     finally {resume.disabled = false;}
+  }
+  const compensationRetry = event.target.closest('[data-retry-compensation]');
+  if (compensationRetry) {
+    compensationRetry.disabled = true;
+    try {await api(`/api/compensations/${encodeURIComponent(compensationRetry.dataset.retryCompensation)}/retry`, {method:'POST'});await refresh();}
+    finally {compensationRetry.disabled = false;}
   }
   const jobRetry = event.target.closest('[data-retry-job]');
   if (jobRetry) {

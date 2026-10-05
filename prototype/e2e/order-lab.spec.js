@@ -55,10 +55,20 @@ async function crashRequest(route,body,key,phase='after_commit',probeRoute=route
 function sql(query) {return execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),query],{encoding:'utf8'}).trim();}
 
 async function paymentProvider() {
-  const receipts=new Map();const calls=[];let dropResponse=false;let invalidResponse=false;
+  const receipts=new Map();const calls=[];const cancellations=new Map();const cancelCalls=[];let dropCancellation=false;let dropResponse=false;let invalidResponse=false;
   const provider=http.createServer(async(req,res)=>{
     let bytes='';for await(const chunk of req)bytes+=chunk;
-    const input=JSON.parse(bytes);const key=req.headers['idempotency-key'];calls.push({key,input});
+    const input=JSON.parse(bytes);const key=req.headers['idempotency-key'];
+    if(req.url==='/cancel'){
+      cancelCalls.push({key,input});if(!key){res.writeHead(400);return res.end();}
+      if(!cancellations.has(key))cancellations.set(key,{input,result:{cancelled:true,creation_key:input.creation_key}});
+      const cancellation=cancellations.get(key);if(JSON.stringify(cancellation.input)!==JSON.stringify(input)){res.writeHead(409);return res.end();}
+      const receipt=receipts.get(input.creation_key);if(receipt)receipt.cancelled=true;
+      if(dropCancellation){req.socket.destroy();return;}
+      res.writeHead(200,{'Content-Type':'application/json'});return res.end(JSON.stringify(cancellation.result));
+    }
+    calls.push({key,input});
+    if([...cancellations.values()].some(item=>item.input.creation_key===key)){res.writeHead(409);return res.end();}
     if(!key){res.writeHead(400);return res.end();}
     if(!receipts.has(key))receipts.set(key,{input,result:{url:'https://payments.example.invalid/'+input.order_id,provider:'e2e-provider',method:input.method}});
     const receipt=receipts.get(key);
@@ -67,7 +77,7 @@ async function paymentProvider() {
     res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(invalidResponse?{url:7}:receipt.result));
   });
   await new Promise(resolve=>provider.listen(0,'127.0.0.1',resolve));
-  return {url:'http://127.0.0.1:'+provider.address().port+'/',receipts,calls,drop(value){dropResponse=value;},invalid(value){invalidResponse=value;},async close(){provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));}};
+  return {url:'http://127.0.0.1:'+provider.address().port+'/',receipts,calls,cancellations,cancelCalls,dropCancel(value){dropCancellation=value;},drop(value){dropResponse=value;},invalid(value){invalidResponse=value;},async close(){provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));}};
 }
 
 const payload = (overrides = {}) => ({user_id:'u1',items:[{product_id:'p1',quantity:1}],payment_method:'card',...overrides});
@@ -133,6 +143,36 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/compensated
+INPUT fail Bool = true
+TRANSACTION
+    note = INSERT Notes WITH {id: uuid("compensated"), text: "payment compensation", rating: 4, tags: []}
+    payment = CALL Payment.create_url WITH {order_id: note.id, amount_cents: 1, currency: "CZK", country: "CZ", method: "card"}
+    WHEN :fail
+        FAIL 409 later_failure "Failure after creating the payment"
+    COMMIT
+RETURN {payment: payment, note: note}
+
+HTTP POST /api/compensation-savepoint
+TRANSACTION
+    TRY
+        CALL Payment.create_url WITH {order_id: uuid("savepoint"), amount_cents: 1, currency: "CZK", country: "CZ", method: "card"}
+        FAIL 409 caught_failure "Rollback savepoint"
+    CATCH failure
+        REQUIRE failure.code = "caught_failure" ELSE 409 wrong_failure "Wrong failure"
+    COMMIT
+RETURN {caught: true}
+
+HTTP POST /api/compensation-prefix
+TRANSACTION
+    CALL Payment.create_url WITH {order_id: uuid("committed"), amount_cents: 1, currency: "CZK", country: "CZ", method: "card"}
+    COMMIT
+TRANSACTION
+    CALL Payment.create_url WITH {order_id: uuid("rolledback"), amount_cents: 1, currency: "CZK", country: "CZ", method: "card"}
+    FAIL 409 suffix_failure "Failure after committed prefix"
+    COMMIT
+RETURN {done: true}
+
 HTTP POST /api/queue-payment
 INPUT names List<String>
 INPUT country String = "CZ"
@@ -1055,9 +1095,10 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const provider=await paymentProvider();
     try {
       await stopServer();sql("UPDATE products SET stock=stock+1 WHERE id='p2'");
-      const input=payload({items:[{product_id:'p2',quantity:1}]});await crashRequest('/api/orders',input,'effect-source-conflict','after_external_effect','/api/orders',{PAYMENT_PROVIDER_URL:provider.url});
+      const input=payload({items:[{product_id:'p2',quantity:1}]});const probe=await crashRequest('/api/orders',input,'effect-source-conflict','after_external_effect','/api/orders',{PAYMENT_PROVIDER_URL:provider.url});
       const stock=Number(sql("SELECT stock FROM products WHERE id='p2'"));sql("UPDATE products SET stock=stock+1 WHERE id='p2'");
       await startServer({PAYMENT_PROVIDER_URL:provider.url});const response=await post(request,input,'effect-source-conflict');expect(response.status).toBe(409);expect(response.body.error.code).toBe('journal_source_conflict');expect(provider.calls).toHaveLength(1);expect(provider.receipts.size).toBe(1);expect(Number(sql("SELECT stock FROM products WHERE id='p2'"))).toBe(stock+1);
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.request_id===probe.request_id)?.state).toBe('completed');
       await stopServer();sql("UPDATE products SET stock=stock-2 WHERE id='p2'");
     } finally {await stopServer();await provider.close();await startServer();}
   });
@@ -1201,6 +1242,57 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const response=await request.post('/api/queue-payment',{data:{names:['queued-rejected-country'],country:'BR'}});const body=await response.json();
     await expect.poll(async()=> (await snapshot(request)).plugin_calls.some(call=>call.request_id===body.request_id && call.output.code==='payment_country_unsupported')).toBe(true);
     const state=await snapshot(request);expect(state.email_jobs.some(job=>job.id===body.jobs[0].id)).toBe(false);expect(state.external_operations.find(effect=>effect.job_id===body.jobs[0].id).state).toBe('completed');expect((await request.get('/health')).status()).toBe(200);
+  });
+
+  test('rollback after successful payment cancels its external effect and preserves exact cancellation diagnostics', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/compensated',{data:{}});expect(response.status()).toBe(409);const body=await response.json();
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.request_id===body.request_id)?.state).toBe('completed');
+      expect(provider.receipts.size).toBe(1);expect(provider.cancellations.size).toBe(1);expect([...provider.receipts.values()][0].cancelled).toBe(true);
+      const state=await snapshot(request);expect(state.plugin_calls.filter(call=>call.request_id===body.request_id).map(call=>call.operation).sort()).toEqual(['cancel_url','create_url']);
+      expect(Number(sql("SELECT count(*) FROM flow_records WHERE id='"+provider.calls[0].input.order_id+"'"))).toBe(0);
+      const late=await request.post(provider.url,{data:provider.calls[0].input,headers:{'Idempotency-Key':provider.calls[0].key}});expect(late.status()).toBe(409);expect(provider.receipts.size).toBe(1);expect([...provider.receipts.values()][0].cancelled).toBe(true);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('committed payments are retained while savepoint rollback and a failed suffix are compensated independently', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const successful=await request.post('/api/compensated',{data:{fail:false}});expect(successful.status()).toBe(200);const kept=await successful.json();
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.request_id===kept.request_id)?.state).toBe('accepted');expect(provider.cancelCalls).toHaveLength(0);
+      const caught=await request.post('/api/compensation-savepoint',{data:{}});expect(caught.status()).toBe(200);const caughtBody=await caught.json();
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.request_id===caughtBody.request_id)?.state).toBe('completed');
+      const suffix=await request.post('/api/compensation-prefix',{data:{}});expect(suffix.status()).toBe(409);const suffixBody=await suffix.json();
+      await expect.poll(async()=> (await snapshot(request)).compensations.filter(item=>item.request_id===suffixBody.request_id).map(item=>item.state).sort()).toEqual(['accepted','completed']);
+      expect(provider.receipts.size).toBe(4);expect(provider.cancellations.size).toBe(2);expect([...provider.receipts.values()].filter(receipt=>receipt.cancelled)).toHaveLength(2);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('SIGKILL during cancellation repeats the same cancellation key and finishes one logical cancellation', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();const marker=path.join(directory,'compensation-crash.json');
+      await startServer({PAYMENT_PROVIDER_URL:provider.url,FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:'after_compensation_effect',FLOW_E2E_CRASH_ROUTE:'/api/compensated'});
+      const response=await request.post('/api/compensated',{data:{}});expect(response.status()).toBe(409);const body=await response.json();
+      await expect.poll(()=>fs.existsSync(marker)).toBe(true);expect(provider.cancellations.size).toBe(1);await crashServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.request_id===body.request_id)?.state).toBe('completed');
+      expect(provider.cancelCalls).toHaveLength(2);expect(provider.cancelCalls[0]).toEqual(provider.cancelCalls[1]);expect(provider.cancellations.size).toBe(1);expect(provider.calls).toHaveLength(1);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('failed cancellation remains visible and Chrome retries it after the provider recovers', async ({request,page}) => {
+    const provider=await paymentProvider();provider.dropCancel(true);
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/compensated',{data:{}});const body=await response.json();
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.request_id===body.request_id)?.state,{timeout:10000}).toBe('failed');
+      const compensation=(await snapshot(request)).compensations.find(item=>item.request_id===body.request_id);expect(compensation.attempts).toBe(3);expect(provider.cancellations.size).toBe(1);
+      provider.dropCancel(false);await page.goto('/admin');await page.getByRole('button',{name:'Pluginy'}).click();await page.locator('[data-retry-compensation="'+compensation.effect_id+'"]').click();
+      await expect.poll(async()=> (await snapshot(request)).compensations.find(item=>item.effect_id===compensation.effect_id).state).toBe('completed');expect(provider.cancelCalls.length).toBeGreaterThanOrEqual(4);expect((await snapshot(request)).plugin_calls.filter(call=>call.request_id===body.request_id && call.operation==='cancel_url')).toHaveLength(4);expect(new Set(provider.cancelCalls.map(call=>call.key)).size).toBe(1);expect(provider.cancellations.size).toBe(1);
+    } finally {await stopServer();await provider.close();await startServer();}
   });
 
   test('Products and Users SEED preserves edited legacy rows and never resurrects deleted data or users', async ({request}) => {

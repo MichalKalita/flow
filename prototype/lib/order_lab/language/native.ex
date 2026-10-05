@@ -66,6 +66,8 @@ defmodule OrderLab.Language.Native do
       },
       "Payment.create_url" => %{
         module: OrderLab.Plugins.Payment,
+        effect: :write,
+        compensation: :cancel_url,
         retry: :idempotent,
         input:
           {:record,

@@ -9,6 +9,7 @@ defmodule OrderLab.EmailWorker do
 
   def handle_info(:tick, state) do
     OrderLab.Store.deliver()
+    OrderLab.Store.deliver_compensations()
     Process.send_after(self(), :tick, 250)
     {:noreply, state}
   end

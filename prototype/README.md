@@ -58,7 +58,7 @@ Příkaz sekačce pošlete přes `POST /api/devices/mower1/commands` s JSON `{"t
 
 `POST /api/language/check` validuje Flow zaslaný jako text bez spuštění.
 
-`GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `POST /api/jobs/:id/retry`, `POST /api/requests/:id/resume`, `GET /health`.
+`GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `POST /api/jobs/:id/retry`, `POST /api/compensations/:id/retry`, `POST /api/requests/:id/resume`, `GET /health`.
 
 ## Pouze E2E testy
 
@@ -79,4 +79,4 @@ Neobsahuje HA, skutečné platby, přihlášení do HTTP adminu ani hot updates.
 Externí CALL bez bezpečného retry kontraktu nelze slepě zopakovat. Pokud takový CALL zůstává v pokračování, požadavek se automaticky neobnoví a stejný klíč vrátí `outcome_unknown`. Změněný zdroj rovněž nesmí převzít checkpoint původního programu. Diagnostiky nepotvrzeného externího pokusu mohou při tvrdém pádu zůstat neuložené. Simulovaný email může po pádu mezi provedením a potvrzením úlohy běžet znovu; skutečný poskytovatel by potřeboval idempotenci nebo jiný explicitní kontrakt. Podrobnosti popisuje [dokumentace obnovy](docs/LANGUAGE.md#obnova-vykonávání-po-pádu).
 
 
-Payment CALL má trvalou evidenci `<DATABASE_PATH>.effects`, která přežije rollback objednávky. Dokončený výsledek se znovu použije; nejasný pokus se opakuje se stejným klíčem a vstupem. Bez podpory poskytovatele nejde o garanci právě jednoho externího účinku. Admin → Pluginy ukazuje tento deník a umožňuje obnovit pending požadavek. Obnova hlídá změny zdrojových dat a případný konflikt, aby nepřepsala novější sklad. Hlavní databáze i deník musí zůstat pohromadě pro obnovu; QUEUE idempotentních pluginů používá stejný deník a stabilní klíč úlohy. Nejasný výsledek zůstane dohledatelný i při DELETE a admin nabízí ruční retry. Simulovaný email a kompenzace mají nadále popsaná omezení.
+Payment CALL má trvalou evidenci `<DATABASE_PATH>.effects`, která přežije rollback objednávky. Dokončený výsledek se znovu použije; nejasný pokus se opakuje se stejným klíčem a vstupem. Bez podpory poskytovatele nejde o garanci právě jednoho externího účinku. Admin → Pluginy ukazuje tento deník a umožňuje obnovit pending požadavek. Obnova hlídá změny zdrojových dat a případný konflikt, aby nepřepsala novější sklad. Hlavní databáze i deník musí zůstat pohromadě pro obnovu; QUEUE idempotentních pluginů používá stejný deník a stabilní klíč úlohy. Nejasný výsledek zůstane dohledatelný i při DELETE a admin nabízí ruční retry. Payment CALL má také trvalý kompenzační kontrakt: pokud jeho transakce či savepoint neprojde, worker zruší nepotvrzený odkaz se stabilním klíčem. Potvrzený prefix zachová. HTTP provider musí navíc podporovat idempotentní POST /cancel. Admin ukazuje kompenzace a umožňuje zopakovat neúspěšné zrušení; podrobnosti a hranice následného rollbacku popisuje dokumentace.

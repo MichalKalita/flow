@@ -294,7 +294,7 @@ Při startu Store vyhledá rozpracované požadavky s checkpointem a obnoví ty,
 
 Obnova podporuje podmíněné COMMIT, lokální rozsah větví, RETURN uvnitř transakce i další navazující transakce. Každý již potvrzený prefix zůstává potvrzený; pozdější chyba nemůže zpětně vrátit dřívější COMMIT. Pád před prvním commitem vrátí otevřenou SQLite transakci; čistě nativní scénář lze obnovit od počátečního checkpointu.
 
-Automatická obnova je povolena, pokud zbývající pokračování obsahuje jen výrazy, čtení, nativní transakční zápisy, QUEUE, PUBLISH a operace deklarované jako pure/read nebo s kontraktem retry: idempotent. Pokud by pokračování mohlo znovu vykonat externí CALL bez bezpečného retry kontraktu, runtime jej automaticky nespustí. Požadavek zůstane running; opakování se stejným klíčem vrátí `409 outcome_unknown`. Toto omezení se týká pluginů bez bezpečného kontraktu opakování, například přímého CALL Email.send_confirmation. Payment.create_url má nyní trvalý deník a idempotentní kontrakt popsaný níže. SQLite rollback nesmaže případný účinek u externího poskytovatele; automatická kompenzace zatím není implementována.
+Automatická obnova je povolena, pokud zbývající pokračování obsahuje jen výrazy, čtení, nativní transakční zápisy, QUEUE, PUBLISH a operace deklarované jako pure/read nebo s kontraktem retry: idempotent. Pokud by pokračování mohlo znovu vykonat externí CALL bez bezpečného retry kontraktu, runtime jej automaticky nespustí. Požadavek zůstane running; opakování se stejným klíčem vrátí `409 outcome_unknown`. Toto omezení se týká pluginů bez bezpečného kontraktu opakování, například přímého CALL Email.send_confirmation. Payment.create_url má nyní trvalý deník a idempotentní kontrakt popsaný níže. SQLite rollback nesmaže případný účinek u externího poskytovatele; Payment.create_url má proto trvalou automatickou kompenzaci popsanou níže.
 
 Checkpoint obsahuje fingerprint zdroje, verze formátu a registru operací. Změněný program nesmí automaticky převzít staré pokračování; obnova vyžaduje původní odpovídající program. Migrace rozpracovaných scénářů zatím není implementovaná. Syntaktická změna zdroje včetně komentáře mění fingerprint. Staré running požadavky bez checkpointu nemají automatickou obnovu. Nejde o HA ani o obnovu živých WebSocket spojení.
 
@@ -361,6 +361,31 @@ Retry politika platí i pro nejasné výsledky. Po vyčerpání pokusů zůstane
 
 POST /api/jobs/:id/retry obnoví failed úlohu se stejným id, vstupem a externím klíčem. Admin → Pluginy ukazuje pro pending frontovou operaci tlačítko Zopakovat úlohu, jakmile automatická politika skončí. Původní HTTP požadavek může být již committed: obnova úlohy ho znovu neprovádí. /api/email-jobs/:id/retry zůstává kompatibilní alias; pouze u simulovaného emailu navíc vypíná simulate_failure. Změna konfigurace poskytovatele či kontraktu již zapsané frontové operace způsobí konflikt a zabrání volání nového poskytovatele; po vrácení původní konfigurace lze úlohu obnovit. Před prvním pokusem úloha používá aktuální registrovaný kontrakt a konfiguraci, které se připnou při zápisu do deníku.
 
-Email zůstává simulovaný a bez garance právě jednoho externího provedení. Automatická kompenzace, migrace rozpracovaných operací a úklid deníku zatím chybí. Záloha potřebuje konzistentní hlavní databázi i její deník; samotný hlavní SQLite soubor nestačí k bezpečné obnově externích operací.
+Email zůstává simulovaný a bez garance právě jednoho externího provedení. Migrace rozpracovaných operací a úklid deníku zatím chybí. Automatická kompenzace je dostupná pro registrované pluginy s příslušným kontraktem, aktuálně Payment.create_url. Záloha potřebuje konzistentní hlavní databázi i její deník; samotný hlavní SQLite soubor nestačí k bezpečné obnově externích operací.
 
 E2E testy ověřují také frontové volání, oddělené klíče úloh, SIGKILL ve workeru, obnovu přes Chrome, změnu poskytovatele, neplatný výstup a rozdíl mezi nejasnou a definitivní chybou při DELETE. Provozují samostatný skutečný HTTP poskytovatel s idempotentními účtenkami, přeruší spojení nebo provedou SIGKILL před a po zapsání externího výsledku. Ověřují jednu účtenku i při opakovaném requestu, stejné vstupy a klíč, obnovu v iteraci, TRY/CATCH, změnu skladových dat i tlačítko obnovy v Chrome.
+
+
+## Kompenzace externích účinků
+
+Payment.create_url má v registru efekt write, retry: idempotent a compensation: cancel_url. CALL tak vyžaduje otevřenou TRANSACTION. Aplikace používá obvyklý CALL a COMMIT; zrušení dodává plugin, stejně jako vytvoření platebního odkazu:
+
+```text
+TRANSACTION
+    payment = CALL Payment.create_url WITH {order_id: request.id, amount_cents: 100, currency: "CZK", country: "CZ", method: "card"}
+    REQUIRE false ELSE 409 rejected "Pozdější kontrola selhala"
+    COMMIT
+RETURN payment
+```
+
+Runtime před externím voláním uloží záměr kompenzace do vedlejšího deníku. Po potvrzeném úspěchu vloží flow_effect_commits marker do stejné nativní transakce jako obchodní data. COMMIT atomicky zachová tento marker; rollback transakce nebo savepointu ho odstraní. Worker podle potvrzeného markeru ponechá externí účinek jako accepted. Pokud požadavek skončil a marker chybí, zahájí zrušení. Proto zachová potvrzený prefix scénáře a kompenzuje pouze nepotvrzený suffix, i při více transakcích či TRY/CATCH. Definitivní chyba vytvoření nemá co rušit a má stav not_required.
+
+Dokud je původní požadavek running a čeká na bezpečnou obnovu nejasného vytvoření, worker jej neruší. Pokud obnova následně skončí například konfliktem zdrojových dat, zruší i pending vytvoření podle stabilního creation_key. Kompenzace nepotřebuje vrácenou URL, kterou síť nemusela doručit. Tento mechanismus platí pro synchronní CALL; potvrzená QUEUE vyjadřuje samostatný záměr a její úspěšný výsledek se automaticky neruší.
+
+Pluginová metoda compensation dostává `{creation_key, input}` s původním vstupem a context.idempotency_key odvozeným z id původního účinku se suffixem :cancel. Musí potvrdit `{cancelled: true}` a podporovat bezpečné opakování stejného klíče a vstupu. Payment v demo režimu zrušení simuluje. Při PAYMENT_PROVIDER_URL volá HTTP POST na tentýž endpoint se suffixem /cancel s tímto JSON a hlavičkou Idempotency-Key. Poskytovatel musí umět zrušit i vytvoření s nejasným výsledkem a udržet zrušení tak, aby opožděné opakování vytvoření účinek znovu neaktivovalo. Jde o explicitní kontrakt adaptéru, ne automatickou vlastnost libovolné platební služby.
+
+Zrušení má trvalé stavy waiting → completed, případně retrying → failed. Automaticky proběhnou nejvýše tři pokusy s odstupem jedné sekundy. Pád po provedení, ale před uložením výsledku, opakuje stejné zrušení. Změna registrovaného kontraktu či konfigurace poskytovatele blokuje volání jiného adaptéru. Po obnovení původního kontraktu lze failed zrušení zopakovat přes POST /api/compensations/:effect_id/retry nebo admin → Pluginy → Kompenzace externích účinků. Admin eviduje původní vstup, rodičovský požadavek, stav, chybu i jednotlivá volání cancel_url.
+
+Databázový rollback je okamžitý, externí kompenzace je následná trvalá práce. Nejde o atomický rollback napříč síťovými službami; neúspěšné nebo nedostupné zrušení zůstává viditelné jako failed. Kontrakt nemůže odvolat například již přečtený email. Starší externí účinky bez předem uloženého kompenzačního záměru se automaticky nepřebírají. Záloha musí zahrnovat hlavní databázi, markery a vedlejší deník se záměry.
+
+E2E ověřují skutečné vytvoření a zrušení přes HTTP provider, rollback záznamu, savepoint, zachování potvrzeného prefixu, SIGKILL po provedení zrušení a ruční opakování neúspěšné kompenzace přes Chrome.
