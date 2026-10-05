@@ -12,7 +12,8 @@ other sample projects. JWTs are HS256 tokens for the seeded identities
 The public HTTP router admits 16 in-flight application requests and SQLite
 serializes database work. The `traffic` profile stays at 8 VUs with think
 time. `stress` ramps past the admission cap so some requests return 503
-`overloaded`.
+`overloaded`. `breakpoint.js` raises arrival rate until errors hit 1%, p50
+exceeds 250 ms, or p95 exceeds 1 s, then aborts.
 
 ## Prerequisites
 
@@ -66,6 +67,19 @@ Stress (ramps to 24 VUs; 503s are expected):
 k6 run -e PROFILE=stress ./k6/traffic.js
 ```
 
+Breakpoint (one HTTP call per iteration, ramp until an SLO trips):
+
+```sh
+k6 run ./k6/breakpoint.js
+./k6/run.sh breakpoint.js
+```
+
+It stops at the first of: HTTP error rate ≥ 1%, p50 ≥ 250 ms, p95 ≥ 1 s.
+Sold-out `POST /demo/api/orders` (400) does not count as an HTTP error.
+If every stage finishes, the host stayed inside those limits up to the last
+stage (20 000 requests/s). The public router admits 16 in-flight requests, so
+error rate usually trips first once arrival outruns that cap.
+
 Override the target and signing key:
 
 ```sh
@@ -93,6 +107,7 @@ Grouped URL tags keep path parameters out of metric cardinality
 
 ## Files
 
-- `run.sh` — `cd` to this folder and run `traffic.js`
+- `run.sh` — `cd` to this folder and run `traffic.js`, or `./k6/run.sh breakpoint.js`
 - `traffic.js` — profiles `smoke`, `traffic`, `stress`
+- `breakpoint.js` — ramping arrival rate until error or latency SLOs fail
 - `jwt.js` — HS256 helper matching the demo issuer and audience
