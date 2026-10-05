@@ -107,7 +107,7 @@
     [CREATE [when [and [eq actor after.author] [can READ after.post]]]]]
   [Follow
     [READ [when true]]
-    [CREATE [when [and [eq actor after.follower] [neq actor after.followee]]]]]
+    [CREATE [when [and [eq actor after.follower] [ne actor after.followee]]]]]
   [Like
     [READ [when [can READ target.post]]]
     [CREATE [when [and [eq actor after.user] [can READ after.post]]]]]]

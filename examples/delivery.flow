@@ -44,7 +44,6 @@
   [field identitySubject String [unique]]
   [field name String]
   [field status CourierStatus]
-  [field orders [list Order] [inverse Order.courier]]
   [field positions [list CourierPosition] [stream CourierPosition.courier]]]
 
 [type Line [record

@@ -4,7 +4,7 @@
 [type TableID [id Table]]
 [type DishID [id Dish]]
 [type ReservationID [id Reservation]]
-[type OrderID [id Order]]
+[type TicketID [id Ticket]]
 [type RequestID [id Request]]
 [type SeatCount [integer [range 1 12]]]
 [type PartySize [integer [range 1 12]]]
@@ -54,7 +54,7 @@
   [field quantity Quantity]]]
 
 [entity Ticket
-  [field id OrderID]
+  [field id TicketID]
   [field reservation Reservation]
   [field items [list OrderLine [min 1] [max 30]]]
   [field total OrderTotal]
@@ -182,6 +182,6 @@
     [snapshot [record [dish dish] [name dish.name] [price dish.price] [quantity item.quantity]]]]]
   [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
   [ticket [create Ticket [record
-    [id [new OrderID]] [reservation reservation] [items lines.snapshot]
+    [id [new TicketID]] [reservation reservation] [items lines.snapshot]
     [total total] [status OPEN] [createdAt request.time]]]]
   [result ticket]]

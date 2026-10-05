@@ -27,7 +27,6 @@
   [field name String]
   [field rating Rating]
   [field vehicle Vehicle]
-  [field trips [list Trip] [inverse Trip.driver]]
   [field positions [list DriverPosition] [stream DriverPosition.driver]]]
 
 [entity Vehicle
@@ -107,7 +106,7 @@
     [UPDATE [when [eq actor after.driver]]]]
   [DriverPosition [CREATE [when [eq actor after.driver]]]]]
 [permissions User
-  [DriverPosition [READ [when [eq actor target.driver.trips.rider]]]]]
+  [DriverPosition [READ [when [any actor.trips trip [eq trip.driver target.driver]]]]]]
 
 [type TripOutput [record
   [field id TripID] [field status TripStatus] [field fare Fare] [field createdAt DateTime]]]
