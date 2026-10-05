@@ -107,15 +107,17 @@ impl Runtime {
             }
         };
         json!({
-            "sqlite": {"main_bytes": main,
-            "wal_bytes": wal,
-            "shm_bytes": shm,
-            "total_disk_bytes": total,
-            "logical_bytes": logical,
-            "in_memory": path.is_none(),
-            "page_cache_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED),
-            "schema_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_SCHEMA_USED),
-            "prepared_statements_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_STMT_USED)}
+            "sqlite": {
+                "main_bytes": main,
+                "wal_bytes": wal,
+                "shm_bytes": shm,
+                "total_disk_bytes": total,
+                "logical_bytes": logical,
+                "in_memory": path.is_none(),
+                "page_cache_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_CACHE_USED),
+                "schema_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_SCHEMA_USED),
+                "prepared_statements_bytes": status(rusqlite::ffi::SQLITE_DBSTATUS_STMT_USED)
+            }
         })
     }
 }

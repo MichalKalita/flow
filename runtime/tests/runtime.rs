@@ -184,7 +184,20 @@ fn failed_permissions_and_stock_validation_roll_back() {
 fn duplicate_cart_rows_group_before_stock_update() {
     let mut r = runtime();
     let auth = token("idp:u1");
-    let receipt=r.execute("CreateOrder",json!({"userId":"u1","items":[{"productId":"p1","quantity":1},{"productId":"p1","quantity":2}],"paymentMethod":"BANK"}),Some(&auth)).unwrap();
+    let receipt = r
+        .execute(
+            "CreateOrder",
+            json!({
+                "userId": "u1",
+                "items": [
+                    {"productId": "p1", "quantity": 1},
+                    {"productId": "p1", "quantity": 2}
+                ],
+                "paymentMethod": "BANK"
+            }),
+            Some(&auth),
+        )
+        .unwrap();
     assert_eq!(receipt["order"]["total"], 7470);
     assert_eq!(receipt["order"]["items"].as_array().unwrap().len(), 1);
     assert_eq!(receipt["order"]["items"][0]["quantity"], 3);

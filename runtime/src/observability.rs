@@ -69,14 +69,14 @@ impl Metric {
                 "minute": self.minute,
                 "count": self.minute_count,
                 "errors": self.minute_errors,
-                "mean_ms": self.minute_sum/self.minute_count as f64
+                "mean_ms": self.minute_sum / self.minute_count as f64
             }));
         }
         json!({
             "count": self.count,
             "errors": self.errors,
             "sum_ms": self.sum,
-            "mean_ms": if self.count==0{0.}else{self.sum/self.count as f64},
+            "mean_ms": if self.count == 0 { 0. } else { self.sum / self.count as f64 },
             "p50_ms": percentile(0.5),
             "p95_ms": percentile(0.95),
             "p99_ms": percentile(0.99),
@@ -262,7 +262,7 @@ impl Observability {
                     "minute": m.minute,
                     "count": m.minute_count,
                     "errors": m.minute_errors,
-                    "mean_ms": m.minute_sum/m.minute_count as f64
+                    "mean_ms": m.minute_sum / m.minute_count as f64
                 }));
                 m.minute_count = 0;
                 m.minute_errors = 0;
@@ -291,7 +291,7 @@ impl Observability {
     pub fn snapshot(&self) -> Value {
         let d = self.0.lock().unwrap();
         json!({
-            "endpoints": d.metrics.iter().map(|(k,m)|(k.clone(),m.json())).collect::<BTreeMap<_,_>>(),
+            "endpoints": d.metrics.iter().map(|(k, m)| (k.clone(), m.json())).collect::<BTreeMap<_, _>>(),
             "histogram_bounds_ms": BOUNDS,
             "percentiles": "histogram bucket upper bounds; cumulative since first start",
             "history_minutes": HISTORY,
@@ -337,7 +337,7 @@ impl Observability {
             "estimated_metrics_bytes": metrics,
             "estimated_log_buffer_bytes": logs,
             "estimated_log_queue_bytes": d.queued_bytes,
-            "log_writer_buffer_bytes": if d.writer.is_some(){65536}else{0},
+            "log_writer_buffer_bytes": if d.writer.is_some() { 65536 } else { 0 },
             "queued_log_events": d.queued_events,
             "disk_bytes": disk,
             "log_buffer_limit": 200,
@@ -377,7 +377,7 @@ impl Drop for Span {
             "kind": self.kind,
             "name": self.name,
             "success": self.success,
-            "duration_ms": self.start.elapsed().as_secs_f64()*1000.
+            "duration_ms": self.start.elapsed().as_secs_f64() * 1000.
         }));
     }
 }
