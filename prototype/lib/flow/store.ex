@@ -114,6 +114,12 @@ defmodule Flow.Store do
     :ok
   end
 
+  def delete(db, %Ref{entity: entity, id: id}) do
+    fields(db, entity)
+    query(db, "DELETE FROM #{quote_name(entity)} WHERE id = ?", [encode(id)])
+    :ok
+  end
+
   def fetch(db, %Ref{entity: entity, id: id}, keys) do
     definitions = fields(db, entity)
 

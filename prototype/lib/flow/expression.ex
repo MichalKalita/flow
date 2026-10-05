@@ -1,6 +1,6 @@
 defmodule Flow.Expression do
   @moduledoc "Bounded pure expression evaluation. Entity access and permission recursion are host callbacks."
-  alias Flow.{ID, Ref, Syntax}
+  alias Flow.{ID, Ref, Syntax, Version, Embedded}
 
   @binary ~w(eq ne gt ge lt le add sub mul div contains)
   @unary ~w(not count)
@@ -24,6 +24,11 @@ defmodule Flow.Expression do
       field: Keyword.get(options, :field, &plain_field/2),
       can: Keyword.get(options, :can, fn _, _, _, _ -> false end),
       creates: Keyword.get(options, :creates, fn _, _ -> [] end),
+      resolve: Keyword.get(options, :resolve, fn env, name -> Map.fetch!(env, name) end),
+      extension:
+        Keyword.get(options, :extension, fn _, _, _, _ ->
+          raise ArgumentError, "Unsupported expression"
+        end),
       constants: Keyword.get(options, :constants, %{})
     }
 
@@ -130,10 +135,9 @@ defmodule Flow.Expression do
         case String.split(value, ".") do
           [name | fields] ->
             initial =
-              case Map.fetch(env, name) do
-                {:ok, value} -> value
-                :error -> Map.fetch!(context.constants, name)
-              end
+              if Map.has_key?(env, name),
+                do: context.resolve.(env, name),
+                else: Map.fetch!(context.constants, name)
 
             Enum.reduce(fields, initial, fn field, current -> context.field.(current, field) end)
         end
@@ -222,7 +226,9 @@ defmodule Flow.Expression do
         binary(operator, a, b)
 
       _ ->
-        raise ArgumentError, "Unsupported expression #{operator}"
+        context.extension.(node, env, context, fn expression, environment ->
+          eval(expression, environment, context)
+        end)
     end
   end
 
@@ -247,6 +253,10 @@ defmodule Flow.Expression do
   defp binary("div", a, b), do: Decimal.div(numeric!(a), numeric!(b))
 
   def equal?(%Ref{entity: entity, id: a}, %Ref{entity: entity, id: b}), do: equal?(a, b)
+  def equal?(%Version{reference: a}, b), do: equal?(a, b)
+  def equal?(a, %Version{reference: b}), do: equal?(a, b)
+  def equal?(%Embedded{value: a}, b), do: equal?(a, b)
+  def equal?(a, %Embedded{value: b}), do: equal?(a, b)
   def equal?(%ID{entity: entity, value: a}, %ID{entity: entity, value: b}), do: a == b
 
   def equal?(%Decimal{} = a, b) when is_integer(b) or is_struct(b, Decimal),
