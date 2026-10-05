@@ -16,6 +16,18 @@ TABLE Products = Product
 TABLE Users = User
 TABLE Orders = Order
 
+SEED Products WITH [
+    {id: "p1", name: "Studio sluchátka", price_cents: 249000, stock: 12},
+    {id: "p2", name: "Mechanická klávesnice", price_cents: 329000, stock: 5},
+    {id: "p3", name: "USB-C rozbočovač", price_cents: 129000, stock: 2},
+    {id: "p4", name: "Webkamera", price_cents: 189000, stock: 0}
+]
+SEED Users WITH [
+    {id: "u1", name: "Petra Nováková", email: "petra@example.test", country: "CZ"},
+    {id: "u2", name: "David Miller", email: "david@example.test", country: "US"},
+    {id: "u3", name: "Nora Silva", email: "nora@example.test", country: "BR"}
+]
+
 TYPE DeviceID = String WHERE length(value) BETWEEN 1 AND 64
 TYPE Battery = Int WHERE value BETWEEN 0 AND 100
 TYPE Latitude = Number WHERE value BETWEEN -90 AND 90

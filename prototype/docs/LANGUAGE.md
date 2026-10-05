@@ -283,7 +283,7 @@ TABLE DeviceAccess = {id: String, user_id: UserID, token: String, device_id: Dev
 SEED DeviceAccess WITH [{id: "petra-mower1", user_id: "u1", token: "demo-petra", device_id: "mower1"}]
 ```
 
-SEED je top-level deklarace deterministického seznamu záznamů, typovaného podle tabulky. Kompilátor odmítne neznámou tabulku, chybný záznam či duplicitní id i napříč více SEED stejné tabulky. Runtime při startu vloží dosud neinicializované klíče v jedné SQLite transakci. Již existující záznam nepřepíše. Trvalá evidence klíčů zabrání obnovení později smazaného záznamu při restartu; odebrané oprávnění se tak samo nevrátí. Změna hodnoty v SEED nemění existující data; jejich úprava patří do explicitního UPDATE/DELETE scénáře.
+SEED je top-level deklarace deterministického seznamu záznamů, typovaného podle tabulky. Kompilátor odmítne neznámou tabulku, chybný záznam či duplicitní id i napříč více SEED stejné tabulky. Runtime při startu vloží dosud neinicializované klíče v jedné SQLite transakci. Již existující záznam nepřepíše. Trvalá evidence klíčů zabrání obnovení později smazaného záznamu při restartu; odebrané oprávnění se tak samo nevrátí. Změna hodnoty v SEED nemění existující data; jejich úprava patří do explicitního UPDATE/DELETE scénáře. Stejná pravidla platí pro Products a Users: demo data jsou deklarována v application.flow, runtime je neobsahuje. Při přechodu ze starší databáze se existující klíče pouze označí jako inicializované a jejich hodnoty se zachovají. Před tímto prvním označením nelze rozlišit dosud nevytvořený záznam od záznamu smazaného starší verzí bez evidence SEED. Aplikace bez SEED startuje bez demo dat.
 
 
 ## Obnova vykonávání po pádu

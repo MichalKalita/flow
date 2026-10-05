@@ -13,7 +13,7 @@ mix deps.get
 ./bin/start
 ```
 
-Admin panel: <http://127.0.0.1:4000/admin>. Server naslouchá pouze na loopbacku. `PORT` mění port, `DATABASE_PATH` cestu databáze (výchozí `data/order_lab.sqlite3`). Při prvním startu se vytvoří schéma a demo data; další start je nemaže.
+Admin panel: <http://127.0.0.1:4000/admin>. Server naslouchá pouze na loopbacku. `PORT` mění port, `DATABASE_PATH` cestu databáze (výchozí `data/order_lab.sqlite3`). Při prvním startu se vytvoří schéma a data deklarovaná pomocí SEED v application.flow. Další start změněné záznamy nepřepíše a smazané neobnoví.
 
 Na macOS při problému s CA nastavte `MIX_CACERTS_PATH=/etc/ssl/cert.pem` a `HEX_CACERTS_PATH=/etc/ssl/cert.pem`. Pokud projekt používá lokální `.mix` a `.hex`, nastavte stejné `MIX_HOME` a `HEX_HOME` i pro `mix deps.get`; `bin/start` je rozpozná automaticky.
 

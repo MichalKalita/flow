@@ -133,6 +133,15 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/test-seed-mutations
+TRANSACTION
+    DELETE FROM Products AS p WHERE p.id = "p4"
+    DELETE FROM Users AS u WHERE u.id = "u3"
+    UPDATE Products AS p WHERE p.id = "p3" SET {name: "Edited product"}
+    UPDATE Users AS u WHERE u.id = "u2" SET {name: "Edited user"}
+    COMMIT
+RETURN {saved: true}
+
 HTTP POST /api/payment-catch
 TRANSACTION
     TRY
@@ -1110,6 +1119,35 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const ws=await wsClient();
     try {ws.send({action:'subscribe',source:'DevicePosition',params:{device_id:'corrupt'},latest:true});expect((await ws.next()).type).toBe('error');expect((await snapshot(request)).websocket.subscriptions).toBe(0);} finally {ws.close();}
     expect((await request.get('/health')).status()).toBe(200);
+  });
+
+  test('Products and Users SEED preserves edited legacy rows and never resurrects deleted data or users', async ({request}) => {
+    await request.post('/api/test-device-access',{data:{id:'deleted-user-grant',user_id:'u3',token:'deleted-user-token',device_id:'deleted-user-mower'}});
+    const beforeDelete=await wsClient('deleted-user-token');beforeDelete.close();
+    expect((await request.post('/api/test-seed-mutations',{data:{}})).status()).toBe(200);
+    await stopServer();
+    // Simulate adoption of existing rows from a version without per-key SEED history.
+    sql("DELETE FROM flow_seed_keys WHERE (table_name='Products' AND id='p3') OR (table_name='Users' AND id='u2')");
+    await startServer();
+    const state=await snapshot(request);
+    expect(state.products.some(row=>row.id==='p4')).toBe(false);
+    expect(state.users.some(row=>row.id==='u3')).toBe(false);
+    expect(state.products.find(row=>row.id==='p3').name).toBe('Edited product');
+    expect(state.users.find(row=>row.id==='u2').name).toBe('Edited user');
+    expect(Number(sql("SELECT count(*) FROM flow_seed_keys WHERE (table_name='Products' AND id='p3') OR (table_name='Users' AND id='u2')"))).toBe(2);
+    const client=await wsClient(null);
+    try {client.send({action:'authenticate',input:{token:'deleted-user-token'}});expect((await client.next()).code).toBe('unauthorized');}finally{client.close();}
+    const rejected=await post(request,payload({user_id:'u3'}));expect(rejected.status).toBe(404);expect(rejected.body.error.code).toBe('user_not_found');
+  });
+
+  test('an application without SEED starts without hidden demo products or users', async ({request}) => {
+    await stopServer();
+    const flow=path.join(directory,'empty.flow');fs.writeFileSync(flow,'HTTP GET /api/empty\nRETURN {empty: true}\n');
+    try {
+      await startServer({FLOW_PATH:flow,DATABASE_PATH:path.join(directory,'empty.sqlite3')});
+      const state=await snapshot(request);expect(state.products).toEqual([]);expect(state.users).toEqual([]);
+      const response=await request.get('/api/empty');expect(response.status()).toBe(200);expect((await response.json()).empty).toBe(true);
+    } finally {await stopServer();await startServer();}
   });
 
 });

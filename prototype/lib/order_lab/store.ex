@@ -97,25 +97,6 @@ defmodule OrderLab.Store do
     CREATE INDEX IF NOT EXISTS mqtt_source_topic ON mqtt_messages(source,topic,id);
     """)
 
-    Enum.each(
-      [
-        ["p1", "Studio sluchátka", 249_000, 12],
-        ["p2", "Mechanická klávesnice", 329_000, 5],
-        ["p3", "USB-C rozbočovač", 129_000, 2],
-        ["p4", "Webkamera", 189_000, 0]
-      ],
-      &write!(db, "INSERT OR IGNORE INTO products VALUES (?, ?, ?, ?)", &1)
-    )
-
-    Enum.each(
-      [
-        ["u1", "Petra Nováková", "petra@example.test", "CZ"],
-        ["u2", "David Miller", "david@example.test", "US"],
-        ["u3", "Nora Silva", "nora@example.test", "BR"]
-      ],
-      &write!(db, "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", &1)
-    )
-
     effects = OrderLab.EffectJournal.open!(path <> ".effects")
     journal_identity = OrderLab.EffectJournal.identity(effects)
 
