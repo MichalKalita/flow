@@ -54,7 +54,7 @@ pub(crate) fn install(db: &Connection, program: &Program) -> Result<()> {
             let entity = lit(name);
             let action = lit(event);
             db.execute_batch(&format!(
-                "CREATE TRIGGER IF NOT EXISTS {trigger} AFTER {event} ON {table} BEGIN
+                "DROP TRIGGER IF EXISTS {trigger}; CREATE TRIGGER {trigger} AFTER {event} ON {table} BEGIN
                     INSERT INTO _flow_audit (
                         time, transaction_id, operation, transport, actor, entity,
                         entity_id, action, before_json, after_json

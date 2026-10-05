@@ -18,6 +18,7 @@ fn q(name: &str) -> String {
 }
 #[derive(Clone, Default)]
 pub struct Config {
+    pub base_path: String,
     pub jwt_keys: BTreeMap<String, Vec<u8>>,
     pub event_credentials: BTreeMap<String, String>,
 }
@@ -42,6 +43,7 @@ struct Scope {
 }
 struct Session<'a> {
     observer: &'a crate::observability::Observability,
+    base_path: &'a str,
     p: &'a Program,
     db: &'a Connection,
     actor: Value,
@@ -57,6 +59,71 @@ struct Session<'a> {
 }
 impl Runtime {
     pub fn open(source: &str, path: &str, config: Config) -> Result<Self> {
+        Self::open_inner(source, path, config, false)
+    }
+    pub fn reload(&mut self, source: &str, config: Config) -> Result<()> {
+        let program = Program::compile(source)?;
+        for (name, entity) in &self.program.entities {
+            let next = program.entities.get(name).ok_or_else(|| {
+                Error::new("configuration", "Removing an entity requires migration")
+            })?;
+            for (field, definition) in &entity.fields {
+                let other = next.fields.get(field).ok_or_else(|| {
+                    Error::new("configuration", "Removing a field requires migration")
+                })?;
+                let describe = |p: &Program, f: &crate::program::Field| -> Result<String> {
+                    Ok(format!(
+                        "{:?}/{:?}/{}/{}",
+                        wire_type(p, &f.ty)?,
+                        f.relation,
+                        f.unique,
+                        f.generated
+                    ))
+                };
+                if describe(&self.program, definition)? != describe(&program, other)? {
+                    return Err(Error::new(
+                        "configuration",
+                        "Changing stored field types or constraints requires migration",
+                    ));
+                }
+            }
+            for (field, definition) in &next.fields {
+                if !entity.fields.contains_key(field)
+                    && definition.relation.is_none()
+                    && !matches!(program.resolve(&definition.ty)?, Type::Optional(_))
+                {
+                    return Err(Error::new(
+                        "configuration",
+                        "New fields on existing entities must be optional",
+                    ));
+                }
+            }
+        }
+        if self.program.plugins.contains_key("Files.put")
+            && !program.plugins.contains_key("Files.put")
+        {
+            return Err(Error::new(
+                "configuration",
+                "Removing blob storage requires migration",
+            ));
+        }
+        let path = self
+            .db
+            .path()
+            .ok_or_else(|| err("configuration"))?
+            .to_string();
+        if path.is_empty() {
+            return Err(Error::new(
+                "configuration",
+                "Reload requires a disk database",
+            ));
+        }
+        let mut candidate = Self::open_inner(source, &path, config, true)?;
+        candidate.observability = self.observability.clone();
+        *self = candidate;
+        Ok(())
+    }
+    fn open_inner(source: &str, path: &str, config: Config, reload: bool) -> Result<Self> {
         let program = Program::compile(source)?;
         for (alias, key) in &config.jwt_keys {
             if key.len() < 32
@@ -118,13 +185,17 @@ impl Runtime {
                     "Database uses legacy text IDs; start with a new database",
                 ));
             }
-            if stored.is_some_and(|s| s != hash) {
+            if !reload && stored.is_some_and(|s| s != hash) {
                 return Err(Error::new(
                     "configuration",
                     "Database belongs to a different Flow program; explicit migration required",
                 ));
             };
             for (name, entity) in &program.entities {
+                let existing = db
+                    .prepare(&format!("PRAGMA table_info({})", q(name)))?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<std::result::Result<BTreeSet<_>, _>>()?;
                 let mut definitions = vec![];
                 for (field, f) in &entity.fields {
                     if f.relation.is_some() {
@@ -164,6 +235,13 @@ impl Runtime {
                             q(target)
                         ))
                     }
+                    if reload && !existing.is_empty() && !existing.contains(field) {
+                        db.execute_batch(&format!(
+                            "ALTER TABLE {} ADD COLUMN {};",
+                            q(name),
+                            def.replace(" UNIQUE", "")
+                        ))?;
+                    }
                     definitions.push(def);
                 }
                 db.execute_batch(&format!(
@@ -172,6 +250,14 @@ impl Runtime {
                     definitions.join(",")
                 ))?;
                 for (field, f) in &entity.fields {
+                    if f.unique && f.relation.is_none() {
+                        db.execute_batch(&format!(
+                            "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}({});",
+                            q(&format!("unique_{name}_{field}")),
+                            q(name),
+                            q(field)
+                        ))?;
+                    }
                     if matches!(program.resolve(&f.ty)?,Type::Named(t) if program.entities.contains_key(t))
                     {
                         db.execute_batch(&format!(
@@ -187,6 +273,7 @@ impl Runtime {
                 db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_blobs(file_id INTEGER PRIMARY KEY REFERENCES File(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,bytes BLOB NOT NULL);")?;
             }
             crate::audit::install(&db, &program)?;
+            db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_seed_rows(entity TEXT NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(entity,id));")?;
             for (entity, rows) in &program.seeds {
                 for node in rows {
                     let fields = literal(node)?.fields()?.clone();
@@ -196,7 +283,11 @@ impl Runtime {
                             .ok_or_else(|| err("invalid_input"))?
                             .clone(),
                     )?;
-                    if exists(&db, entity, &id)? {
+                    let first = db.execute(
+                        "INSERT OR IGNORE INTO _flow_seed_rows(entity,id) VALUES(?1,?2)",
+                        rusqlite::params![entity, id],
+                    )? > 0;
+                    if !first || exists(&db, entity, &id)? {
                         continue;
                     };
                     let reference = Value::reference(entity, &id);
@@ -225,7 +316,7 @@ impl Runtime {
                 }
             }
             db.execute(
-                "INSERT OR IGNORE INTO _flow_schema(id,hash) VALUES(1,?1)",
+                "INSERT INTO _flow_schema(id,hash) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET hash=excluded.hash",
                 [hash],
             )?;
             Ok(())
@@ -335,6 +426,7 @@ impl Runtime {
                 let now = Utc::now().to_rfc3339();
                 let mut session = Session {
                     observer: &self.observability,
+                    base_path: &self.config.base_path,
                     p: &self.program,
                     db: &self.db,
                     actor,
@@ -412,6 +504,7 @@ impl Runtime {
             authenticate(&self.program, &self.db, &self.config, credential, "HTTP")?;
         let mut session = Session {
             observer: &self.observability,
+            base_path: &self.config.base_path,
             p: &self.program,
             db: &self.db,
             actor,
@@ -492,6 +585,7 @@ impl Runtime {
                 authenticate(&self.program, &self.db, &self.config, credential, transport)?;
             let mut session = Session {
                 observer: &self.observability,
+                base_path: &self.config.base_path,
                 p: &self.program,
                 db: &self.db,
                 actor,
@@ -577,6 +671,7 @@ impl Runtime {
                 authenticate(&self.program, &self.db, &self.config, credential, "MQTT")?;
             let mut session = Session {
                 observer: &self.observability,
+                base_path: &self.config.base_path,
                 p: &self.program,
                 db: &self.db,
                 actor,
@@ -693,6 +788,7 @@ impl Runtime {
             let now = Utc::now().to_rfc3339();
             let mut session = Session {
                 observer: &self.observability,
+                base_path: &self.config.base_path,
                 p: &self.program,
                 db: &self.db,
                 actor,
@@ -1568,7 +1664,10 @@ impl Session<'_> {
                             "File",
                             BTreeMap::from([
                                 ("id".into(), Value::Id("File".into(), id)),
-                                ("url".into(), Value::Str(format!("/api/files/{id}"))),
+                                (
+                                    "url".into(),
+                                    Value::Str(format!("{}/api/files/{id}", self.base_path)),
+                                ),
                             ]),
                         )?;
                         self.blobs.insert(id, image.bytes.clone());
@@ -2172,4 +2271,243 @@ pub(crate) fn duration(s: &str) -> Result<i64> {
         .checked_mul(multiplier)
         .filter(|n| *n >= 0 && *n <= 315360000)
         .ok_or_else(|| err("invalid_input"))
+}
+
+impl Runtime {
+    pub fn admin_tables(&self) -> serde_json::Value {
+        serde_json::json!(self.program.entities.iter().map(|(name,entity)| {
+            serde_json::json!({"name":name,"stream":self.program.streams.contains_key(name),"fields":entity.fields.iter().map(|(name,f)|serde_json::json!({"name":name,"type":format!("{:?}",self.program.resolve(&f.ty).unwrap_or(&f.ty)),"relation":f.relation,"generated":f.generated,"unique":f.unique})).collect::<Vec<_>>()})
+        }).collect::<Vec<_>>())
+    }
+    pub fn admin_rows(
+        &self,
+        entity: &str,
+        after: i64,
+        limit: usize,
+        search: &str,
+        exact: Option<i64>,
+    ) -> Result<serde_json::Value> {
+        let mut span = self.observability.span("io", "sqlite.admin_read");
+        let result = self.admin_rows_inner(entity, after, limit, search, exact);
+        if result.is_ok() {
+            span.success();
+        }
+        result
+    }
+    fn admin_rows_inner(
+        &self,
+        entity: &str,
+        after: i64,
+        limit: usize,
+        search: &str,
+        exact: Option<i64>,
+    ) -> Result<serde_json::Value> {
+        let schema = self
+            .program
+            .entities
+            .get(entity)
+            .ok_or_else(|| err("not_found"))?;
+        let fields = schema
+            .fields
+            .iter()
+            .filter(|(_, f)| f.relation.is_none())
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let lengths = fields
+            .iter()
+            .map(|field| format!("COALESCE(length({}),0)", q(field)))
+            .collect::<Vec<_>>()
+            .join("+");
+        let columns = fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "CASE WHEN ({lengths})<=262144 THEN {} ELSE NULL END",
+                    q(field)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let searchable = fields
+            .iter()
+            .map(|field| format!("COALESCE(CAST({} AS TEXT),'')", q(field)))
+            .collect::<Vec<_>>()
+            .join("||' '||");
+        let sql = format!(
+            "SELECT id,({lengths})>262144,{columns} FROM {} WHERE (?1=0 OR id>?1) AND (?2 IS NULL OR id=?2) AND (?3='' OR instr(lower({searchable}),lower(?3))>0) ORDER BY id LIMIT ?4",
+            q(entity)
+        );
+        let limit = limit.clamp(1, 100);
+        let mut statement = self.db.prepare(&sql)?;
+        let mut rows = statement.query(rusqlite::params![
+            after,
+            exact,
+            search.chars().take(256).collect::<String>(),
+            (limit + 1) as i64
+        ])?;
+        let mut output = vec![];
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let oversized: bool = row.get(1)?;
+            let mut record = serde_json::Map::new();
+            for (index, field) in fields.iter().enumerate() {
+                use rusqlite::types::ValueRef;
+                let value = match row.get_ref(index + 2)? {
+                    ValueRef::Integer(n) => serde_json::json!(n),
+                    ValueRef::Text(bytes) => serde_json::from_slice(bytes)?,
+                    _ => serde_json::Value::Null,
+                };
+                record.insert(field.clone(), value);
+            }
+            record.insert("id".into(), serde_json::json!(id));
+            let record = serde_json::Value::Object(record);
+            output.push(serde_json::json!({"record":record,"etag":if oversized {None}else{Some(format!("{:x}",Sha256::digest(record.to_string())))},"oversized":oversized}));
+        }
+        let more = output.len() > limit;
+        output.truncate(limit);
+        let cursor = if more {
+            output.last().map(|row| row["record"]["id"].clone())
+        } else {
+            None
+        };
+        Ok(serde_json::json!({"rows":output,"next_cursor":cursor,"entity":entity}))
+    }
+    pub fn admin_write(
+        &mut self,
+        action: &str,
+        entity: &str,
+        id: Option<i64>,
+        input: serde_json::Value,
+        expected: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let mut span = self.observability.span("io", "sqlite.admin_write");
+        let result = self.admin_write_inner(action, entity, id, input, expected);
+        if result.is_ok() {
+            span.success();
+        }
+        result
+    }
+    fn admin_write_inner(
+        &mut self,
+        action: &str,
+        entity: &str,
+        id: Option<i64>,
+        input: serde_json::Value,
+        expected: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        if !["CREATE", "UPDATE", "DELETE"].contains(&action) {
+            return Err(err("invalid_input"));
+        }
+        if !self.program.entities.contains_key(entity) {
+            return Err(err("not_found"));
+        }
+        if action != "DELETE" && !input.is_object() {
+            return Err(err("invalid_input"));
+        }
+        self.db.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| -> Result<serde_json::Value> {
+            let mut json = input.as_object().cloned().unwrap_or_default();
+            let id = if action == "CREATE" {
+                match json.get("id") {
+                    Some(value) => crate::program::valid_id(Value::from_json(value)?)?,
+                    None => next_id(&self.db, entity, 0)?,
+                }
+            } else {
+                id.ok_or_else(|| err("invalid_input"))?
+            };
+            if action != "CREATE" {
+                let rows = self.admin_rows(entity, 0, 1, "", Some(id))?;
+                let current = rows["rows"]
+                    .as_array()
+                    .and_then(|rows| rows.first())
+                    .ok_or_else(|| err("not_found"))?;
+                if expected.is_none() || current["etag"].as_str() != expected {
+                    return Err(Error::new(
+                        "conflict",
+                        "Record changed; reload it before writing",
+                    ));
+                }
+            }
+            if action != "DELETE" {
+                if json
+                    .get("id")
+                    .is_some_and(|value| value != &serde_json::json!(id))
+                {
+                    return Err(Error::new(
+                        "invalid_input",
+                        "Primary keys cannot be changed",
+                    ));
+                }
+                json.insert("id".into(), serde_json::json!(id));
+            }
+            let reference = Value::reference(entity, &id);
+            let after = if action == "DELETE" {
+                BTreeMap::new()
+            } else {
+                if action == "CREATE" {
+                    for (field, f) in &self.program.entities[entity].fields {
+                        if f.generated && field != "id" && !json.contains_key(field) {
+                            json.insert(field.clone(), serde_json::json!(Utc::now().to_rfc3339()));
+                        }
+                    }
+                }
+                self.program
+                    .validate(
+                        &stored_type(&self.program, entity)?,
+                        Value::from_json(&serde_json::Value::Object(json))?,
+                        Some(reference.clone()),
+                    )?
+                    .fields()?
+                    .clone()
+            };
+            let mut session = Session {
+                p: &self.program,
+                db: &self.db,
+                observer: &self.observability,
+                base_path: &self.config.base_path,
+                actor: Value::Null,
+                actor_type: "admin".into(),
+                changes: BTreeMap::new(),
+                cache: BTreeMap::new(),
+                permission_stack: BTreeSet::new(),
+                steps: 0,
+                now: Utc::now().to_rfc3339(),
+                sql: vec![],
+                invocations: vec![],
+                blobs: BTreeMap::new(),
+            };
+            session.changes.insert(
+                (entity.into(), id),
+                Change {
+                    reference: reference.clone(),
+                    action: action.into(),
+                    changed: after.keys().cloned().collect(),
+                    after: after.clone(),
+                },
+            );
+            for value in after.values() {
+                session.references(value)?
+            }
+            crate::audit::context(
+                &self.db,
+                &format!("admin.{action}"),
+                "admin",
+                &serde_json::json!({"type":"admin"}),
+            )?;
+            session.apply()?;
+            let events = if action == "CREATE" && self.program.streams.contains_key(entity) {
+                self.run_events(vec![reference])?
+            } else {
+                (0, 0)
+            };
+            self.db.execute_batch("COMMIT;")?;
+            self.observability.event("stream_events", events.0);
+            self.observability.event("automation_runs", events.1);
+            Ok(serde_json::json!({"id":id,"action":action,"entity":entity}))
+        })();
+        if result.is_err() {
+            let _ = self.db.execute_batch("ROLLBACK;");
+        }
+        result
+    }
 }

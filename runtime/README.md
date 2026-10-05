@@ -8,7 +8,9 @@ Central permissions govern reads and complete transactions across all transports
 
 Run `./start.sh` from the repository root. The script loads `.env`, builds the
 embedded admin frontend and starts a release runtime. The default database is
-`data/flow-numeric.sqlite`. For a direct invocation:
+`data/projects/demo.sqlite`, with hosted programs in `projects/`. See
+[hosted project configuration](../projects/README.md) for routing, reload and admin
+data management. Single-file mode remains available for tests and direct invocation:
 
 ```sh
 cd runtime
@@ -18,10 +20,10 @@ FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' FLOW_AUTOMATION_KEY='a
 ```
 
 Arguments are the program, database, HTTP bind address and optional MQTT bind
-address. HTTP defaults to `127.0.0.1:8080`, MQTT to `127.0.0.1:1883`; WebSocket
+address. HTTP defaults to `0.0.0.0:80`, MQTT to `127.0.0.1:1883`; WebSocket
 uses the HTTP listener. SQLite is bundled. TLS is not implemented. Program and
 schema versions are checked at startup; incompatible databases fail without
-rewriting application data. Seed rows only fill missing IDs.
+rewriting application data. Seed IDs are initialized once and do not restore deleted rows.
 
 ## Numeric IDs
 
@@ -47,12 +49,12 @@ numeric time-based correlation value; it is not an entity sequence.
 
 Legacy text-ID databases are not migrated in this step. Use a new database;
 existing databases remain available unchanged. `start.sh` and `.env.example`
-use `data/flow-numeric.sqlite` to keep the previous database separate.
+use isolated `data/projects/<name>.sqlite` files to keep previous databases separate.
 
 ```sh
 curl http://127.0.0.1:8080/api/products
 curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"userId":1,"items":[{"productId":1,"quantity":2}],"paymentMethod":"CARD"}' \
+  -d '{"items":[{"productId":1,"quantity":2}],"paymentMethod":"CARD"}' \
   http://127.0.0.1:8080/api/orders
 ```
 

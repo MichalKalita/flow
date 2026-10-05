@@ -9,3 +9,5 @@ runtime/data/
 
 admin-ui/test-results/
 admin-ui/playwright-report/
+
+/projects/*-error.txt

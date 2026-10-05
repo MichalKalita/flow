@@ -45,3 +45,7 @@ impl From<serde_json::Error> for Error {
 
 pub mod log_store;
 pub(crate) mod telemetry;
+
+pub mod projects;
+
+pub(crate) mod dashboard;

@@ -1,0 +1,413 @@
+# Runnable application with HTTP, MQTT, WebSocket and transactional automations.
+# Payment computes a local URL; it does not integrate a payment gateway.
+# Forms and expressions use prefix syntax: [name arguments...].
+# Prices are in CZK with two decimal places; entity IDs are branded integers.
+
+[type UserID [id User]]
+[type ServiceID [id Service]]
+[type ProductID [id Product]]
+[type OrderID [id Order]]
+[type PhotoID [id Photo]]
+[type FileID [id File]]
+[type DeviceID [id Device]]
+[type AlertID [id DeviceAlert]]
+[type AccessID [id DeviceAccess]]
+[type CommandID [id DeviceCommand]]
+[type RequestID [id Request]]
+
+
+[type Quantity [integer [range 1 100]]]
+[type OrderQuantity [integer [range 1 5000]]]
+[type Stock [integer [range 0 [pow 10 6]]]]
+[type Price [decimal [range 0.01 [pow 10 9]] [scale 2]]]
+[type OrderTotal [decimal [range 0.01 [mul 5000 [pow 10 9]]] [scale 2]]]
+[type Battery [integer [range 0 100]]]
+[type Latitude [decimal [range -90 90] [scale 6]]]
+[type Longitude [decimal [range -180 180] [scale 6]]]
+[type PhotoSize [integer [range 1 4096]]]
+
+
+[enum PaymentMethod CARD BANK]
+[enum MowerAction START STOP]
+[enum OrderStatus AWAITING_PAYMENT]
+[enum AlertKind LOW_BATTERY]
+[enum DeviceRight READ CONTROL]
+[enum Role CATALOG_ADMIN DEVICE_AUTOMATION]
+
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field email String]
+  [field country String]
+  [field orders [list Order] [inverse Order.user]]
+  [field access [list DeviceAccess] [inverse DeviceAccess.user]]]
+
+[entity Service
+  [field id ServiceID]
+  [field keyHash String [unique]]
+  [field roles [list Role [max 2]]]]
+
+[entity Product
+  [field id ProductID]
+  [field name String]
+  [field price Price]
+  [field stock Stock]
+  [field photos [list Photo] [inverse Photo.product]]]
+
+[entity Order
+  [field id OrderID]
+  [field user User]
+  [field requestId RequestID]
+  [field createdAt DateTime]
+  [field items [list OrderItem [min 1] [max 50]]]
+  [field total OrderTotal]
+  [field paymentMethod PaymentMethod]
+  [field paymentUrl String]
+  [field status OrderStatus]]
+
+[type OrderItem [record
+  [field product Product]
+  [field name String]
+  [field price Price]
+  [field quantity OrderQuantity]]]
+
+[entity Photo
+  [field id PhotoID]
+  [field product Product]
+  [field file File]
+  [field width PhotoSize]
+  [field height PhotoSize]]
+
+[entity File
+  [field id FileID]
+  [field url String]
+  [field photos [list Photo] [inverse Photo.file]]]
+
+[entity Device
+  [field id DeviceID]
+  [field certificateFingerprint [optional String] [unique]]
+  [field keyHash [optional String] [unique]]
+  [field alerts [list DeviceAlert] [inverse DeviceAlert.device]]
+  [field access [list DeviceAccess] [inverse DeviceAccess.device]]
+  [field status [list DeviceStatus] [stream DeviceStatus.device]]
+  [field positions [list DevicePosition] [stream DevicePosition.device]]]
+
+[entity DeviceAlert
+  [field id AlertID]
+  [field device Device]
+  [field kind AlertKind]
+  [field createdAt DateTime]]
+
+[entity DeviceAccess
+  [field id AccessID]
+  [field user User]
+  [field rights [list DeviceRight [max 2]]]
+  [field device Device]]
+
+[seed Product [rows
+  [record [id 1] [name "Studio headphones"] [price 2490.00] [stock 12]]
+  [record [id 2] [name "Mechanical keyboard"] [price 3290.00] [stock 5]]
+  [record [id 3] [name "USB-C hub"] [price 1290.00] [stock 2]]
+  [record [id 4] [name "Webcam"] [price 1890.00] [stock 0]]]]
+[seed User [rows
+  [record [id 1] [identitySubject "idp:u1"] [roles [list]]
+    [name "Petra Nováková"] [email "petra@example.test"] [country "CZ"]]
+  [record [id 2] [identitySubject "idp:u2"] [roles [list]]
+    [name "David Miller"] [email "david@example.test"] [country "US"]]
+  [record [id 3] [identitySubject "idp:u3"] [roles [list]]
+    [name "Nora Silva"] [email "nora@example.test"] [country "BR"]]]]
+[seed Device [rows [record [id 1] [keyHash "0e2adcdce6bbb8e00f024743d68a57644b9b100853fe4a6efc465e22a844b17c"]] [record [id 2]]]]
+[seed DeviceAccess [rows
+  [record [id 1] [user 1] [device 1] [rights [list READ CONTROL]]]
+  [record [id 2] [user 2] [device 2] [rights [list READ CONTROL]]]]]
+
+[stream DeviceStatus
+  [mqtt "devices/{device}/status"]
+  [history [duration "24h"] [maxMessages 10000]]
+  [field device Device]
+  [field receivedAt DateTime [receivedAt]]
+  [field online Bool]
+  [field battery Battery]]
+[stream DevicePosition
+  [mqtt "devices/{device}/position"]
+  [history [duration "5m"] [maxMessages 1000]]
+  [field device Device]
+  [field receivedAt DateTime [receivedAt]]
+  [field latitude Latitude]
+  [field longitude Longitude]]
+[stream DeviceCommand
+  [mqtt "devices/{device}/command"]
+  [history [duration "24h"] [maxMessages 10000]]
+  [field id CommandID]
+  [field device Device]
+  [field action MowerAction]]
+
+# The host verifies credentials; the parser never authenticates requests.
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "application"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [service Service [apiKey] [entity [eq Service.keyHash credential.hash]]]
+  [deviceKey Device [apiKey] [entity [eq Device.keyHash credential.hash]]]
+  [device Device [certificate]
+    [entity [eq Device.certificateFingerprint certificate.fingerprint]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user service anonymous]]
+[transport MQTT [auth device deviceKey service]]
+[transport WebSocket [auth user service]]
+
+# Positive actor grants: actor is the identity and target is the entity.
+[permissions *
+  [Product [READ [when true]]]]
+
+[permissions User
+  [User [READ [when [eq actor target]]]]
+  [Product
+    [UPDATE [when [contains actor.roles CATALOG_ADMIN]]]
+    [UPDATE [when [and
+      [only changed stock]
+      [gt before.stock after.stock]
+      [eq [sub before.stock after.stock]
+        [sum
+          [where
+            [flatMap [where [creates transaction Order] order [eq order.user actor]] order order.items]
+            item [eq item.product target]]
+          item item.quantity]]]]]]
+  [Order
+    [READ [when [eq actor target.user]]]
+    [CREATE [when [and
+      [eq actor after.user]
+      [all after.items item [and
+        [eq item.price item.product.price]
+        [eq item.name item.product.name]]]
+      [eq after.total [sum after.items item [mul item.price item.quantity]]]]]]]
+  [OrderItem [READ [when [can READ parent]]]]
+  [Photo
+    [READ [when [can READ target.product]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [File
+    [READ [when [any target.photos photo [can READ photo]]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Device [READ [when [any target.access access [and
+    [eq access.user actor] [contains access.rights READ]]]]]]
+  [DeviceAccess [READ [when [eq actor target.user]]]]
+  [DeviceAlert [READ [when [can READ target.device]]]]
+  [DeviceStatus [READ [when [can READ target.device]]]]
+  [DevicePosition [READ [when [can READ target.device]]]]
+  [DeviceCommand
+    [READ [when [can READ target.device]]]
+    [CREATE [when [any after.device.access access [and
+      [eq access.user actor] [contains access.rights CONTROL]]]]]]
+  
+  
+  
+  ]
+
+[permissions Service
+  [Product [UPDATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Photo
+    [READ [when [can READ target.product]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [File
+    [READ [when [any target.photos photo [can READ photo]]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Device [READ [when [contains actor.roles DEVICE_AUTOMATION]]]]
+  [DeviceAlert
+    [READ [when [contains actor.roles DEVICE_AUTOMATION]]]
+    [CREATE [when [contains actor.roles DEVICE_AUTOMATION]]]]
+  [DeviceStatus [READ [when [can READ target.device]]]]
+  [DevicePosition [READ [when [can READ target.device]]]]
+  
+  ]
+[permissions Device
+  [DeviceCommand [READ [when [eq actor target.device]]]]
+  [DeviceStatus [CREATE [when [eq actor after.device]]]]
+  [DevicePosition [CREATE [when [eq actor after.device]]]]]
+
+# Plugin contracts are declarative; the parser never executes them.
+
+
+
+
+
+# Output types define projections and are validated by the runtime.
+[type UserSummary [record [field id UserID] [field name String]]]
+[type ProductSummary [record [field id ProductID] [field name String]]]
+[type OrderSummary [record
+  [field id OrderID] [field createdAt DateTime] [field total OrderTotal] [field status OrderStatus]]]
+[type OrderItemOutput [record
+  [field product ProductSummary] [field name String] [field price Price] [field quantity OrderQuantity]]]
+[type OrderOutput [record
+  [field id OrderID] [field user UserSummary] [field createdAt DateTime]
+  [field items [list OrderItemOutput [max 50]]] [field total OrderTotal]
+  [field paymentMethod PaymentMethod] [field paymentUrl String] [field status OrderStatus]]]
+[type StatusOutput [record [field online Bool] [field battery Battery]]]
+[type PositionOutput [record
+  [field latitude Latitude] [field longitude Longitude] [field receivedAt DateTime]]]
+[type DeviceOutput [record
+  [field id DeviceID] [field status [optional StatusOutput]]
+  [field positions [list PositionOutput [max 1000]]]]]
+[type AlertOutput [record [field id AlertID] [field kind AlertKind] [field createdAt DateTime]]]
+[type FileOutput [record [field id FileID] [field url String]]]
+[type PhotoOutput [record
+  [field id PhotoID] [field file FileOutput] [field width PhotoSize] [field height PhotoSize]]]
+[type PaymentOutput [record [field url String]]]
+[type EmailOutput [record [field state String]]]
+
+[type OrderReceipt [record
+  [field order OrderOutput] [field payment PaymentOutput]]]
+[type PhotoReceipt [record [field photo PhotoOutput] [field file FileOutput]]]
+[type CommandOutput [record [field id CommandID] [field action MowerAction]]]
+[type CartItem [record [field productId ProductID] [field quantity Quantity]]]
+
+# Declarative operations have typed outputs and no imperative resolvers.
+[query Order
+  [input orderId OrderID]
+  [output OrderOutput]
+  [http GET "/api/orders/{orderId}"]
+  [result [entity $orderId]]]
+
+[query UserOrders
+  [input userId UserID]
+  [output [list OrderSummary [max 10]]]
+  [http GET "/api/users/{userId}/orders"]
+  [user [entity $userId]]
+  [result [order [last user.orders 10] Order.createdAt DESC]]]
+
+[query Device
+  [input deviceId DeviceID]
+  [output DeviceOutput]
+  [http GET "/api/devices/{deviceId}"]
+  [device [entity $deviceId]]
+  [result [record
+    [id device.id]
+    [status [single [last device.status 1]]]
+    [positions [order [last [since device.positions [ago "5m"]] 1000]
+      DevicePosition.receivedAt ASC]]]]]
+
+[query DeviceAlerts
+  [input deviceId DeviceID]
+  [output [list AlertOutput [max 100]]]
+  [http GET "/api/device-alerts/{deviceId}"]
+  [device [entity $deviceId]]
+  [result [order [last device.alerts 100] DeviceAlert.createdAt DESC]]]
+
+[query ProductPhotos
+  [input productId ProductID]
+  [output [list PhotoOutput [max 100]]]
+  [http GET "/api/products/{productId}/photos"]
+  [product [entity $productId]]
+  [result [order [last product.photos 100] Photo.id ASC]]]
+
+[mutate CreateOrder
+  [input items [list CartItem [min 1] [max 50]]]
+  [input paymentMethod PaymentMethod]
+  
+  [output OrderReceipt]
+  [http POST "/api/orders" [status 201]]
+  [atomic]
+  [user request.actor]
+  [cart [groupSum $items productId quantity OrderQuantity]]
+  [lines [map cart item
+    [product [entity item.productId]]
+    [quantity item.quantity]
+    [snapshot [record [product product] [name product.name]
+      [price product.price] [quantity quantity]]]
+    [remaining [as Stock [sub product.stock quantity]]]
+    [stock [set product.stock remaining]]]]
+  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
+  [orderId [new OrderID]]
+  [payment [invoke Payment.createUrl [record
+    [orderId orderId] [amount total] [currency "CZK"]
+    [country user.country] [method $paymentMethod]]]]
+  [order [create Order [record
+    [id orderId] [user user] [requestId request.id] [createdAt request.time]
+    [items lines.snapshot] [total total] [paymentMethod $paymentMethod]
+    [paymentUrl payment.url] [status AWAITING_PAYMENT]]]]
+  
+  [result [record [order order] [payment payment]]]]
+
+
+
+[mutate SendCommand
+  [input deviceId DeviceID] [input action MowerAction]
+  [output CommandOutput]
+  [http POST "/api/devices/{deviceId}/commands" [status 202]]
+  [atomic]
+  [device [entity $deviceId]]
+  [command [publish DeviceCommand [record
+    [id [new CommandID]] [device device] [action $action]]]]
+  [result command]]
+
+
+
+
+
+
+[query Products
+  [output [list ProductSummary [max 100]]]
+  [http GET "/api/products"]
+  [result [first [entities Product] 100]]]
+[query Users
+  [output [list UserSummary [max 100]]]
+  [http GET "/api/users"]
+  [result [first [entities User] 100]]]
+
+[query LiveDeviceStatus
+  [input deviceId DeviceID] [output StatusOutput]
+  [websocket "/ws" [source DeviceStatus]]
+  [device [entity $deviceId]]
+  [result [live device.status]]]
+[query LiveDevicePosition
+  [input deviceId DeviceID] [output PositionOutput]
+  [websocket "/ws" [source DevicePosition]]
+  [device [entity $deviceId]]
+  [result [live device.positions]]]
+
+[mutate LowBattery
+  [output AlertOutput]
+  [on DeviceStatus [actor [service 1]]]
+  [when [lt event.battery 20]]
+  [atomic]
+  [alert [create DeviceAlert [record [id [new AlertID]] [device event.device]
+    [kind LOW_BATTERY] [createdAt event.receivedAt]]]]
+  [result alert]]
+
+
+[seed Service [rows [record [id 1] [keyHash "b2430e50684c45ecef24f0f00985f1287ea9cf4d7d86f2949eb9ea6849cc299d"] [roles [list DEVICE_AUTOMATION]]]]]
+
+[type ProductPhoto [image [maxBytes 10485760] [maxWidth 8000] [maxHeight 8000]]]
+[plugin Payment
+  [createUrl
+    [input orderId OrderID] [input amount OrderTotal] [input currency String]
+    [input country String] [input method PaymentMethod] [output PaymentOutput] [pure]]]
+[plugin Image
+  [resize [input image ProductPhoto] [input width PhotoSize] [input height PhotoSize]
+    [output ProductPhoto] [pure]]]
+[plugin Files [put [input file ProductPhoto] [output File] [transactional]]]
+[mutate UploadPhoto
+  [input productId ProductID] [input photo ProductPhoto]
+  [input width PhotoSize [default 800]] [input height PhotoSize [default 600]]
+  [output PhotoReceipt]
+  [http POST "/api/products/{productId}/photo" [status 201]]
+  [atomic]
+  [product [entity $productId]]
+  [resized [invoke Image.resize [record [image $photo] [width $width] [height $height]]]]
+  [file [invoke Files.put [record [file resized]]]]
+  [photo [create Photo [record [id [new PhotoID]] [product product]
+    [file file] [width [as PhotoSize resized.width]] [height [as PhotoSize resized.height]]]]]
+  [result [record [photo photo] [file file]]]]
+[permissions User
+[Payment.createUrl [INVOKE [when [and
+    [eq args.currency "CZK"]
+    [any [creates transaction Order] order [and
+      [eq order.user actor] [eq order.id args.orderId]
+      [eq order.total args.amount] [eq order.user.country args.country]
+      [eq order.paymentMethod args.method]]]]]]]
+[Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]
+[Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
+[permissions Service [Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]] [Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
+
+[seed User [rows [record [id 4] [identitySubject "idp:catalog-admin"] [roles [list CATALOG_ADMIN]] [name "Catalog admin"] [email "catalog@example.test"] [country "CZ"]]]]

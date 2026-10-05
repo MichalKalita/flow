@@ -24,4 +24,7 @@ updated documentation and meaningful integration tests.
    privileged administrator. All writes must still validate data and references
    and record audit entries atomically. Keep access on the protected admin listener.
 
-Steps 2–6 are planned and are not included in the numeric ID implementation.
+Steps 1–4 are implemented and covered by integration tests. Step 6 has a validated,
+audited backend and a frontend undergoing end-to-end verification. Step 5 is
+deferred at the user's request: future sharing must be explicit and general, not
+automatic user sharing. HTTPS remains deferred.

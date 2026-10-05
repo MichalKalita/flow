@@ -372,3 +372,102 @@ fn audit_includes_stream_retention_and_automation_actor() {
     assert_eq!(alert["operation"], "LowBattery");
     assert_eq!(alert["transaction_id"], status["transaction_id"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_mqtt_and_websocket_connections_are_project_scoped() {
+    let directory =
+        std::env::temp_dir().join(format!("flow-hosted-streams-{}", uuid::Uuid::new_v4()));
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir_all(directory.join("projects").join(name)).unwrap();
+        std::fs::write(
+            directory
+                .join("projects")
+                .join(name)
+                .join("application.flow"),
+            source(),
+        )
+        .unwrap();
+    }
+    let projects = flow_runtime::projects::Projects::load(
+        &directory.join("projects"),
+        &directory.join("data"),
+        Config::default(),
+        flow_runtime::observability::Observability::default(),
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mqtt_address = listener.local_addr().unwrap();
+    let registry = projects.clone();
+    let mqtt_server =
+        tokio::spawn(async move { mqtt::serve_projects(listener, registry).await.unwrap() });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let registry = projects.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, http::router_projects(registry))
+            .await
+            .unwrap()
+    });
+    let mut request = format!("ws://{address}/alpha/ws")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("authorization", auth(USER_KEY).parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws.send(Message::Text(
+        json!({"id":"s1","query":"LiveStatus","input":{"id":1}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut publisher = connect(mqtt_address, "alpha/device", DEVICE_KEY).await;
+    let mut body = vec![];
+    string(&mut body, "devices/1/status");
+    body.extend([0, 1]);
+    body.extend(br#"{"battery":42,"online":true}"#);
+    write_packet(&mut publisher, 0x32, &body).await;
+    assert_eq!(read_packet(&mut publisher).await, (0x40, vec![0, 1]));
+    let message = timeout(Duration::from_secs(3), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap()["data"]["battery"],
+        42
+    );
+    let alpha = projects.get("alpha").unwrap();
+    let beta = projects.get("beta").unwrap();
+    assert_eq!(
+        beta.lock()
+            .unwrap()
+            .mqtt_messages("devices/#", Some(&auth(USER_KEY)))
+            .unwrap()
+            .len(),
+        0
+    );
+    let metrics = alpha.lock().unwrap().observability.snapshot();
+    assert_eq!(metrics["service"]["gauges"]["mqtt_connections"], 1);
+    assert_eq!(metrics["service"]["gauges"]["ws_connections"], 1);
+    assert_eq!(
+        beta.lock().unwrap().observability.snapshot()["service"]["gauges"]["mqtt_connections"],
+        serde_json::Value::Null
+    );
+    ws.close(None).await.unwrap();
+    write_packet(&mut publisher, 0xe0, &[]).await;
+    drop(publisher);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        alpha.lock().unwrap().observability.snapshot()["service"]["gauges"]["mqtt_connections"],
+        0
+    );
+    server.abort();
+    mqtt_server.abort();
+    projects.flush().unwrap();
+    drop(alpha);
+    drop(beta);
+    drop(projects);
+    let _ = std::fs::remove_dir_all(directory);
+}

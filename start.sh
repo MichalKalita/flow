@@ -21,9 +21,9 @@ if [ "${#FLOW_ADMIN_TOKEN}" -lt 32 ]; then
     exit 1
 fi
 
-: "${FLOW_APPLICATION:=runtime/application.flow}"
-: "${FLOW_DATABASE:=data/flow-numeric.sqlite}"
-: "${FLOW_HTTP_BIND:=127.0.0.1:8080}"
+: "${FLOW_APPLICATION:=projects}"
+: "${FLOW_DATABASE:=data/projects}"
+: "${FLOW_HTTP_BIND:=0.0.0.0:80}"
 : "${FLOW_MQTT_BIND:=127.0.0.1:1883}"
 : "${FLOW_ADMIN_BIND:=127.0.0.1:9090}"
 : "${FLOW_OBSERVABILITY_DIR:=data/observability}"

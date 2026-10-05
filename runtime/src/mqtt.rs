@@ -139,7 +139,14 @@ impl<'a> Cursor<'a> {
         Ok(value.into())
     }
 }
-async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<()> {
+async fn session(socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<()> {
+    session_target(socket, Some(runtime), None).await
+}
+async fn session_target(
+    mut socket: TcpStream,
+    runtime: Option<Arc<Mutex<Runtime>>>,
+    projects: Option<Arc<crate::projects::Projects>>,
+) -> Result<()> {
     let connect = tokio::time::timeout(Duration::from_secs(10), packet(&mut socket))
         .await
         .map_err(|_| error("disconnected"))??;
@@ -169,6 +176,26 @@ async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<
     if cursor.offset != connect.body.len() {
         return Err(error("invalid_input"));
     };
+    let mut alias = alias;
+    let runtime = if let Some(runtime) = runtime {
+        runtime
+    } else {
+        let qualified = alias.as_deref().ok_or_else(|| error("unauthenticated"))?;
+        let (project, adapter) = qualified
+            .split_once('/')
+            .ok_or_else(|| error("unauthenticated"))?;
+        let runtime = projects
+            .as_ref()
+            .and_then(|p| p.get(project))
+            .ok_or_else(|| error("unauthenticated"))?;
+        alias = Some(adapter.into());
+        runtime
+    };
+    let observer = runtime.lock().unwrap().observability.clone();
+    let mut connection = observer.gauge_guard("mqtt_connections");
+    if projects.is_some() {
+        connection.set(1);
+    }
     let credential = {
         let guard = runtime.lock().map_err(|_| error("internal"))?;
         match (alias, secret) {
@@ -358,6 +385,26 @@ pub async fn serve(listener: TcpListener, runtime: Arc<Mutex<Runtime>>) -> std::
             {
                 observer.event("mqtt_errors", 1);
                 observer.log(serde_json::json!({"kind":"transport","name":"mqtt.session","level":"error","error":e.code}));
+            }
+        });
+    }
+}
+
+pub async fn serve_projects(
+    listener: TcpListener,
+    projects: Arc<crate::projects::Projects>,
+) -> std::io::Result<()> {
+    let capacity = Arc::new(tokio::sync::Semaphore::new(128));
+    loop {
+        let (socket, _) = listener.accept().await?;
+        let Ok(permit) = capacity.clone().try_acquire_owned() else {
+            continue;
+        };
+        let projects = projects.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) = session_target(socket, None, Some(projects.clone())).await {
+                projects.system.log(serde_json::json!({"kind":"transport","name":"mqtt.session","error":error.code,"success":false}));
             }
         });
     }

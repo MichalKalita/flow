@@ -16,17 +16,23 @@ use std::{
 
 #[derive(Clone)]
 struct Admin {
-    runtime: Arc<Mutex<Runtime>>,
+    projects: Arc<crate::projects::Projects>,
     token: Arc<String>,
 }
 pub fn router(runtime: Arc<Mutex<Runtime>>, token: String) -> Router {
+    router_projects(crate::projects::Projects::single(runtime), token)
+}
+pub fn router_projects(projects: Arc<crate::projects::Projects>, token: String) -> Router {
     assert!(token.len() >= 32, "Admin token must have at least 32 bytes");
     let state = Admin {
-        runtime,
+        projects,
         token: Arc::new(token),
     };
     Router::new()
         .route("/api/overview", get(overview))
+        .route("/api/projects", get(project_list))
+        .route("/api/data", get(data_tables).post(data_write))
+        .route("/api/data/rows", get(data_rows))
         .route("/api/audit", get(audit))
         .route("/api/call", post(call))
         .route("/api/logs", get(logs))
@@ -101,32 +107,95 @@ async fn authorize(State(state): State<Admin>, request: Request, next: Next) -> 
     if ring::hmac::verify(&expected, b"flow-admin", candidate.as_ref()).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    next.run(request).await
+    let start = std::time::Instant::now();
+    let endpoint = format!("{} {}", request.method(), request.uri().path());
+    let response = next.run(request).await;
+    state.projects.system.log(json!({"kind":"admin","endpoint":endpoint,"status":response.status().as_u16(),"duration_ms":start.elapsed().as_secs_f64()*1000.}));
+    response
 }
-async fn overview(State(state): State<Admin>) -> Response {
-    match tokio::task::spawn_blocking(move || {
-        let process=crate::resources::process_memory();
-        let runtime=state.runtime.lock().unwrap();
-        let mut endpoints=runtime.program.operations.iter().filter(|op|op.event.is_none()).map(|op| {
+fn selected(
+    state: &Admin,
+    query: &BTreeMap<String, String>,
+) -> crate::Result<Option<Arc<Mutex<Runtime>>>> {
+    let name = query
+        .get("project")
+        .cloned()
+        .or_else(|| state.projects.default_name());
+    match name.as_deref() {
+        None | Some("all") => Ok(None),
+        Some(name) => state
+            .projects
+            .get(name)
+            .map(Some)
+            .ok_or_else(|| crate::Error::new("not_found", "Project is unavailable")),
+    }
+}
+fn required(state: &Admin, query: &BTreeMap<String, String>) -> crate::Result<Arc<Mutex<Runtime>>> {
+    selected(state, query)?
+        .ok_or_else(|| crate::Error::new("invalid_input", "Select an individual project"))
+}
+pub(crate) fn overview_value(runtime: &Runtime) -> Value {
+    let mut endpoints=runtime.program.operations.iter().filter(|op|op.event.is_none()).map(|op| {
             let inputs=op.inputs.iter().map(|(name,(ty,default))| {
                 let default=default.as_ref().and_then(|n|crate::program::literal(n).ok()).and_then(|v|v.json().ok());
                 json!({"name":name,"type":format!("{:?}", runtime.program.resolve(ty).unwrap_or(ty)),"default":default})
             }).collect::<Vec<_>>();
             json!({"name":op.name,"method":op.method,"path":op.path,"mutation":op.mutation,"status":op.status,"inputs":inputs})
         }).collect::<Vec<_>>();
-        if runtime.program.plugins.contains_key("Files.put") {
-            endpoints.push(json!({"name":"FileDownload","method":"GET","path":"/api/files/{id}","mutation":false,"status":200,"inputs":[{"name":"id","type":"File ID"}]}));
-        }
-        let streams=runtime.program.streams.iter().map(|(name,stream)|json!({"name":name,"topic":stream.topic,"retention_seconds":stream.duration,"max_messages":stream.max_messages})).collect::<Vec<_>>();
-        let automations=runtime.program.operations.iter().filter_map(|op|op.event.as_ref().map(|event|json!({"name":op.name,"source":event.source,"actor":event.actor_id}))).collect::<Vec<_>>();
-        let mut resources=runtime.storage_resources();
-        resources["process"]=process;
-        resources["host"]=crate::resources::host_memory();
-        resources["observability"]=runtime.observability.resources();
-        Json(json!({"endpoints":endpoints,"streams":streams,"automations":automations,"metrics":runtime.observability.snapshot(),"resources":resources,"version":env!("CARGO_PKG_VERSION")}))
-    }).await {
-        Ok(response)=>response.into_response(),
-        Err(_)=>StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    if runtime.program.plugins.contains_key("Files.put") {
+        endpoints.push(json!({"name":"FileDownload","method":"GET","path":"/api/files/{id}","mutation":false,"status":200,"inputs":[{"name":"id","type":"File ID"}]}));
+    }
+    let streams=runtime.program.streams.iter().map(|(name,stream)|json!({"name":name,"topic":stream.topic,"retention_seconds":stream.duration,"max_messages":stream.max_messages})).collect::<Vec<_>>();
+    let automations = runtime
+        .program
+        .operations
+        .iter()
+        .filter_map(|op| {
+            op.event
+                .as_ref()
+                .map(|event| json!({"name":op.name,"source":event.source,"actor":event.actor_id}))
+        })
+        .collect::<Vec<_>>();
+    let mut resources = runtime.storage_resources();
+
+    resources["observability"] = runtime.observability.resources();
+    json!({"endpoints":endpoints,"streams":streams,"automations":automations,"metrics":runtime.observability.snapshot(),"resources":resources,"version":env!("CARGO_PKG_VERSION")})
+}
+async fn project_list(State(state): State<Admin>) -> Json<Value> {
+    Json(
+        json!({"projects":state.projects.list(),"default_project":state.projects.default_name().unwrap_or("all".into())}),
+    )
+}
+async fn overview(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let selected = match selected(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        let mut value = if let Some(runtime) = selected {
+            overview_value(&runtime.lock().unwrap())
+        } else {
+            crate::dashboard::system_overview(&state.projects)
+        };
+        value["resources"]["process"] = crate::resources::process_memory();
+        value["resources"]["host"] = crate::resources::host_memory();
+        value["projects"] = state.projects.list();
+        value["scope"] = json!(
+            query
+                .get("project")
+                .cloned()
+                .or_else(|| state.projects.default_name())
+                .unwrap_or("all".into())
+        );
+        Json(value)
+    })
+    .await
+    {
+        Ok(value) => value.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 async fn audit(
@@ -137,20 +206,37 @@ async fn audit(
         .get("before")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let runtime = state.runtime.clone();
+    let runtime = match selected(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
     match tokio::task::spawn_blocking(move || {
-        runtime.lock().unwrap().audit_filtered(before, 100, &query)
+        if let Some(runtime) = runtime {
+            runtime.lock().unwrap().audit_filtered(before, 100, &query)
+        } else {
+            crate::dashboard::system_audit(&state.projects, &query)
+        }
     })
     .await
     {
         Ok(Ok(value)) => Json(value).into_response(),
-        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
-async fn call(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+
+async fn call(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+    Json(input): Json<Value>,
+) -> Response {
+    let selected = match required(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
     let name = input["endpoint"].as_str().unwrap_or("");
     let declared = {
-        let runtime = state.runtime.lock().unwrap();
+        let runtime = selected.lock().unwrap();
         runtime
             .program
             .operations
@@ -193,32 +279,60 @@ async fn call(State(state): State<Admin>, Json(input): Json<Value>) -> Response 
     let Ok(request) = request.body(Body::from(body)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    http::dispatch(State(state.runtime), request).await
+    http::dispatch(State(selected), request).await
 }
 
 async fn logs(
     State(state): State<Admin>,
     Query(filters): Query<BTreeMap<String, String>>,
 ) -> Response {
-    let observer = state.runtime.lock().unwrap().observability.clone();
+    let runtime = match selected(&state, &filters) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    if runtime.is_none() {
+        return match tokio::task::spawn_blocking(move || {
+            crate::dashboard::system_logs(&state.projects, &filters)
+        })
+        .await
+        {
+            Ok(value) => Json(value).into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
+    let observer = runtime.unwrap().lock().unwrap().observability.clone();
     match tokio::task::spawn_blocking(move || crate::log_store::query(&observer, &filters)).await {
         Ok(Ok(value)) => Json(value).into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
-async fn jwt_adapters(State(state): State<Admin>) -> Response {
-    match tokio::task::spawn_blocking(move || state.runtime.lock().unwrap().jwt_adapters()).await {
+async fn jwt_adapters(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let runtime = match required(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || runtime.lock().unwrap().jwt_adapters()).await {
         Ok(Ok(value)) => Json(value).into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
-async fn issue_jwt(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+async fn issue_jwt(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+    Json(input): Json<Value>,
+) -> Response {
+    let runtime = match required(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
     let alias = input["adapter"].as_str().unwrap_or("").to_owned();
     let subject = input["subject"].as_str().unwrap_or("").to_owned();
     let ttl = input["ttl_seconds"].as_u64().unwrap_or(3600);
     match tokio::task::spawn_blocking(move || {
-        state
-            .runtime
+        runtime
             .lock()
             .unwrap()
             .issue_admin_jwt(&alias, &subject, ttl)
@@ -239,6 +353,78 @@ async fn issue_jwt(State(state): State<Admin>, Json(input): Json<Value>) -> Resp
             )
                 .into_response()
         }
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+fn failure(error: crate::Error) -> Response {
+    let status = match error.code {
+        "not_found" => 404,
+        "invalid_input" | "invalid_output" | "limit" => 400,
+        "conflict" | "database" => 409,
+        _ => 500,
+    };
+    (
+        StatusCode::from_u16(status).unwrap(),
+        Json(json!({"error":error.code,"message":error.message})),
+    )
+        .into_response()
+}
+async fn data_tables(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let runtime = match required(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    Json(runtime.lock().unwrap().admin_tables()).into_response()
+}
+async fn data_rows(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let runtime = match required(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        runtime.lock().unwrap().admin_rows(
+            query.get("entity").map(String::as_str).unwrap_or(""),
+            query.get("after").and_then(|s| s.parse().ok()).unwrap_or(0),
+            50,
+            query.get("search").map(String::as_str).unwrap_or(""),
+            query.get("id").and_then(|s| s.parse().ok()),
+        )
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn data_write(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+    Json(input): Json<Value>,
+) -> Response {
+    let runtime = match required(&state, &query) {
+        Ok(value) => value,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        runtime.lock().unwrap().admin_write(
+            input["action"].as_str().unwrap_or(""),
+            input["entity"].as_str().unwrap_or(""),
+            input["id"].as_i64(),
+            input["record"].clone(),
+            input["etag"].as_str(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

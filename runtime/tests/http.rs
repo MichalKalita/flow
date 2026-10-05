@@ -218,3 +218,176 @@ async fn real_http_routes_and_permissions() {
     admin_server.abort();
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_projects_route_public_and_admin_requests_without_cross_project_writes() {
+    let directory = std::env::temp_dir().join(format!("flow-hosted-http-{}", uuid::Uuid::new_v4()));
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir_all(directory.join("projects").join(name)).unwrap();
+        std::fs::write(
+            directory
+                .join("projects")
+                .join(name)
+                .join("application.flow"),
+            APP,
+        )
+        .unwrap();
+    }
+    let mut config = Config::default();
+    config.jwt_keys.insert(
+        "user".into(),
+        b"development-key-32-bytes-minimum-123456".to_vec(),
+    );
+    config.event_credentials.insert(
+        "service:1".into(),
+        "ApiKey automation-key-long-enough-123456789".into(),
+    );
+    let projects = flow_runtime::projects::Projects::load(
+        &directory.join("projects"),
+        &directory.join("data"),
+        config,
+        flow_runtime::observability::Observability::default(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = http::router_projects(projects.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let admin_address = listener.local_addr().unwrap();
+    let router = admin::router_projects(
+        projects.clone(),
+        "admin-key-long-enough-1234567890123456".into(),
+    );
+    let admin_server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let admin_auth = Some("Bearer admin-key-long-enough-1234567890123456");
+    assert_eq!(
+        request(address, "GET", "/alpha/api/products", "", None)
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        request(address, "GET", "/beta/api/products", "", None)
+            .await
+            .0,
+        200
+    );
+    assert_eq!(
+        request(address, "GET", "/api/products", "", None).await.0,
+        404
+    );
+    assert_eq!(
+        request(address, "GET", "/absent/api/products", "", None)
+            .await
+            .0,
+        404
+    );
+    let (status, overview) = request(
+        admin_address,
+        "GET",
+        "/api/overview?project=all",
+        "",
+        admin_auth,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(overview["metrics"]["system"]["count"], 2.0);
+    assert_eq!(
+        overview["metrics"]["endpoints"]["GET /alpha/api/products"]["count"],
+        1
+    );
+    assert!(
+        overview["resources"]["process"]["rss_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let write=json!({"action":"CREATE","entity":"Product","record":{"name":"Alpha only","price":1,"stock":1}}).to_string();
+    assert_eq!(
+        request(
+            admin_address,
+            "POST",
+            "/api/data?project=alpha",
+            &write,
+            None
+        )
+        .await
+        .0,
+        401
+    );
+    assert_eq!(
+        request(
+            admin_address,
+            "POST",
+            "/api/data?project=all",
+            &write,
+            admin_auth
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        request(
+            admin_address,
+            "POST",
+            "/api/data?project=alpha",
+            &write,
+            admin_auth
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, rows) = request(
+        admin_address,
+        "GET",
+        "/api/data/rows?project=beta&entity=Product&search=Alpha",
+        "",
+        admin_auth,
+    )
+    .await;
+    assert_eq!(rows["rows"], json!([]));
+    let (_, audit) = request(
+        admin_address,
+        "GET",
+        "/api/audit?project=all&entity=Product",
+        "",
+        admin_auth,
+    )
+    .await;
+    assert!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["project"] == "alpha" && row["operation"] == "admin.CREATE")
+    );
+    assert!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["cursor"].is_string())
+    );
+    // Console retains ordinary application permissions even with the admin token.
+    let write=json!({"endpoint":"SendCommand","path":"/api/devices/2/commands","authorization":token(),"body":{"action":"START"}}).to_string();
+    assert_eq!(
+        request(
+            admin_address,
+            "POST",
+            "/api/call?project=alpha",
+            &write,
+            admin_auth
+        )
+        .await
+        .0,
+        403
+    );
+    server.abort();
+    admin_server.abort();
+    projects.flush().unwrap();
+    drop(projects);
+    let _ = std::fs::remove_dir_all(directory);
+}

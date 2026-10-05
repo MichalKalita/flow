@@ -4,6 +4,7 @@ use flow_runtime::{
     http, mqtt,
     observability::Observability,
     program::Program,
+    projects::Projects,
 };
 use std::sync::{Arc, Mutex};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,12 +38,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    let source = args
-        .first()
-        .map(String::as_str)
-        .unwrap_or("application.flow");
-    let database = args.get(1).map(String::as_str).unwrap_or("flow.sqlite");
-    let bind = args.get(2).map(String::as_str).unwrap_or("127.0.0.1:8080");
+    let source = args.first().map(String::as_str).unwrap_or("projects");
+    let database = args.get(1).map(String::as_str).unwrap_or("data/projects");
+    let bind = args.get(2).map(String::as_str).unwrap_or("0.0.0.0:80");
     let mut config = Config::default();
     if let Ok(secret) = std::env::var("FLOW_JWT_SECRET") {
         config.jwt_keys.insert("user".into(), secret.into_bytes());
@@ -68,10 +66,33 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let observer = Observability::disk(
         std::env::var("FLOW_OBSERVABILITY_DIR").unwrap_or_else(|_| "data/observability".into()),
     )?;
-    let mut runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
-    runtime.observability = observer.clone();
-    let runtime = Arc::new(Mutex::new(runtime));
-    let sampler_observer = observer.clone();
+    let project_mode = std::path::Path::new(source).is_dir();
+    let projects = if project_mode {
+        Projects::load(
+            std::path::Path::new(source),
+            std::path::Path::new(database),
+            config,
+            observer.clone(),
+        )?
+    } else {
+        let mut runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
+        runtime.observability = observer.clone();
+        Projects::single(Arc::new(Mutex::new(runtime)))
+    };
+    let watch_projects = projects.clone();
+    let watcher = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            tick.tick().await;
+            let registry = watch_projects.clone();
+            let logger = watch_projects.system.clone();
+            match tokio::task::spawn_blocking(move ||registry.scan()).await {
+                Ok(Ok(()))=>{}, Ok(Err(error))=>logger.log(serde_json::json!({"kind":"project","name":"scan","success":false,"error":error.to_string()})),
+                Err(error)=>logger.log(serde_json::json!({"kind":"project","name":"scan","success":false,"error":error.to_string()}))
+            }
+        }
+    });
+    let sampler_projects = projects.clone();
     let sampler = tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -79,7 +100,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(process) =
                 tokio::task::spawn_blocking(flow_runtime::resources::process_memory).await
             {
-                sampler_observer.sample(process);
+                sampler_projects.sample(process);
             }
         }
     });
@@ -91,23 +112,35 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "Flow admin listening on http://{}",
         admin_listener.local_addr()?
     );
-    let admin_router = admin::router(runtime.clone(), admin_token);
+    let admin_router = admin::router_projects(projects.clone(), admin_token);
     let admin_task = tokio::spawn(async move { axum::serve(admin_listener, admin_router).await });
     println!("Flow MQTT listening on {}", mqtt_listener.local_addr()?);
-    let mqtt_runtime = runtime.clone();
-    let mqtt_task = tokio::spawn(async move { mqtt::serve(mqtt_listener, mqtt_runtime).await });
+    let mqtt_projects = projects.clone();
+    let mqtt_task = tokio::spawn(async move {
+        if project_mode {
+            mqtt::serve_projects(mqtt_listener, mqtt_projects).await
+        } else {
+            mqtt::serve(mqtt_listener, mqtt_projects.get("application").unwrap()).await
+        }
+    });
     println!(
         "Flow HTTP listening on http://{} (SQLite: {database})",
         listener.local_addr()?
     );
-    axum::serve(listener, http::router_shared(runtime))
+    let public = if project_mode {
+        http::router_projects(projects.clone())
+    } else {
+        http::router_shared(projects.get("application").unwrap())
+    };
+    axum::serve(listener, public)
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
     sampler.abort();
+    watcher.abort();
     mqtt_task.abort();
     admin_task.abort();
-    tokio::task::spawn_blocking(move || observer.flush()).await??;
+    tokio::task::spawn_blocking(move || projects.flush()).await??;
     Ok(())
 }

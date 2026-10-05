@@ -299,3 +299,43 @@ fn json_response(status: u16, body: Value) -> Response {
         .body(Body::from(body.to_string()))
         .unwrap()
 }
+
+pub fn router_projects(projects: Arc<crate::projects::Projects>) -> Router {
+    let admission = (
+        Arc::new(tokio::sync::Semaphore::new(16)),
+        projects.system.clone(),
+    );
+    Router::new()
+        .fallback(dispatch_project)
+        .layer(middleware::from_fn_with_state(admission, admit))
+        .with_state(projects)
+}
+async fn dispatch_project(
+    State(projects): State<Arc<crate::projects::Projects>>,
+    mut request: Request,
+) -> Response {
+    let path = request.uri().path();
+    let mut segments = path.trim_start_matches('/').splitn(2, '/');
+    let name = segments.next().unwrap_or("");
+    let Some(runtime) = projects.get(name) else {
+        projects.system.request(
+            "unmatched",
+            404,
+            std::time::Duration::ZERO,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        return json_response(404, json!({"error":"project_not_found"}));
+    };
+    let mut uri = format!("/{}", segments.next().unwrap_or(""));
+    if let Some(query) = request.uri().query() {
+        uri.push('?');
+        uri.push_str(query)
+    }
+    let name = name.to_string();
+    *request.uri_mut() = uri.parse().unwrap();
+    let mut response = dispatch(State(runtime), request).await;
+    response
+        .headers_mut()
+        .insert("x-flow-project", name.parse().unwrap());
+    response
+}

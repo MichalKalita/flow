@@ -11,6 +11,7 @@ const APP: &str = include_str!("../application.flow");
 const KEY: &[u8] = b"development-key-32-bytes-minimum-123456";
 fn config() -> Config {
     Config {
+        base_path: String::new(),
         jwt_keys: BTreeMap::from([("user".into(), KEY.to_vec())]),
         event_credentials: BTreeMap::from([(
             "service:1".into(),

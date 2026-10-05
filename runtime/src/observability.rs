@@ -299,8 +299,11 @@ impl Observability {
     pub fn log(&self, mut event: Value) {
         event["time"] = json!(chrono::Utc::now().to_rfc3339());
         let mut data = self.0.lock().unwrap();
-        data.log_sequence =
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let minimum =
             (data.log_sequence + 1).max(chrono::Utc::now().timestamp_micros().max(0) as u64);
+        SEQUENCE.fetch_max(minimum, std::sync::atomic::Ordering::Relaxed);
+        data.log_sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         event["sequence"] = json!(data.log_sequence);
         if event.get("level").is_none() {
             event["level"] = json!(if event["status"].as_u64().is_some_and(|s| s >= 500)
