@@ -268,7 +268,10 @@ async fn call(
         .method(method)
         .uri(uri)
         .header("content-type", "application/json");
-    if let Some(auth) = input["authorization"].as_str() {
+    if let Some(auth) = input["authorization"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+    {
         request = request.header("authorization", auth);
     }
     let body = input

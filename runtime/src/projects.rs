@@ -114,6 +114,11 @@ impl Projects {
             }
             let name = folder.file_name().to_string_lossy().into_owned();
             if !name_valid(&name) {
+                let path = root.join(format!("{name}-error.txt"));
+                let message = "Project names must contain 1–64 ASCII letters, digits, underscores or hyphens; all and system are reserved\n";
+                if std::fs::read_to_string(&path).ok().as_deref() != Some(message) {
+                    std::fs::write(path, message).map_err(io)?;
+                }
                 continue;
             }
             count += 1;
@@ -181,6 +186,21 @@ impl Projects {
                 }
                 let database = self.data.join(format!("{name}.sqlite"));
                 if database.exists() && cache_path.exists() {
+                    // A crash between the SQLite commit and cache rename can leave an
+                    // older cache. Prefer an exact current-source match before replaying it.
+                    if let Ok(mut runtime) = Runtime::open(
+                        &source,
+                        database
+                            .to_str()
+                            .ok_or_else(|| Error::new("configuration", "Invalid database path"))?,
+                        config.clone(),
+                    ) {
+                        runtime.observability =
+                            Observability::disk(self.data.join(format!("{name}-observability")))
+                                .map_err(io)?;
+                        save_cache()?;
+                        return Ok(Arc::new(Mutex::new(runtime)));
+                    }
                     if std::fs::metadata(&cache_path).map_err(io)?.len() > 5 * 1024 * 1024 {
                         return Err(Error::new("limit", "Active program cache exceeds 5 MiB"));
                     }

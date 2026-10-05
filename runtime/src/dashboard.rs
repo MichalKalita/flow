@@ -63,8 +63,8 @@ pub fn system_overview(projects: &Projects) -> Value {
     let bounds = result["metrics"]["histogram_bounds_ms"].clone();
     result["metrics"]["service"]["uptime_seconds"] = system["service"]["uptime_seconds"].clone();
     result["metrics"]["service"]["resources"] = system["service"]["resources"].clone();
-    for (name, runtime) in projects.active() {
-        let view = crate::admin::overview_value(&runtime.lock().unwrap());
+    let views = projects.active().into_iter().map(|(name,runtime)| (name,crate::admin::overview_value(&runtime.lock().unwrap()))).chain(projects.default_name().is_none().then(||("system".to_string(),json!({"metrics":system,"resources":{"sqlite":{},"observability":projects.system.resources()}}))));
+    for (name, view) in views {
         for section in ["endpoints", "streams", "automations"] {
             for mut item in view[section].as_array().cloned().unwrap_or_default() {
                 item["project"] = json!(name);
@@ -79,8 +79,11 @@ pub fn system_overview(projects: &Projects) -> Value {
             if let Some(metrics) = view["metrics"][section].as_object() {
                 for (label, value) in metrics {
                     let key = if section == "endpoints" {
-                        let (method, path) = label.split_once(' ').unwrap_or(("", label));
-                        format!("{method} /{name}{path}")
+                        if let Some((method, path)) = label.split_once(' ') {
+                            format!("{method} /{name}{path}")
+                        } else {
+                            format!("{name}/{label}")
+                        }
                     } else {
                         format!("{name}/{label}")
                     };
@@ -174,8 +177,11 @@ pub fn system_logs(projects: &Projects, query: &BTreeMap<String, String>) -> Val
             }
             event["project"] = json!(name);
             if let Some(endpoint) = event["endpoint"].as_str() {
-                let (method, path) = endpoint.split_once(' ').unwrap_or(("", endpoint));
-                event["endpoint"] = json!(format!("{method} /{name}{path}"));
+                event["endpoint"] = json!(if let Some((method, path)) = endpoint.split_once(' ') {
+                    format!("{method} /{name}{path}")
+                } else {
+                    format!("{name}/{endpoint}")
+                });
             }
             if query
                 .get("since")

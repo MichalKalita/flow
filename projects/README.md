@@ -6,7 +6,9 @@ uses `127.0.0.1:1883`, and the protected admin uses `127.0.0.1:9090`.
 For an unprivileged development listener set `FLOW_HTTP_BIND='127.0.0.1:8080'`.
 HTTPS and automatic certificates are deferred.
 
-Every immediate subdirectory is a project. Put its program in `application.flow`.
+Every immediate subdirectory is a project. Names use 1–64 ASCII letters, digits,
+underscores or hyphens; `all` and `system` are reserved. Put its program in
+`application.flow`.
 The folder name is its HTTP base path: `demo/api/products`, for example, is served
 at `http://localhost/demo/api/products`. WebSocket paths receive the same prefix.
 File URLs produced by the runtime also include the project prefix. MQTT uses one

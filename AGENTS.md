@@ -4,6 +4,9 @@
 - Write all new or modified code, identifiers, comments, user-facing strings, documentation, and commit messages in English.
 - Read the relevant implementation and tests before making changes. Cover behavior changes with meaningful integration tests and update the documentation.
 - Entity IDs and references are positive numeric values with entity brands in the runtime. Use SQLite INTEGER keys and numeric JSON; never encode type safety through text prefixes. Keep allocation transactional and preserve committed sequences across restarts and deletes.
+- Hosted projects are isolated by folder name, database and observability store. Public HTTP and WebSocket paths use `/<project>/...`; MQTT selects a project in its CONNECT username. Do not introduce implicit sharing of identities or entities. Any future sharing must be an explicit, general configuration mechanism.
+- Validate complete reload candidates and compatible schemas before replacing a running project. Failed reloads retain the last working program and write the project error file; preserve data and audit on failure.
+- The privileged database editor bypasses application permissions only on the protected admin listener. It still validates types/references, uses version checks for updates/deletes, and audits writes atomically. The HTTP console retains normal application permissions.
 - Every committed application mutation must have a SQLite audit record in the same transaction as the data. Rollbacks must not leave committed-change audit entries.
 - Keep application logs and telemetry outside the application database. Never log credentials, tokens, request bodies, or plugin arguments.
 - Keep the admin interface on a separate protected listener. Its HTTP console must use normal application authentication and permissions.

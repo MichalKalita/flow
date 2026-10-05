@@ -132,6 +132,42 @@ fn reload_validates_schema_keeps_last_good_and_recovers_after_restart() {
         "[entity Product\n  [field note [optional String]]\n",
         1,
     );
+    let failed = format!(
+        "{additive}\n[type OrphanID [id Orphan]] [entity Orphan [field id OrphanID] [field product Product]] [seed Orphan [rows [record [id 1] [product 999]]]]\n"
+    );
+    dir.source("demo", &failed);
+    projects.scan().unwrap();
+    assert_eq!(projects.list()[0]["status"], "stale");
+    let db = rusqlite::Connection::open(dir.0.join("data/demo.sqlite")).unwrap();
+    let tables: i64 = db
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='Orphan'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    let columns: i64 = db
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('Product') WHERE name='note'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 0);
+    drop(db);
+    assert!(
+        !projects
+            .get("demo")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .admin_tables()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "Orphan")
+    );
     dir.source("demo", &additive);
     projects.scan().unwrap();
     assert_eq!(projects.list()[0]["status"], "running");
@@ -179,6 +215,16 @@ fn reload_validates_schema_keeps_last_good_and_recovers_after_restart() {
     drop(projects);
     // A compatible source changed while offline also reloads against the cached schema.
     dir.source("demo", &(additive + "\n# Updated while offline\n"));
+    let projects = dir.load();
+    assert_eq!(projects.list()[0]["status"], "running");
+    projects.flush().unwrap();
+    drop(projects);
+    // Simulate an older file cache left behind after a committed schema reload.
+    std::fs::write(
+        dir.0.join("data/demo-active.json"),
+        json!({"source":APP,"manifest":{}}).to_string(),
+    )
+    .unwrap();
     let projects = dir.load();
     assert_eq!(projects.list()[0]["status"], "running");
 }

@@ -292,7 +292,7 @@ async fn hosted_projects_route_public_and_admin_requests_without_cross_project_w
     )
     .await;
     assert_eq!(status, 200);
-    assert_eq!(overview["metrics"]["system"]["count"], 2.0);
+    assert_eq!(overview["metrics"]["system"]["count"], 4.0);
     assert_eq!(
         overview["metrics"]["endpoints"]["GET /alpha/api/products"]["count"],
         1
@@ -371,6 +371,45 @@ async fn hosted_projects_route_public_and_admin_requests_without_cross_project_w
             .iter()
             .all(|row| row["cursor"].is_string())
     );
+    for i in 0..110 {
+        let name = if i % 2 == 0 { "alpha" } else { "beta" };
+        projects
+            .get(name)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .admin_write(
+                "CREATE",
+                "Product",
+                None,
+                json!({"name":format!("Paging {i}"),"price":1,"stock":1}),
+                None,
+            )
+            .unwrap();
+    }
+    let (_, first) = request(
+        admin_address,
+        "GET",
+        "/api/audit?project=all&entity=Product",
+        "",
+        admin_auth,
+    )
+    .await;
+    assert_eq!(first.as_array().unwrap().len(), 100);
+    let cursor = first[99]["cursor"].as_str().unwrap();
+    let path = format!(
+        "/api/audit?project=all&entity=Product&before={}",
+        percent_encoding::utf8_percent_encode(cursor, percent_encoding::NON_ALPHANUMERIC)
+    );
+    let (_, second) = request(admin_address, "GET", &path, "", admin_auth).await;
+    assert_eq!(second.as_array().unwrap().len(), 19);
+    assert!(first.as_array().unwrap().iter().all(|a| {
+        second
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|b| a["project"] != b["project"] || a["id"] != b["id"])
+    }));
     // Console retains ordinary application permissions even with the admin token.
     let write=json!({"endpoint":"SendCommand","path":"/api/devices/2/commands","authorization":token(),"body":{"action":"START"}}).to_string();
     assert_eq!(
