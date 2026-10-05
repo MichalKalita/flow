@@ -1,161 +1,390 @@
-# Celá aplikace: kontrakty, zdroje a scénáře v jediném souboru.
-TYPE UserID = String WHERE length(value) > 0
-TYPE Quantity = Int WHERE value BETWEEN 1 AND 100
-TYPE Stock = Int WHERE value >= 0
-TYPE Price = Int WHERE value >= 0
-TYPE CartItem = {product_id: String, quantity: Quantity}
-TYPE Cart = List<CartItem> WHERE length(value) BETWEEN 1 AND 50
-TYPE PaymentMethod = String WHERE value IN ["card", "bank"]
-TYPE Product = {id: String, name: String, price_cents: Price, stock: Stock}
-TYPE User = {id: String, name: String, email: String, country: String}
-TYPE OrderItem = {id: String, name: String, price_cents: Price, quantity: Int}
-TYPE Order = {id: String, user_id: String, request_id: String, created_at: String,
-    items: List<OrderItem>, total_cents: Int, payment_method: PaymentMethod,
-    payment_url: String, status: String}
-TABLE Products = Product
-TABLE Users = User
-TABLE Orders = Order
+# Jedna syntaxe: [název argumenty...]. Všechny výrazy jsou prefixové.
+# Symboly včetně referencí jsou text. Význam kontroluje až budoucí validátor.
+# Ceny jsou v CZK, se dvěma desetinnými místy; ID jsou brandované typy.
 
-SEED Products WITH [
-    {id: "p1", name: "Studio sluchátka", price_cents: 249000, stock: 12},
-    {id: "p2", name: "Mechanická klávesnice", price_cents: 329000, stock: 5},
-    {id: "p3", name: "USB-C rozbočovač", price_cents: 129000, stock: 2},
-    {id: "p4", name: "Webkamera", price_cents: 189000, stock: 0}
-]
-SEED Users WITH [
-    {id: "u1", name: "Petra Nováková", email: "petra@example.test", country: "CZ"},
-    {id: "u2", name: "David Miller", email: "david@example.test", country: "US"},
-    {id: "u3", name: "Nora Silva", email: "nora@example.test", country: "BR"}
-]
+[type UserID [id User]]
+[type ServiceID [id Service]]
+[type ProductID [id Product]]
+[type OrderID [id Order]]
+[type PhotoID [id Photo]]
+[type FileID [id File]]
+[type DeviceID [id Device]]
+[type AlertID [id DeviceAlert]]
+[type AccessID [id DeviceAccess]]
+[type CommandID [id DeviceCommand]]
+[type RequestID [id Request]]
 
-TYPE DeviceID = String WHERE length(value) BETWEEN 1 AND 64
-TYPE Battery = Int WHERE value BETWEEN 0 AND 100
-TYPE Latitude = Number WHERE value BETWEEN -90 AND 90
-TYPE Longitude = Number WHERE value BETWEEN -180 AND 180
-MQTT DeviceStatus
-    TOPIC "devices/{device_id}/status"
-    PARAM device_id DeviceID
-    PAYLOAD {online: Bool, battery: Battery}
-    HISTORY 24 HOURS
-MQTT DevicePosition
-    TOPIC "devices/{device_id}/position"
-    PARAM device_id DeviceID
-    PAYLOAD {latitude: Latitude, longitude: Longitude}
-    HISTORY 5 MINUTES
+[type Quantity [integer [range 1 100]]]
+[type OrderQuantity [integer [range 1 5000]]]
+[type Stock [integer [range 0 [pow 10 6]]]]
+[type Price [decimal [range 0.01 [pow 10 9]] [scale 2]]]
+[type OrderTotal [decimal [range 0.01 [mul 5000 [pow 10 9]]] [scale 2]]]
+[type Battery [integer [range 0 100]]]
+[type Latitude [decimal [range -90 90] [scale 6]]]
+[type Longitude [decimal [range -180 180] [scale 6]]]
+[type PhotoSize [integer [range 1 4096]]]
+[type ProductPhoto [image [maxBytes 10485760] [maxWidth 8000] [maxHeight 8000]]]
 
-TABLE DeviceAlerts = {id: String, device_id: DeviceID, kind: String, created_at: String}
-ON MQTT DeviceStatus
-    WHEN :message.battery < 20
-        TRANSACTION
-            INSERT DeviceAlerts WITH {id: uuid("alert"), device_id: :device_id, kind: "low_battery", created_at: request.time}
-            COMMIT
-    RETURN {accepted: true}
+[enum PaymentMethod CARD BANK]
+[enum MowerAction START STOP]
+[enum OrderStatus AWAITING_PAYMENT]
+[enum AlertKind LOW_BATTERY]
+[enum DeviceRight READ CONTROL]
+[enum Role CATALOG_ADMIN DEVICE_AUTOMATION]
 
-HTTP GET /api/device-alerts/:device_id
-INPUT device_id DeviceID
-alerts = FROM DeviceAlerts AS a WHERE a.device_id = :device_id
-RETURN {alerts: alerts}
+[entity User
+  [field id UserID]
+  [field identitySubject String [unique]]
+  [field roles [list Role [max 2]]]
+  [field name String]
+  [field email String]
+  [field country String]
+  [field orders [list Order] [inverse Order.user]]
+  [field access [list DeviceAccess] [inverse DeviceAccess.user]]]
 
-HTTP GET /api/devices/:device_id
-INPUT device_id DeviceID
-status = LAST FROM DeviceStatus(:device_id) AS s
-positions = FROM DevicePosition(:device_id) AS p
-    WHERE p.received_at >= ago(5, "minutes")
-    ORDER BY p.received_at ASC
-RETURN {device_id: :device_id, status: status, positions: positions}
+[entity Service
+  [field id ServiceID]
+  [field keyHash String [unique]]
+  [field roles [list Role [max 2]]]]
 
-HTTP POST /api/orders
-INPUT user_id UserID
-INPUT items Cart
-INPUT payment_method PaymentMethod
-INPUT email_failure Bool = false
-TRANSACTION
-    user = ONE FROM Users AS u WHERE u.id = :user_id
-    REQUIRE user IS PRESENT ELSE 404 user_not_found "Uživatel neexistuje."
-    cart = group_sum(:items, "product_id", "quantity")
-    snapshots: List<OrderItem> = FOR EACH item IN cart
-        product = ONE FROM Products AS p WHERE p.id = item.product_id
-        REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
-        RETURN {id: product.id, name: product.name, price_cents: product.price_cents, quantity: item.quantity}
-    total: Int = SUM item IN snapshots OF item.price_cents * item.quantity
-    order: Order = INSERT Orders WITH {
-        id: uuid("ord"), user_id: user.id, request_id: request.id, created_at: request.time,
-        items: snapshots, total_cents: total, payment_method: :payment_method,
-        payment_url: "", status: "awaiting_payment"
-    }
-    FOR EACH item IN snapshots
-        product = ONE FROM Products AS p WHERE p.id = item.id
-        REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
-        REQUIRE product.stock >= item.quantity ELSE 409 insufficient_stock "Nedostatek kusů na skladě."
-        UPDATE Products AS p WHERE p.id = item.id SET {stock: p.stock - item.quantity}
-    payment = CALL Payment.create_url WITH {
-        order_id: order.id, amount_cents: order.total_cents, currency: "CZK",
-        country: user.country, method: :payment_method
-    }
-    UPDATE Orders AS o WHERE o.id = order.id SET {payment_url: payment.url}
-    QUEUE Email.send_confirmation WITH {
-        order_id: order.id, to: user.email, subject: concat(["Objednávka ", order.id]),
-        payment_url: payment.url, total_cents: order.total_cents, items: snapshots,
-        simulate_failure: :email_failure
-    } POLICY 3 ATTEMPTS DELAY 1000 ms RETAIN
-    COMMIT
-RESPONSE 201 WITH {order: merge(order, {currency: "CZK", payment_url: payment.url}), payment: payment, email: {state: "queued"}}
+[entity Product
+  [field id ProductID]
+  [field name String]
+  [field price Price]
+  [field stock Stock]
+  [field photos [list Photo] [inverse Photo.product]]]
 
-HTTP GET /api/orders/:order_id
-INPUT order_id String
-order = ONE FROM Orders AS o WHERE o.id = :order_id
-REQUIRE order IS PRESENT ELSE 404 order_not_found "Objednávka neexistuje."
-RETURN order
+[entity Order
+  [field id OrderID]
+  [field user User]
+  [field requestId RequestID]
+  [field createdAt DateTime]
+  [field items [list OrderItem [min 1] [max 50]]]
+  [field total OrderTotal]
+  [field paymentMethod PaymentMethod]
+  [field paymentUrl String]
+  [field status OrderStatus]]
 
-# Soubory i aplikační záznamy se potvrdí společně.
-TYPE ProductPhoto = Image WHERE value.byte_size <= 10485760 AND value.width <= 8000 AND value.height <= 8000
-TYPE PhotoSize = Int WHERE value BETWEEN 1 AND 4096
-TABLE Photos = {id: String, product_id: String, file_id: String, url: String, width: Int, height: Int}
-HTTP POST /api/products/:product_id/photo
-INPUT product_id String
-INPUT photo ProductPhoto
-INPUT width PhotoSize = 800
-INPUT height PhotoSize = 600
-TRANSACTION
-    product = ONE FROM Products AS p WHERE p.id = :product_id
-    REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
-    resized: ProductPhoto = CALL Image.resize WITH {image: :photo, width: :width, height: :height}
-    stored = CALL Files.put WITH {file: resized}
-    saved = INSERT Photos WITH {id: uuid("photo"), product_id: :product_id, file_id: stored.id, url: stored.url, width: resized.width, height: resized.height}
-    COMMIT
-RESPONSE 201 WITH {photo: saved, file: stored}
+[type OrderItem [record
+  [field product Product]
+  [field name String]
+  [field price Price]
+  [field quantity OrderQuantity]]]
 
-HTTP GET /api/products/:product_id/photos
-INPUT product_id String
-photos = FROM Photos AS p WHERE p.product_id = :product_id
-RETURN {photos: photos}
+[entity Photo
+  [field id PhotoID]
+  [field product Product]
+  [field file File]
+  [field width PhotoSize]
+  [field height PhotoSize]]
 
-TABLE DeviceAccess = {id: String, user_id: UserID, token: String, device_id: DeviceID}
-SEED DeviceAccess WITH [
-    {id: "petra-mower1", user_id: "u1", token: "demo-petra", device_id: "mower1"},
-    {id: "david-mower2", user_id: "u2", token: "demo-david", device_id: "mower2"}
-]
+[entity File
+  [field id FileID]
+  [field url String]
+  [field photos [list Photo] [inverse Photo.file]]]
 
-WEBSOCKET /ws
-    INPUT token String
-    AUTHORIZE EXISTS access IN DeviceAccess WHERE access.token = :token AND EXISTS user IN Users WHERE user.id = access.user_id
-    SOURCE DeviceStatus WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
-    SOURCE DevicePosition WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
+[entity Device
+  [field id DeviceID]
+  [field certificateFingerprint [optional String] [unique]]
+  [field alerts [list DeviceAlert] [inverse DeviceAlert.device]]
+  [field access [list DeviceAccess] [inverse DeviceAccess.device]]
+  [field status [list DeviceStatus] [stream DeviceStatus.device]]
+  [field positions [list DevicePosition] [stream DevicePosition.device]]]
 
+[entity DeviceAlert
+  [field id AlertID]
+  [field device Device]
+  [field kind AlertKind]
+  [field createdAt DateTime]]
 
-TYPE MowerAction = String WHERE value IN ["start", "stop"]
-MQTT DeviceCommand
-    TOPIC "devices/{device_id}/command"
-    PARAM device_id DeviceID
-    PAYLOAD {command_id: String, action: MowerAction}
-    HISTORY 24 HOURS
+[entity DeviceAccess
+  [field id AccessID]
+  [field user User]
+  [field rights [list DeviceRight [max 2]]]
+  [field device Device]]
 
-HTTP POST /api/devices/:device_id/commands
-INPUT device_id DeviceID
-INPUT action MowerAction
-INPUT token String
-REQUIRE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id AND EXISTS user IN Users WHERE user.id = access.user_id ELSE 403 forbidden "Přístup k zařízení je zamítnut."
-TRANSACTION
-    outgoing = PUBLISH DeviceCommand(:device_id) WITH {command_id: uuid("command"), action: :action}
-    COMMIT
-RESPONSE 202 WITH outgoing
+[seed Product [rows
+  [record [id "p1"] [name "Studio sluchátka"] [price 2490.00] [stock 12]]
+  [record [id "p2"] [name "Mechanická klávesnice"] [price 3290.00] [stock 5]]
+  [record [id "p3"] [name "USB-C rozbočovač"] [price 1290.00] [stock 2]]
+  [record [id "p4"] [name "Webkamera"] [price 1890.00] [stock 0]]]]
+[seed User [rows
+  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]]
+    [name "Petra Nováková"] [email "petra@example.test"] [country "CZ"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]]
+    [name "David Miller"] [email "david@example.test"] [country "US"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]]
+    [name "Nora Silva"] [email "nora@example.test"] [country "BR"]]]]
+[seed Device [rows [record [id "mower1"]] [record [id "mower2"]]]]
+[seed DeviceAccess [rows
+  [record [id "petra-mower1"] [user "u1"] [device "mower1"] [rights [list READ CONTROL]]]
+  [record [id "david-mower2"] [user "u2"] [device "mower2"] [rights [list READ CONTROL]]]]]
+
+[stream DeviceStatus
+  [mqtt "devices/{device}/status"]
+  [history [duration "24h"] [maxMessages 10000]]
+  [field device Device]
+  [field receivedAt DateTime [receivedAt]]
+  [field online Bool]
+  [field battery Battery]]
+[stream DevicePosition
+  [mqtt "devices/{device}/position"]
+  [history [duration "5m"] [maxMessages 1000]]
+  [field device Device]
+  [field receivedAt DateTime [receivedAt]]
+  [field latitude Latitude]
+  [field longitude Longitude]]
+[stream DeviceCommand
+  [mqtt "devices/{device}/command"]
+  [history [duration "24h"] [maxMessages 10000]]
+  [field id CommandID]
+  [field device Device]
+  [field action MowerAction]]
+
+# Ověření credentials dodává hostitel, nikoliv parser.
+[auth
+  [user User
+    [jwt [issuer "https://identity.example.com"] [audience "application"]]
+    [entity [eq User.identitySubject claims.sub]]]
+  [service Service [apiKey] [entity [eq Service.keyHash credential.hash]]]
+  [device Device [certificate]
+    [entity [eq Device.certificateFingerprint certificate.fingerprint]]]
+  [anonymous Anonymous]]
+[transport HTTP [auth user service anonymous]]
+[transport MQTT [auth device service]]
+[transport WebSocket [auth user service]]
+
+# Pozitivní práva ze strany aktéra. actor je identita, target cílová entita.
+[permissions *
+  [Product [READ [when true]]]]
+
+[permissions User
+  [User [READ [when [eq actor target]]]]
+  [Product
+    [UPDATE [when [contains actor.roles CATALOG_ADMIN]]]
+    [UPDATE [when [and
+      [only changed stock]
+      [gt before.stock after.stock]
+      [eq [sub before.stock after.stock]
+        [sum
+          [where
+            [flatMap [where [creates transaction Order] order [eq order.user actor]] order order.items]
+            item [eq item.product target]]
+          item item.quantity]]]]]]
+  [Order
+    [READ [when [eq actor target.user]]]
+    [CREATE [when [and
+      [eq actor after.user]
+      [all after.items item [and
+        [eq item.price item.product.price]
+        [eq item.name item.product.name]]]
+      [eq after.total [sum after.items item [mul item.price item.quantity]]]]]]]
+  [OrderItem [READ [when [can READ parent]]]]
+  [Photo
+    [READ [when [can READ target.product]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [File
+    [READ [when [any target.photos photo [can READ photo]]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Device [READ [when [any target.access access [and
+    [eq access.user actor] [contains access.rights READ]]]]]]
+  [DeviceAccess [READ [when [eq actor target.user]]]]
+  [DeviceAlert [READ [when [can READ target.device]]]]
+  [DeviceStatus [READ [when [can READ target.device]]]]
+  [DevicePosition [READ [when [can READ target.device]]]]
+  [DeviceCommand
+    [READ [when [can READ target.device]]]
+    [CREATE [when [any after.device.access access [and
+      [eq access.user actor] [contains access.rights CONTROL]]]]]]
+  [Payment.createUrl [INVOKE [when [and
+    [eq args.currency "CZK"]
+    [any [creates transaction Order] order [and
+      [eq order.user actor] [eq order.id args.orderId]
+      [eq order.total args.amount] [eq order.user.country args.country]
+      [eq order.paymentMethod args.method]]]]]]]
+  [Email.sendConfirmation [INVOKE [when [any [creates transaction Order] order [and
+    [eq order.user actor] [eq order.id args.orderId] [eq order.user.email args.to]
+    [eq order.total args.total] [eq order.items args.items]
+    [eq order.paymentUrl args.paymentUrl]]]]]]
+  [Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
+
+[permissions Service
+  [Product [UPDATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Photo
+    [READ [when [can READ target.product]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [File
+    [READ [when [any target.photos photo [can READ photo]]]]
+    [CREATE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Device [READ [when [contains actor.roles DEVICE_AUTOMATION]]]]
+  [DeviceAlert
+    [READ [when [contains actor.roles DEVICE_AUTOMATION]]]
+    [CREATE [when [contains actor.roles DEVICE_AUTOMATION]]]]
+  [DeviceStatus [READ [when [can READ target.device]]]]
+  [DevicePosition [READ [when [can READ target.device]]]]
+  [Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]
+  [Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
+[permissions Device
+  [DeviceStatus [CREATE [when [eq actor after.device]]]]
+  [DevicePosition [CREATE [when [eq actor after.device]]]]]
+
+# Kontrakty pluginů. Parser nic nevolá ani nevykonává.
+[plugin Payment
+  [createUrl
+    [input orderId OrderID] [input amount OrderTotal] [input currency String]
+    [input country String] [input method PaymentMethod] [output PaymentOutput]]]
+[plugin Email
+  [sendConfirmation
+    [input orderId OrderID] [input to String] [input subject String]
+    [input paymentUrl String] [input total OrderTotal]
+    [input items [list OrderItem [max 50]]]
+    [input simulateFailure Bool] [output EmailOutput]]]
+[plugin Image
+  [resize [input image ProductPhoto] [input width PhotoSize] [input height PhotoSize]
+    [output ProductPhoto]]]
+[plugin Files [put [input file ProductPhoto] [output File] [transactional]]]
+
+# Výstupní typy určují projekci. Význam a typovou správnost ověří až validátor.
+[type UserSummary [record [field id UserID] [field name String]]]
+[type ProductSummary [record [field id ProductID] [field name String]]]
+[type OrderSummary [record
+  [field id OrderID] [field createdAt DateTime] [field total OrderTotal] [field status OrderStatus]]]
+[type OrderItemOutput [record
+  [field product ProductSummary] [field name String] [field price Price] [field quantity OrderQuantity]]]
+[type OrderOutput [record
+  [field id OrderID] [field user UserSummary] [field createdAt DateTime]
+  [field items [list OrderItemOutput [max 50]]] [field total OrderTotal]
+  [field paymentMethod PaymentMethod] [field paymentUrl String] [field status OrderStatus]]]
+[type StatusOutput [record [field online Bool] [field battery Battery]]]
+[type PositionOutput [record
+  [field latitude Latitude] [field longitude Longitude] [field receivedAt DateTime]]]
+[type DeviceOutput [record
+  [field id DeviceID] [field status [optional StatusOutput]]
+  [field positions [list PositionOutput [max 1000]]]]]
+[type AlertOutput [record [field id AlertID] [field kind AlertKind] [field createdAt DateTime]]]
+[type FileOutput [record [field id FileID] [field url String]]]
+[type PhotoOutput [record
+  [field id PhotoID] [field file FileOutput] [field width PhotoSize] [field height PhotoSize]]]
+[type PaymentOutput [record [field url String]]]
+[type EmailOutput [record [field state String]]]
+[type OrderReceipt [record
+  [field order OrderOutput] [field payment PaymentOutput] [field email EmailOutput]]]
+[type PhotoReceipt [record [field photo PhotoOutput] [field file FileOutput]]]
+[type CommandOutput [record [field id CommandID] [field action MowerAction]]]
+[type CartItem [record [field productId ProductID] [field quantity Quantity]]]
+
+# Samostatné deklarativní operace s typovaným výstupem, bez resolverů a příkazů.
+[query Order
+  [input orderId OrderID]
+  [output OrderOutput]
+  [http GET "/api/orders/{orderId}"]
+  [result [entity $orderId]]]
+
+[query UserOrders
+  [input userId UserID]
+  [output [list OrderSummary [max 10]]]
+  [http GET "/api/users/{userId}/orders"]
+  [user [entity $userId]]
+  [result [order [last user.orders 10] Order.createdAt DESC]]]
+
+[query Device
+  [input deviceId DeviceID]
+  [output DeviceOutput]
+  [http GET "/api/devices/{deviceId}"]
+  [device [entity $deviceId]]
+  [result [record
+    [id device.id]
+    [status [single [last device.status 1]]]
+    [positions [order [last [since device.positions [ago "5m"]] 1000]
+      DevicePosition.receivedAt ASC]]]]]
+
+[query DeviceAlerts
+  [input deviceId DeviceID]
+  [output [list AlertOutput [max 100]]]
+  [http GET "/api/device-alerts/{deviceId}"]
+  [device [entity $deviceId]]
+  [result [order [last device.alerts 100] DeviceAlert.createdAt DESC]]]
+
+[query ProductPhotos
+  [input productId ProductID]
+  [output [list PhotoOutput [max 100]]]
+  [http GET "/api/products/{productId}/photos"]
+  [product [entity $productId]]
+  [result [order [last product.photos 100] Photo.id ASC]]]
+
+[mutate CreateOrder
+  [input userId UserID]
+  [input items [list CartItem [min 1] [max 50]]]
+  [input paymentMethod PaymentMethod]
+  [input emailFailure Bool [default false]]
+  [output OrderReceipt]
+  [http POST "/api/orders" [status 201]]
+  [atomic]
+  [user [entity $userId]]
+  [cart [groupSum $items productId quantity OrderQuantity]]
+  [lines [map cart item
+    [product [entity item.productId]]
+    [quantity item.quantity]
+    [snapshot [record [product product] [name product.name]
+      [price product.price] [quantity quantity]]]
+    [remaining [as Stock [sub product.stock quantity]]]
+    [stock [set product.stock remaining]]]]
+  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
+  [orderId [new OrderID]]
+  [payment [invoke Payment.createUrl [record
+    [orderId orderId] [amount total] [currency "CZK"]
+    [country user.country] [method $paymentMethod]]]]
+  [order [create Order [record
+    [id orderId] [user user] [requestId request.id] [createdAt request.time]
+    [items lines.snapshot] [total total] [paymentMethod $paymentMethod]
+    [paymentUrl payment.url] [status AWAITING_PAYMENT]]]]
+  [email [enqueue Email.sendConfirmation [record
+    [orderId order.id] [to user.email] [subject [concat "Objednávka " order.id]]
+    [paymentUrl payment.url] [total total] [items lines.snapshot]
+    [simulateFailure $emailFailure]]
+    [retry [attempts 3] [delay "1s"] [exhausted RETAIN]]]]
+  [result [record [order order] [payment payment] [email email]]]]
+
+[mutate UploadPhoto
+  [input productId ProductID] [input photo ProductPhoto]
+  [input width PhotoSize [default 800]] [input height PhotoSize [default 600]]
+  [output PhotoReceipt]
+  [http POST "/api/products/{productId}/photo" [status 201]]
+  [atomic]
+  [product [entity $productId]]
+  [resized [invoke Image.resize [record [image $photo] [width $width] [height $height]]]]
+  [file [invoke Files.put [record [file resized]]]]
+  [photo [create Photo [record [id [new PhotoID]] [product product]
+    [file file] [width resized.width] [height resized.height]]]]
+  [result [record [photo photo] [file file]]]]
+
+[mutate SendCommand
+  [input deviceId DeviceID] [input action MowerAction]
+  [output CommandOutput]
+  [http POST "/api/devices/{deviceId}/commands" [status 202]]
+  [atomic]
+  [device [entity $deviceId]]
+  [command [publish DeviceCommand [record
+    [id [new CommandID]] [device device] [action $action]]]]
+  [result command]]
+
+[mutate LowBattery
+  [output AlertOutput]
+  [on DeviceStatus [actor [service "device-automation"]]]
+  [when [lt event.battery 20]]
+  [atomic]
+  [alert [create DeviceAlert [record [id [new AlertID]] [device event.device]
+    [kind LOW_BATTERY] [createdAt event.receivedAt]]]]
+  [result alert]]
+
+[query LiveDeviceStatus
+  [input deviceId DeviceID] [output StatusOutput]
+  [websocket "/ws" [source DeviceStatus]]
+  [device [entity $deviceId]]
+  [result [live device.status]]]
+[query LiveDevicePosition
+  [input deviceId DeviceID] [output PositionOutput]
+  [websocket "/ws" [source DevicePosition]]
+  [device [entity $deviceId]]
+  [result [live device.positions]]]

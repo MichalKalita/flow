@@ -1,6 +1,6 @@
 # Deklarativní jazyk pro skládání aplikací
 
-Status: Koncepční návrh. Název, syntaxe a úplná sémantika zatím nejsou určeny. Dokument doplňuje [BLACKBOX-REQUIREMENTS.md](BLACKBOX-REQUIREMENTS.md), jeho potvrzené požadavky nemění.
+Status: Historický koncepční návrh. Ilustrativní syntaxe v tomto dokumentu byla nahrazena jednotným hranatým zápisem popsaným v [dokumentaci parseru](prototype/docs/LANGUAGE.md). Dokument doplňuje [BLACKBOX-REQUIREMENTS.md](BLACKBOX-REQUIREMENTS.md), jeho potvrzené požadavky nemění.
 
 Aktualizované závazné požadavky na brandované číselné typy, konečné rozsahy a limity kolekcí jsou v [LANGUAGE-REQUIREMENTS.md](LANGUAGE-REQUIREMENTS.md). V těchto oblastech nahrazují starší ilustrativní příklady níže.
 
@@ -9,7 +9,7 @@ Aktualizované závazné požadavky na brandované číselné typy, konečné ro
 Uživatel nebo AI píše aplikační logiku jako deklarativní propojení hotových operací: endpointů, dotazů, transformací, změn stavu a služeb. Jazyk je lepidlo; implementace operací dodává platforma, pluginy a konektory napsané v běžných programovacích jazycích. Autor aplikace propojí objednávku, sklad, platbu a email, aniž by implementoval jejich technické provedení.
 
 - Nelze deklarovat vlastní funkce; schopnosti dodávají pluginy a platforma.
-- Zápis má být čitelný, s řádkovým členěním a odsazováním podobným Pythonu.
+- Aktuální zápis používá hranaté seznamy a prefixové výrazy; řádkové členění a odsazení mají pouze čtenářský význam.
 - Program deklaruje výsledky, podmínky, operace a závislosti.
 - Runtime volí provedení, ale musí zachovat význam programu včetně efektů, transakčních hranic a pravidel selhání.
 - Typy nesou důkazy omezení hodnot a vztahů mezi nimi, inspirované Leanem; kontrakty odmítají neplatná propojení.
@@ -155,4 +155,4 @@ Inspirace: [NoFlo](https://noflojs.org/) pro skládání komponent, [Ash + React
 
 Jazyk navazuje na [BLACKBOX-LAYERS.md](BLACKBOX-LAYERS.md); propojení s [ARCHITECTURE-PROPOSAL.md](ARCHITECTURE-PROPOSAL.md) zůstává otevřené. Dopracovat je nutné syntaxe, kompozice, kontrakty pluginů, konzistence kolekcí, externí retry, význam odpovědí a aktualizace rozpracovaných operací.
 
-Implementace prototypu: [syntax a aktuální podpora](prototype/docs/LANGUAGE.md). Celá aplikace je v jediném [application.flow](prototype/priv/workflows/application.flow), včetně typů, MQTT zdrojů a HTTP scénářů.
+Aktuální implementace obsahuje pouze [parser syntaktického AST](prototype/docs/LANGUAGE.md). Kompletní deklarativní příklad [application.flow](prototype/priv/workflows/application.flow) zahrnuje typy, MQTT zdroje, HTTP scénáře, auth a permissions; validátor a runtime nejsou implementované.

@@ -5,7 +5,7 @@ Status: Potvrzené požadavky z návrhu jazyka. Tento dokument určuje požadova
 ## 1. Povinné brandované číselné typy
 
 - Každá číselná hodnota v business logice musí mít pojmenovaný nominální typ (brand). Holé `Int`, `Float`, `Number` ani jiné obecné číselné typy nesmějí být typem pole, parametru, proměnné nebo výsledku.
-- `INTEGER` a `DECIMAL` jsou konstrukce pro definici pojmenovaného typu; nesmějí se použít přímo jako typ hodnoty.
+- `integer` a `decimal` jsou konstrukce pro definici pojmenovaného typu; nesmějí se použít přímo jako typ hodnoty.
 - Dvě samostatné deklarace vytvářejí odlišné typy, i když mají stejnou reprezentaci a rozsah. `OrderId` nelze použít místo `ProductId` v dotazu, porovnání, přiřazení ani volání pluginu.
 - Značka se musí zachovat přes vstupy, výrazy, kolekce, databázové sloupce, dotazy, kontrakty pluginů a odpovědi. Interní SQL reprezentace nesmí značku ztratit z typového schématu aplikace.
 - Jazyk nesmí hodnotu implicitně rozbalit na obecné číslo ani přeznačit na jiný brand. Nevyžaduje automatické převody jednotek, rozměrovou analýzu ani katalog vztahů mezi značkami.
@@ -16,33 +16,34 @@ Status: Potvrzené požadavky z návrhu jazyka. Tento dokument určuje požadova
 Každý číselný typ musí definovat konečnou množinu povolených hodnot:
 
 ```text
-TYPE ProductId = INTEGER 1..10^9
-TYPE OrderId = INTEGER 1..10^9
-TYPE ProductCount = INTEGER 0..10^6
-TYPE ByteValue = INTEGER 0..(2^8 - 1)
-TYPE Weight = DECIMAL 0..10^6 SCALE 3
-TYPE Rating = DECIMAL 1..5 SCALE 1
+[type ProductId [integer [range 1 [pow 10 9]]]]
+[type OrderId [integer [range 1 [pow 10 9]]]]
+[type ProductCount [integer [range 0 [pow 10 6]]]]
+[type ByteValue [integer [range 0 [sub [pow 2 8] 1]]]]
+[type Weight [decimal [range 0 [pow 10 6]] [scale 3]]]
+[type Rating [decimal [range 1 5] [scale 1]]]
 ```
 
-- Dolní a horní mez jsou povinnou součástí syntaxe. Slovo `RANGE` se nepoužívá; samotné `INTEGER` nebo `DECIMAL` je neplatná deklarace.
-- `DECIMAL` musí navíc určit konečnou desetinnou přesnost pomocí `SCALE`. Například `Rating` obsahuje pouze `1.0, 1.1, …, 5.0`, nikoliv libovolná reálná čísla mezi mezemi.
-- Meze mohou být přesné konstantní výrazy s mocninou `^`, například `10^9` nebo `2^8 - 1`. Vyhodnocují se při kontrole definice, nezávisle na runtime datech.
+- Dolní a horní mez jsou povinnou součástí kontraktu `[range min max]`. Chybějící rozsah odmítne budoucí validátor, nikoliv obecný parser seznamů.
+- `decimal` musí navíc určit konečnou desetinnou přesnost pomocí `[scale n]`. Například `Rating` obsahuje pouze `1.0, 1.1, …, 5.0`, nikoliv libovolná reálná čísla mezi mezemi.
+- Meze mohou být přesné prefixové konstantní výrazy, například `[pow 10 9]` nebo `[sub [pow 2 8] 1]`. Vyhodnocují se při kontrole definice, nezávisle na runtime datech.
 - Vstupy, výstupy pluginů a výsledky výpočtů musí splňovat brand, rozsah i přesnost. Přetečení, obalení hodnoty a tiché zaokrouhlení nejsou přípustné. Porušení kontraktu musí skončit definovanou chybou.
 
 ## 3. Povinné limity kolekcí
 
 - Každá kolekce musí mít při kontrole programu známou konečnou horní mez počtu prvků. Platí to i pro vstupní seznamy, výsledky pluginů, databázové dotazy, historii MQTT, vytvořené a vnořené kolekce.
 - Nelze načíst všechny objednávky uživatele bez omezení počtu. Samotný filtr ani konečné časové okno nejsou důkazem maximálního počtu výsledků.
-- Dotaz musí mít explicitní `LIMIT`, nebo čerpat z kontraktu, který už zaručuje konečnou horní mez. Výběr nejvýše jedné položky má mez jedna.
+- Dotaz musí mít explicitní `[first kolekce limit]` nebo `[last kolekce limit]`, nebo čerpat z kontraktu, který už zaručuje konečnou horní mez. Výběr nejvýše jedné položky má mez jedna.
 - Dynamický limit je přípustný pouze s typem, jehož horní mez je známá. Limit `PageSize` z následujícího příkladu znamená nejvýše 100 položek:
 
 ```text
-TYPE PageSize = INTEGER 1..100
-PARAM pageSize PageSize
-
-orders = FROM Orders
-    WHERE user = :userId
-    LIMIT :pageSize
+[type PageSize [integer [range 1 100]]]
+[query Orders
+  [input userId UserID]
+  [input pageSize PageSize]
+  [output [list OrderSummary [max 100]]]
+  [user [entity $userId]]
+  [result [first user.orders $pageSize]]]
 ```
 
 - Stránka smí obsahovat `items`, `hasMore` a volitelný `nextCursor`. Informace o další stránce nezvyšuje limit vrácené kolekce.
@@ -63,4 +64,4 @@ Limit výsledku neznamená automaticky limit počtu prohledaných databázových
 
 ## Stav prototypu
 
-Současný Elixir prototyp tyto požadavky zatím plně nevynucuje: podporuje obecné číselné typy, strukturální aliasy a kolekce bez povinných limitů. Tento dokument je podkladem pro budoucí změnu jazyka, nikoliv tvrzením, že je tato syntaxe již implementovaná. Aktuální podporu popisuje [dokumentace prototypu](prototype/docs/LANGUAGE.md).
+Současný Elixir projekt je pouze parser jednotného hranatého zápisu do AST. Nekontroluje doménové typy, brandy, rozsahy, limity kolekcí ani platnost propojení. Požadavky tohoto dokumentu patří budoucímu validátoru a runtime. Implementovanou syntaxi popisuje [dokumentace parseru](prototype/docs/LANGUAGE.md).

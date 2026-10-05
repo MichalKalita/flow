@@ -1,0 +1,106 @@
+# Výňatky různých domén. Parser ověřuje jejich syntaxi, ne význam ani existenci typů.
+# Permissions jsou pouze pozitivní, dědičnost akcí je explicitní.
+
+[entity Post
+  [field id PostID] [field author User] [field public Bool]]
+[permissions User
+  [Post
+    [READ [when target.public]]
+    [UPDATE [includes READ] [when [eq target.author actor]]]
+    [DELETE [includes UPDATE] [when [eq target.author actor]]]]]
+
+# Veřejný přístup, vlastnictví, role v organizaci, přímé sdílení a tým.
+[permissions *
+  [Document [READ [when [and target.public [not [contains target.blocked actor]]]]]]]
+[permissions User
+  [Document [READ [when [and
+    [not [contains target.blocked actor]]
+    [or
+      [eq target.owner actor]
+      [any target.organization.memberships membership [and
+        [eq membership.user actor] [contains membership.roles AUDITOR]]]
+      [any target.grants grant [and
+        [eq grant.user actor] [contains grant.actions READ]
+        [not grant.revoked] [gt grant.expiresAt context.now]]]
+      [any target.groups group [contains group.members actor]]
+      [can READ target.folder]]]]]]]
+
+# Hierarchie vztahů a dědění přístupu ze zdroje.
+[permissions User
+  [Folder [READ [when [or
+    [eq target.owner actor]
+    [contains target.readers actor]
+    [and [ne target.parent null] [can READ target.parent]]]]]]
+  [Order [READ [when [eq target.user actor]]]]
+  [OrderItem [READ [when [can READ parent]]]]]
+
+# Samostatná pole a jejich interní použití službou.
+[permissions User
+  [Employee [READ [when [any target.organization.memberships member [eq member.user actor]]]]]
+  [Employee.salary [READ [when [or
+    [eq target.user actor]
+    [any target.organization.memberships member [and
+      [eq member.user actor] [contains member.roles ACCOUNTANT]]]]]]]]
+[permissions Service
+  [Employee [USE [when [and
+    [eq actor.organization target.organization]
+    [contains actor.roles PAYROLL]
+    [eq context.purpose PAYROLL_CALCULATION]]]]]
+  [Employee.salary [USE [when [and
+    [contains actor.roles PAYROLL] [eq context.purpose PAYROLL_CALCULATION]]]]]]
+
+# Povolené změny, stav a oddělení autora od schvalovatele.
+[permissions User
+  [Expense
+    [CREATE [when [and [eq after.author actor]
+      [any after.organization.memberships member [eq member.user actor]]]]]
+    [UPDATE [when [and [not before.locked] [or
+      [and [eq before.author actor] [eq before.status DRAFT]
+        [only changed description amount attachments]]
+      [and
+        [any before.organization.memberships member [and
+          [eq member.user actor] [contains member.roles ACCOUNTANT]]]
+        [ne before.author actor]
+        [eq before.status SUBMITTED] [eq after.status APPROVED]
+        [eq after.approvedBy actor]
+        [only changed status approvedBy]]]]]]]]
+
+# Kontext, MFA, účel, souhlas a ověřený externí fakt; nouzová výjimka je výslovná.
+[permissions User
+  [MedicalRecord [READ [when [and
+    [not target.sealed] [eq context.mfa STRONG] context.professionalLicense.valid
+    [or
+      [and [contains target.patient.doctors actor]
+        [eq context.purpose TREATMENT] target.patient.consent.active]
+      [and [eq context.emergency.authorizedActor actor]
+        [ne context.emergency.reason null]]]]]]]]
+
+# Podepsané, ověřené, časově omezené delegované oprávnění.
+[permissions User
+  [Report [READ [when [any context.capabilities capability [and
+    [eq capability.target target] [eq capability.action READ]
+    [eq capability.audience actor] [gt capability.expiresAt context.now]
+    [not capability.revoked] [canAs capability.issuer READ target]]]]]]]
+
+# Stejná práva pro historii, HTTP, MQTT a každé WebSocket doručení.
+[permissions User
+  [Device [READ [when [contains target.readers actor]]]]
+  [DeviceStatus [READ [when [can READ target.device]]]]
+  [DeviceCommand [CREATE [when [contains after.device.operators actor]]]]]
+[permissions Device
+  [DeviceStatus [CREATE [when [eq actor after.device]]]]]
+
+# Jednorázové oprávnění je atomická změna entity, nikoliv vedlejší účinek predikátu.
+[permissions User
+  [DownloadGrant [UPDATE [when [and
+    [eq actor before.user] [eq before.remaining 1] [eq after.remaining 0]
+    [gt before.expiresAt context.now] [only changed remaining]]]]]
+  [Download [CREATE [when [and
+    [eq actor after.grant.user]
+    [updates transaction after.grant [before [remaining 1]] [after [remaining 0]]]]]]]]
+
+# Externí účinek nemá automatický bypass.
+[permissions User
+  [Bank.transfer [INVOKE [when [and
+    [eq args.account.owner actor] [eq context.mfa STRONG]
+    [le args.amount args.account.transferLimit]]]]]]
