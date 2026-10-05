@@ -53,8 +53,34 @@
 
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [handle "petra"] [displayName "Petra"] [bio "Photos and coffee"]]
-  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [handle "david"] [displayName "David"] [bio "Cycling"]]]
-  [record [id "u3"] [identitySubject "idp:mod"] [roles [list MODERATOR]] [handle "mod"] [displayName "Moderator"] [bio ""]]]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [handle "david"] [displayName "David"] [bio "Cycling"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [handle "nora"] [displayName "Nora"] [bio "Books and rain"]]
+  [record [id "u4"] [identitySubject "idp:u4"] [roles [list]] [handle "omar"] [displayName "Omar"] [bio "Weeknight cooking"]]
+  [record [id "u5"] [identitySubject "idp:mod"] [roles [list MODERATOR]] [handle "mod"] [displayName "Moderator"] [bio "Keep it kind"]]]]
+[seed Post [rows
+  [record [id "p1"] [author "u1"] [body "Morning light in Malá Strana."] [visibility PUBLIC] [createdAt "2026-10-01T07:12:00Z"]]
+  [record [id "p2"] [author "u2"] [body "Fifty kilometres before breakfast."] [visibility PUBLIC] [createdAt "2026-10-01T09:40:00Z"]]
+  [record [id "p3"] [author "u3"] [body "Finished The Dispossessed again."] [visibility FOLLOWERS] [createdAt "2026-10-02T21:05:00Z"]]
+  [record [id "p4"] [author "u4"] [body "Lentil soup with too much cumin. Still good."] [visibility PUBLIC] [createdAt "2026-10-03T18:22:00Z"]]
+  [record [id "p5"] [author "u1"] [body "Closed beta of the photo dump."] [visibility FOLLOWERS] [createdAt "2026-10-04T12:00:00Z"]]]]
+[seed Comment [rows
+  [record [id "c1"] [post "p1"] [author "u2"] [body "That alley by the church?"] [createdAt "2026-10-01T07:30:00Z"]]
+  [record [id "c2"] [post "p1"] [author "u3"] [body "Need that hour of the day."] [createdAt "2026-10-01T08:01:00Z"]]
+  [record [id "c3"] [post "p2"] [author "u1"] [body "Show the route next time."] [createdAt "2026-10-01T10:11:00Z"]]
+  [record [id "c4"] [post "p4"] [author "u5"] [body "Cumin can stay."] [createdAt "2026-10-03T18:40:00Z"]]
+  [record [id "c5"] [post "p3"] [author "u4"] [body "Le Guin always holds up."] [createdAt "2026-10-02T21:40:00Z"]]]]
+[seed Follow [rows
+  [record [id "f1"] [follower "u1"] [followee "u2"] [createdAt "2026-09-12T10:00:00Z"]]
+  [record [id "f2"] [follower "u2"] [followee "u1"] [createdAt "2026-09-12T10:05:00Z"]]
+  [record [id "f3"] [follower "u3"] [followee "u1"] [createdAt "2026-09-20T14:00:00Z"]]
+  [record [id "f4"] [follower "u4"] [followee "u3"] [createdAt "2026-09-22T08:30:00Z"]]
+  [record [id "f5"] [follower "u5"] [followee "u1"] [createdAt "2026-09-25T16:00:00Z"]]]]
+[seed Like [rows
+  [record [id "k1"] [post "p1"] [user "u2"] [createdAt "2026-10-01T07:20:00Z"]]
+  [record [id "k2"] [post "p1"] [user "u3"] [createdAt "2026-10-01T07:45:00Z"]]
+  [record [id "k3"] [post "p2"] [user "u1"] [createdAt "2026-10-01T09:50:00Z"]]
+  [record [id "k4"] [post "p4"] [user "u1"] [createdAt "2026-10-03T18:30:00Z"]]
+  [record [id "k5"] [post "p5"] [user "u2"] [createdAt "2026-10-04T12:10:00Z"]]]]
 
 [auth
   [user User

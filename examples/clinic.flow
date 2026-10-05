@@ -53,15 +53,34 @@
 
 [seed Practitioner [rows
   [record [id "p1"] [name "MUDr. Novák"] [specialty GP]]
-  [record [id "p2"] [name "MUDr. Svobodová"] [specialty PEDIATRICS]]]]
+  [record [id "p2"] [name "MUDr. Svobodová"] [specialty PEDIATRICS]]
+  [record [id "p3"] [name "MUDr. Král"] [specialty DERMATOLOGY]]
+  [record [id "p4"] [name "MUDr. Benešová"] [specialty GP]]
+  [record [id "p5"] [name "MUDr. Ali"] [specialty PEDIATRICS]]]]
 [seed Slot [rows
-  [record [id "s1"] [practitioner "p1"] [startsAt "2026-10-06T08:00:00Z"] [duration 20] [status OPEN]]
+  [record [id "s1"] [practitioner "p1"] [startsAt "2026-10-06T08:00:00Z"] [duration 20] [status BOOKED]]
   [record [id "s2"] [practitioner "p1"] [startsAt "2026-10-06T08:20:00Z"] [duration 20] [status OPEN]]
-  [record [id "s3"] [practitioner "p2"] [startsAt "2026-10-06T09:00:00Z"] [duration 30] [status OPEN]]]]
+  [record [id "s3"] [practitioner "p2"] [startsAt "2026-10-06T09:00:00Z"] [duration 30] [status BOOKED]]
+  [record [id "s4"] [practitioner "p3"] [startsAt "2026-10-06T10:00:00Z"] [duration 20] [status OPEN]]
+  [record [id "s5"] [practitioner "p4"] [startsAt "2026-10-07T08:00:00Z"] [duration 20] [status BOOKED]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "David Miller"] [email "david@example.test"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora Silva"] [email "nora@example.test"]]
   [record [id "doc"] [identitySubject "idp:doc"] [roles [list DOCTOR]] [name "Clinic doctor"] [email "doc@example.test"]]
   [record [id "desk"] [identitySubject "idp:desk"] [roles [list RECEPTION]] [name "Reception"] [email "desk@example.test"]]]]
+[seed Visit [rows
+  [record [id "v1"] [patient "u1"] [practitioner "p1"] [slot "s1"] [status COMPLETED] [createdAt "2026-10-01T08:00:00Z"]]
+  [record [id "v2"] [patient "u2"] [practitioner "p2"] [slot "s3"] [status SCHEDULED] [createdAt "2026-10-02T09:00:00Z"]]
+  [record [id "v3"] [patient "u3"] [practitioner "p4"] [slot "s5"] [status IN_PROGRESS] [createdAt "2026-10-03T08:05:00Z"]]
+  [record [id "v4"] [patient "u1"] [practitioner "p3"] [slot "s4"] [status NO_SHOW] [createdAt "2026-09-20T10:00:00Z"]]
+  [record [id "v5"] [patient "u2"] [practitioner "p1"] [slot "s2"] [status SCHEDULED] [createdAt "2026-10-04T11:30:00Z"]]]]
+[seed ClinicalNote [rows
+  [record [id "n1"] [visit "v1"] [author "doc"] [body "Seasonal cough, rest and tea."] [createdAt "2026-10-01T08:18:00Z"]]
+  [record [id "n2"] [visit "v2"] [author "doc"] [body "Vaccination catch-up planned."] [createdAt "2026-10-02T09:10:00Z"]]
+  [record [id "n3"] [visit "v3"] [author "doc"] [body "Blood pressure recheck in two weeks."] [createdAt "2026-10-03T08:25:00Z"]]
+  [record [id "n4"] [visit "v4"] [author "doc"] [body "Did not attend; call reception."] [createdAt "2026-09-20T10:30:00Z"]]
+  [record [id "n5"] [visit "v1"] [author "doc"] [body "Follow-up if fever returns."] [createdAt "2026-10-01T08:22:00Z"]]]]
 
 [auth
   [user User

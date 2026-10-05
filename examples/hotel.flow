@@ -62,14 +62,44 @@
 [seed Room [rows
   [record [id "r101"] [number "101"] [kind SINGLE] [floor 1] [nightly 1890.00]]
   [record [id "r202"] [number "202"] [kind DOUBLE] [floor 2] [nightly 2490.00]]
-  [record [id "r301"] [number "301"] [kind SUITE] [floor 3] [nightly 4290.00]]]]
+  [record [id "r301"] [number "301"] [kind SUITE] [floor 3] [nightly 4290.00]]
+  [record [id "r102"] [number "102"] [kind SINGLE] [floor 1] [nightly 1890.00]]
+  [record [id "r204"] [number "204"] [kind DOUBLE] [floor 2] [nightly 2590.00]]]]
 [seed Extra [rows
   [record [id "e1"] [name "Breakfast"] [price 290.00]]
-  [record [id "e2"] [name "Parking"] [price 200.00]]]]
+  [record [id "e2"] [name "Parking"] [price 200.00]]
+  [record [id "e3"] [name "Late checkout"] [price 450.00]]
+  [record [id "e4"] [name "Airport transfer"] [price 890.00]]
+  [record [id "e5"] [name "Wine in room"] [price 390.00]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "David Miller"] [email "david@example.test"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora Silva"] [email "nora@example.test"]]
   [record [id "desk"] [identitySubject "idp:desk"] [roles [list FRONT_DESK]] [name "Front desk"] [email "desk@hotel.test"]]
   [record [id "hk"] [identitySubject "idp:hk"] [roles [list HOUSEKEEPING]] [name "Housekeeping"] [email "hk@hotel.test"]]]]
+[seed Stay [rows
+  [record [id "st1"] [guest "u1"] [room "r101"] [nights 2] [guests 1]
+    [extras [list [record [extra "e1"] [name "Breakfast"] [price 290.00]]]]
+    [total 4070.00] [status CHECKED_OUT] [checkIn "2026-09-20T15:00:00Z"] [createdAt "2026-09-01T10:00:00Z"]]
+  [record [id "st2"] [guest "u2"] [room "r202"] [nights 3] [guests 2]
+    [extras [list
+      [record [extra "e1"] [name "Breakfast"] [price 290.00]]
+      [record [extra "e2"] [name "Parking"] [price 200.00]]]]
+    [total 7960.00] [status CHECKED_IN] [checkIn "2026-10-04T15:00:00Z"] [createdAt "2026-09-15T12:00:00Z"]]
+  [record [id "st3"] [guest "u3"] [room "r301"] [nights 1] [guests 2]
+    [extras [list [record [extra "e5"] [name "Wine in room"] [price 390.00]]]]
+    [total 4680.00] [status CONFIRMED] [checkIn "2026-10-12T15:00:00Z"] [createdAt "2026-09-28T09:00:00Z"]]
+  [record [id "st4"] [guest "u1"] [room "r102"] [nights 4] [guests 1]
+    [extras [list]] [total 7560.00] [status REQUESTED] [checkIn "2026-10-20T15:00:00Z"] [createdAt "2026-10-01T08:00:00Z"]]
+  [record [id "st5"] [guest "u2"] [room "r204"] [nights 2] [guests 2]
+    [extras [list [record [extra "e4"] [name "Airport transfer"] [price 890.00]]]]
+    [total 6070.00] [status CANCELLED] [checkIn "2026-11-01T15:00:00Z"] [createdAt "2026-10-02T14:00:00Z"]]]]
+[seed HousekeepingTask [rows
+  [record [id "h1"] [room "r101"] [stay "st1"] [status DONE] [createdAt "2026-09-22T10:00:00Z"]]
+  [record [id "h2"] [room "r202"] [stay "st2"] [status OPEN] [createdAt "2026-10-04T15:10:00Z"]]
+  [record [id "h3"] [room "r301"] [stay "st3"] [status OPEN] [createdAt "2026-10-12T08:00:00Z"]]
+  [record [id "h4"] [room "r102"] [stay "st4"] [status OPEN] [createdAt "2026-10-20T08:00:00Z"]]
+  [record [id "h5"] [room "r204"] [stay "st5"] [status DONE] [createdAt "2026-10-02T16:00:00Z"]]]]
 
 [auth
   [user User

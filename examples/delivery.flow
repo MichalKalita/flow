@@ -73,16 +73,44 @@
 
 [seed Kitchen [rows
   [record [id "k1"] [name "Pizzeria Roma"] [kind PIZZA] [open true]]
-  [record [id "k2"] [name "Green Bowl"] [kind CAFE] [open true]]]]
+  [record [id "k2"] [name "Green Bowl"] [kind CAFE] [open true]]
+  [record [id "k3"] [name "Saigon Night"] [kind ASIAN] [open true]]
+  [record [id "k4"] [name "Noodle Cart"] [kind ASIAN] [open false]]
+  [record [id "k5"] [name "Corner Slice"] [kind PIZZA] [open true]]]]
 [seed MenuItem [rows
   [record [id "i1"] [kitchen "k1"] [name "Margherita"] [price 189.00] [available true]]
   [record [id "i2"] [kitchen "k1"] [name "Diavola"] [price 219.00] [available true]]
-  [record [id "i3"] [kitchen "k2"] [name "Lentil soup"] [price 89.00] [available true]]]]
+  [record [id "i3"] [kitchen "k2"] [name "Lentil soup"] [price 89.00] [available true]]
+  [record [id "i4"] [kitchen "k3"] [name "Pho bo"] [price 169.00] [available true]]
+  [record [id "i5"] [kitchen "k5"] [name "Pepperoni"] [price 199.00] [available true]]]]
 [seed Courier [rows
-  [record [id "c1"] [identitySubject "idp:c1"] [name "Tomas"] [status AVAILABLE]]]]
+  [record [id "c1"] [identitySubject "idp:c1"] [name "Tomas"] [status BUSY]]
+  [record [id "c2"] [identitySubject "idp:c2"] [name "Iva"] [status AVAILABLE]]
+  [record [id "c3"] [identitySubject "idp:c3"] [name "Omar"] [status BUSY]]
+  [record [id "c4"] [identitySubject "idp:c4"] [name "Lea"] [status AVAILABLE]]
+  [record [id "c5"] [identitySubject "idp:c5"] [name "Jan"] [status AVAILABLE]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [address "Nerudova 12"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "David"] [address "Kampa 3"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora"] [address "Vinohrady 8"]]
+  [record [id "u4"] [identitySubject "idp:u4"] [roles [list]] [name "Martin"] [address "Letná 2"]]
   [record [id "sup"] [identitySubject "idp:sup"] [roles [list SUPPORT]] [name "Support"] [address ""]]]]
+[seed Order [rows
+  [record [id "o1"] [customer "u1"] [kitchen "k1"] [courier "c1"]
+    [items [list [record [item "i1"] [name "Margherita"] [price 189.00] [quantity 1]]]]
+    [total 189.00] [status OUT_FOR_DELIVERY] [createdAt "2026-10-05T18:00:00Z"]]
+  [record [id "o2"] [customer "u2"] [kitchen "k2"]
+    [items [list [record [item "i3"] [name "Lentil soup"] [price 89.00] [quantity 2]]]]
+    [total 178.00] [status PLACED] [createdAt "2026-10-05T18:10:00Z"]]
+  [record [id "o3"] [customer "u3"] [kitchen "k3"] [courier "c3"]
+    [items [list [record [item "i4"] [name "Pho bo"] [price 169.00] [quantity 1]]]]
+    [total 169.00] [status COOKING] [createdAt "2026-10-05T17:50:00Z"]]
+  [record [id "o4"] [customer "u4"] [kitchen "k5"]
+    [items [list [record [item "i5"] [name "Pepperoni"] [price 199.00] [quantity 2]]]]
+    [total 398.00] [status DELIVERED] [createdAt "2026-10-04T19:00:00Z"]]
+  [record [id "o5"] [customer "u1"] [kitchen "k1"]
+    [items [list [record [item "i2"] [name "Diavola"] [price 219.00] [quantity 1]]]]
+    [total 219.00] [status CANCELLED] [createdAt "2026-10-03T20:00:00Z"]]]]
 
 [auth
   [user User

@@ -69,14 +69,45 @@
 [seed Author [rows
   [record [id "a1"] [name "Božena Němcová"]]
   [record [id "a2"] [name "Karel Čapek"]]
-  [record [id "a3"] [name "Ursula K. Le Guin"]]]]
+  [record [id "a3"] [name "Ursula K. Le Guin"]]
+  [record [id "a4"] [name "Franz Kafka"]]
+  [record [id "a5"] [name "Octavia E. Butler"]]]]
 [seed Book [rows
   [record [id "b1"] [title "Babička"] [author "a1"] [isbn "978-80-000-0001"] [year 1855] [price 249.00] [stock 8]]
   [record [id "b2"] [title "R.U.R."] [author "a2"] [isbn "978-80-000-0002"] [year 1920] [price 199.00] [stock 4]]
-  [record [id "b3"] [title "The Left Hand of Darkness"] [author "a3"] [isbn "978-0-441-47812-5"] [year 1969] [price 389.00] [stock 6]]]]
+  [record [id "b3"] [title "The Left Hand of Darkness"] [author "a3"] [isbn "978-0-441-47812-5"] [year 1969] [price 389.00] [stock 6]]
+  [record [id "b4"] [title "The Trial"] [author "a4"] [isbn "978-0-8052-0999-0"] [year 1925] [price 279.00] [stock 5]]
+  [record [id "b5"] [title "Kindred"] [author "a5"] [isbn "978-0-8070-8369-7"] [year 1979] [price 359.00] [stock 7]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"] [country "CZ"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "David Miller"] [email "david@example.test"] [country "US"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora Silva"] [email "nora@example.test"] [country "BR"]]
+  [record [id "u4"] [identitySubject "idp:u4"] [roles [list]] [name "Omar Haddad"] [email "omar@example.test"] [country "CZ"]]
   [record [id "staff"] [identitySubject "idp:staff"] [roles [list STAFF]] [name "Shop staff"] [email "staff@example.test"] [country "CZ"]]]]
+[seed Order [rows
+  [record [id "o1"] [customer "u1"] [requestId "req1"] [createdAt "2026-09-20T11:00:00Z"]
+    [items [list [record [book "b1"] [title "Babička"] [price 249.00] [quantity 1]]]]
+    [total 249.00] [paymentMethod CARD] [status PAID]]
+  [record [id "o2"] [customer "u2"] [requestId "req2"] [createdAt "2026-09-22T16:30:00Z"]
+    [items [list
+      [record [book "b3"] [title "The Left Hand of Darkness"] [price 389.00] [quantity 1]]
+      [record [book "b5"] [title "Kindred"] [price 359.00] [quantity 1]]]]
+    [total 748.00] [paymentMethod BANK] [status PAID]]
+  [record [id "o3"] [customer "u3"] [requestId "req3"] [createdAt "2026-09-28T09:15:00Z"]
+    [items [list [record [book "b2"] [title "R.U.R."] [price 199.00] [quantity 2]]]]
+    [total 398.00] [paymentMethod CARD] [status AWAITING_PAYMENT]]
+  [record [id "o4"] [customer "u4"] [requestId "req4"] [createdAt "2026-10-01T13:40:00Z"]
+    [items [list [record [book "b4"] [title "The Trial"] [price 279.00] [quantity 1]]]]
+    [total 279.00] [paymentMethod CASH] [status CANCELLED]]
+  [record [id "o5"] [customer "u1"] [requestId "req5"] [createdAt "2026-10-03T18:05:00Z"]
+    [items [list [record [book "b5"] [title "Kindred"] [price 359.00] [quantity 1]]]]
+    [total 359.00] [paymentMethod CARD] [status PAID]]]]
+[seed Review [rows
+  [record [id "r1"] [book "b1"] [author "u1"] [rating 5.0] [body "Still the winter book."] [createdAt "2026-09-21T10:00:00Z"]]
+  [record [id "r2"] [book "b3"] [author "u2"] [rating 4.5] [body "Cold, exact, generous."] [createdAt "2026-09-23T08:00:00Z"]]
+  [record [id "r3"] [book "b5"] [author "u2"] [rating 5.0] [body "Does not let go."] [createdAt "2026-09-24T19:20:00Z"]]
+  [record [id "r4"] [book "b2"] [author "u3"] [rating 4.0] [body "Shorter than I remembered."] [createdAt "2026-09-29T12:00:00Z"]]
+  [record [id "r5"] [book "b4"] [author "u4"] [rating 3.5] [body "Needed a better afternoon."] [createdAt "2026-10-02T15:10:00Z"]]]]
 
 [auth
   [user User

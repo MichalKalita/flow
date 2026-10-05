@@ -60,11 +60,34 @@
 
 [seed User [rows
   [record [id "s1"] [identitySubject "idp:s1"] [roles [list]] [name "Eva Student"] [email "eva@school.test"]]
+  [record [id "s2"] [identitySubject "idp:s2"] [roles [list]] [name "Jan Student"] [email "jan@school.test"]]
+  [record [id "s3"] [identitySubject "idp:s3"] [roles [list]] [name "Lea Student"] [email "lea@school.test"]]
   [record [id "t1"] [identitySubject "idp:t1"] [roles [list TEACHER]] [name "Prof. Holub"] [email "holub@school.test"]]
   [record [id "r1"] [identitySubject "idp:r1"] [roles [list REGISTRAR]] [name "Registrar"] [email "office@school.test"]]]]
 [seed Course [rows
   [record [id "c1"] [code "CS101"] [title "Intro to Computing"] [term FALL] [capacity 30] [teacher "t1"]]
-  [record [id "c2"] [code "LIT200"] [title "Czech Literature"] [term FALL] [capacity 20] [teacher "t1"]]]]
+  [record [id "c2"] [code "LIT200"] [title "Czech Literature"] [term FALL] [capacity 20] [teacher "t1"]]
+  [record [id "c3"] [code "HIS110"] [title "Central Europe 1918"] [term FALL] [capacity 25] [teacher "t1"]]
+  [record [id "c4"] [code "MATH120"] [title "Discrete Math"] [term SPRING] [capacity 28] [teacher "t1"]]
+  [record [id "c5"] [code "ART150"] [title "Studio Drawing"] [term SPRING] [capacity 16] [teacher "t1"]]]]
+[seed Enrollment [rows
+  [record [id "e1"] [student "s1"] [course "c1"] [status ACTIVE] [createdAt "2026-09-01T08:00:00Z"]]
+  [record [id "e2"] [student "s1"] [course "c2"] [status ACTIVE] [createdAt "2026-09-01T08:05:00Z"]]
+  [record [id "e3"] [student "s2"] [course "c1"] [status ACTIVE] [createdAt "2026-09-01T09:00:00Z"]]
+  [record [id "e4"] [student "s3"] [course "c3"] [status DROPPED] [createdAt "2026-09-02T10:00:00Z"]]
+  [record [id "e5"] [student "s2"] [course "c4"] [status ACTIVE] [createdAt "2026-09-03T11:00:00Z"]]]]
+[seed Assignment [rows
+  [record [id "a1"] [course "c1"] [title "Hello, machine"] [dueAt "2026-10-10T22:00:00Z"] [weight 0.20]]
+  [record [id "a2"] [course "c1"] [title "Types on paper"] [dueAt "2026-10-24T22:00:00Z"] [weight 0.30]]
+  [record [id "a3"] [course "c2"] [title "Němcová close reading"] [dueAt "2026-10-12T22:00:00Z"] [weight 0.25]]
+  [record [id "a4"] [course "c3"] [title "Map of 1918"] [dueAt "2026-10-15T22:00:00Z"] [weight 0.20]]
+  [record [id "a5"] [course "c5"] [title "Still life 1"] [dueAt "2026-10-08T22:00:00Z"] [weight 0.15]]]]
+[seed Submission [rows
+  [record [id "sub1"] [assignment "a1"] [student "s1"] [body "Printed hello."] [status GRADED] [score 92.0] [createdAt "2026-10-09T20:00:00Z"]]
+  [record [id "sub2"] [assignment "a1"] [student "s2"] [body "Late but complete."] [status SUBMITTED] [createdAt "2026-10-10T21:50:00Z"]]
+  [record [id "sub3"] [assignment "a3"] [student "s1"] [body "Grandmother and weather."] [status GRADED] [score 88.5] [createdAt "2026-10-11T19:00:00Z"]]
+  [record [id "sub4"] [assignment "a4"] [student "s3"] [body "Draft borders."] [status DRAFT] [createdAt "2026-10-05T12:00:00Z"]]
+  [record [id "sub5"] [assignment "a2"] [student "s1"] [body "Nominal vs structural."] [status SUBMITTED] [createdAt "2026-10-20T18:30:00Z"]]]]
 
 [auth
   [user User

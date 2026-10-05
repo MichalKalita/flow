@@ -62,16 +62,44 @@
 [seed Plan [rows
   [record [id "p1"] [name "Month"] [kind MONTHLY] [price 990.00]]
   [record [id "p2"] [name "Year"] [kind YEARLY] [price 9900.00]]
-  [record [id "p3"] [name "Drop-in"] [kind DROP_IN] [price 180.00]]]]
+  [record [id "p3"] [name "Drop-in"] [kind DROP_IN] [price 180.00]]
+  [record [id "p4"] [name "Student month"] [kind MONTHLY] [price 690.00]]
+  [record [id "p5"] [name "Off-peak year"] [kind YEARLY] [price 6900.00]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [email "petra@example.test"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "David"] [email "david@example.test"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora"] [email "nora@example.test"]]
   [record [id "ins"] [identitySubject "idp:ins"] [roles [list INSTRUCTOR]] [name "Iva"] [email "iva@gym.test"]]
   [record [id "st"] [identitySubject "idp:st"] [roles [list STAFF]] [name "Desk"] [email "desk@gym.test"]]]]
 [seed ClassSession [rows
   [record [id "c1"] [title "Morning yoga"] [kind YOGA] [startsAt "2026-10-06T07:00:00Z"]
     [duration 60] [capacity 16] [instructor "ins"]]
   [record [id "c2"] [title "Spin 45"] [kind SPIN] [startsAt "2026-10-06T18:00:00Z"]
-    [duration 45] [capacity 20] [instructor "ins"]]]]
+    [duration 45] [capacity 20] [instructor "ins"]]
+  [record [id "c3"] [title "Strength 101"] [kind STRENGTH] [startsAt "2026-10-07T12:00:00Z"]
+    [duration 50] [capacity 12] [instructor "ins"]]
+  [record [id "c4"] [title "Evening yoga"] [kind YOGA] [startsAt "2026-10-07T19:00:00Z"]
+    [duration 75] [capacity 16] [instructor "ins"]]
+  [record [id "c5"] [title "Hill spin"] [kind SPIN] [startsAt "2026-10-08T07:30:00Z"]
+    [duration 45] [capacity 18] [instructor "ins"]]]]
+[seed Membership [rows
+  [record [id "m1"] [member "u1"] [plan "p2"] [status ACTIVE] [startedAt "2026-01-02T00:00:00Z"]]
+  [record [id "m2"] [member "u2"] [plan "p1"] [status ACTIVE] [startedAt "2026-09-01T00:00:00Z"]]
+  [record [id "m3"] [member "u3"] [plan "p4"] [status FROZEN] [startedAt "2026-08-01T00:00:00Z"]]
+  [record [id "m4"] [member "u1"] [plan "p3"] [status CANCELLED] [startedAt "2025-12-01T00:00:00Z"]]
+  [record [id "m5"] [member "u2"] [plan "p5"] [status ACTIVE] [startedAt "2026-10-01T00:00:00Z"]]]]
+[seed Booking [rows
+  [record [id "b1"] [member "u1"] [session "c1"] [createdAt "2026-10-05T18:00:00Z"]]
+  [record [id "b2"] [member "u2"] [session "c2"] [createdAt "2026-10-05T18:05:00Z"]]
+  [record [id "b3"] [member "u3"] [session "c3"] [createdAt "2026-10-05T18:10:00Z"]]
+  [record [id "b4"] [member "u1"] [session "c4"] [createdAt "2026-10-05T18:15:00Z"]]
+  [record [id "b5"] [member "u2"] [session "c5"] [createdAt "2026-10-05T18:20:00Z"]]]]
+[seed CheckIn [rows
+  [record [id "k1"] [member "u1"] [at "2026-10-01T07:05:00Z"]]
+  [record [id "k2"] [member "u2"] [at "2026-10-01T18:02:00Z"]]
+  [record [id "k3"] [member "u3"] [at "2026-10-02T12:01:00Z"]]
+  [record [id "k4"] [member "u1"] [at "2026-10-03T07:10:00Z"]]
+  [record [id "k5"] [member "u2"] [at "2026-10-04T18:00:00Z"]]]]
 
 [auth
   [user User

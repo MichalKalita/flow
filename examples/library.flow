@@ -55,14 +55,34 @@
 
 [seed Work [rows
   [record [id "w1"] [title "Babička"] [creator "Božena Němcová"] [year 1855]]
-  [record [id "w2"] [title "The Dispossessed"] [creator "Ursula K. Le Guin"] [year 1974]]]]
+  [record [id "w2"] [title "The Dispossessed"] [creator "Ursula K. Le Guin"] [year 1974]]
+  [record [id "w3"] [title "R.U.R."] [creator "Karel Čapek"] [year 1920]]
+  [record [id "w4"] [title "The Trial"] [creator "Franz Kafka"] [year 1925]]
+  [record [id "w5"] [title "Kindred"] [creator "Octavia E. Butler"] [year 1979]]]]
 [seed Copy [rows
-  [record [id "c1"] [work "w1"] [barcode "LIB-0001"] [status AVAILABLE]]
+  [record [id "c1"] [work "w1"] [barcode "LIB-0001"] [status LOANED]]
   [record [id "c2"] [work "w1"] [barcode "LIB-0002"] [status AVAILABLE]]
-  [record [id "c3"] [work "w2"] [barcode "LIB-0100"] [status AVAILABLE]]]]
+  [record [id "c3"] [work "w2"] [barcode "LIB-0100"] [status LOANED]]
+  [record [id "c4"] [work "w3"] [barcode "LIB-0200"] [status AVAILABLE]]
+  [record [id "c5"] [work "w4"] [barcode "LIB-0300"] [status REPAIR]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [cardNumber "CARD-1"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "David Miller"] [cardNumber "CARD-2"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora Silva"] [cardNumber "CARD-3"]]
+  [record [id "u4"] [identitySubject "idp:u4"] [roles [list]] [name "Omar Haddad"] [cardNumber "CARD-4"]]
   [record [id "lib"] [identitySubject "idp:lib"] [roles [list LIBRARIAN]] [name "Librarian"] [cardNumber "STAFF"]]]]
+[seed Loan [rows
+  [record [id "ln1"] [patron "u1"] [copy "c1"] [days 14] [status ACTIVE] [borrowedAt "2026-09-28T10:00:00Z"] [dueAt "2026-10-12T10:00:00Z"]]
+  [record [id "ln2"] [patron "u2"] [copy "c3"] [days 21] [status ACTIVE] [borrowedAt "2026-09-20T11:00:00Z"] [dueAt "2026-10-11T11:00:00Z"]]
+  [record [id "ln3"] [patron "u3"] [copy "c4"] [days 7] [status RETURNED] [borrowedAt "2026-09-01T09:00:00Z"] [dueAt "2026-09-08T09:00:00Z"]]
+  [record [id "ln4"] [patron "u4"] [copy "c2"] [days 14] [status OVERDUE] [borrowedAt "2026-09-01T12:00:00Z"] [dueAt "2026-09-15T12:00:00Z"]]
+  [record [id "ln5"] [patron "u1"] [copy "c5"] [days 14] [status RETURNED] [borrowedAt "2026-08-10T10:00:00Z"] [dueAt "2026-08-24T10:00:00Z"]]]]
+[seed Hold [rows
+  [record [id "h1"] [patron "u3"] [work "w2"] [status WAITING] [createdAt "2026-09-30T08:00:00Z"]]
+  [record [id "h2"] [patron "u4"] [work "w1"] [status READY] [createdAt "2026-09-29T09:00:00Z"]]
+  [record [id "h3"] [patron "u1"] [work "w5"] [status WAITING] [createdAt "2026-10-01T10:00:00Z"]]
+  [record [id "h4"] [patron "u2"] [work "w4"] [status CANCELLED] [createdAt "2026-09-12T11:00:00Z"]]
+  [record [id "h5"] [patron "u3"] [work "w3"] [status READY] [createdAt "2026-10-02T12:00:00Z"]]]]
 
 [auth
   [user User

@@ -56,13 +56,44 @@
 
 [seed Project [rows
   [record [id "p1"] [key "FLOW"] [name "Flow runtime"]]
-  [record [id "p2"] [key "ADMIN"] [name "Admin console"]]]]
+  [record [id "p2"] [key "ADMIN"] [name "Admin console"]]
+  [record [id "p3"] [key "DOCS"] [name "Language docs"]]
+  [record [id "p4"] [key "MQTT"] [name "Device streams"]]
+  [record [id "p5"] [key "SITE"] [name "Public website"]]]]
 [seed Label [rows
   [record [id "l1"] [project "p1"] [name "runtime"]]
-  [record [id "l2"] [project "p1"] [name "permissions"]]]]
+  [record [id "l2"] [project "p1"] [name "permissions"]]
+  [record [id "l3"] [project "p2"] [name "dashboard"]]
+  [record [id "l4"] [project "p3"] [name "syntax"]]
+  [record [id "l5"] [project "p4"] [name "mqtt"]]]]
 [seed User [rows
   [record [id "u1"] [identitySubject "idp:u1"] [roles [list]] [name "Petra"] [email "petra@example.test"]]
+  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]] [name "David"] [email "david@example.test"]]
+  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]] [name "Nora"] [email "nora@example.test"]]
+  [record [id "u4"] [identitySubject "idp:u4"] [roles [list]] [name "Omar"] [email "omar@example.test"]]
   [record [id "m1"] [identitySubject "idp:m1"] [roles [list MAINTAINER]] [name "Maintainer"] [email "ops@example.test"]]]]
+[seed Ticket [rows
+  [record [id "t1"] [project "p1"] [reporter "u1"] [assignee "m1"] [title "Bound seed history"]
+    [body "Keep example seeds small and finite."] [kind TASK] [status IN_PROGRESS] [priority MEDIUM]
+    [points 3] [createdAt "2026-09-20T10:00:00Z"]]
+  [record [id "t2"] [project "p1"] [reporter "u2"] [title "Permission cycle on likes"]
+    [body "READ of Like should not recurse forever."] [kind BUG] [status OPEN] [priority HIGH]
+    [points 5] [createdAt "2026-09-22T11:00:00Z"]]
+  [record [id "t3"] [project "p2"] [reporter "u3"] [assignee "u1"] [title "Operations table empty state"]
+    [body "Show a sentence when no queries exist."] [kind FEATURE] [status REVIEW] [priority LOW]
+    [points 2] [createdAt "2026-09-25T09:00:00Z"]]
+  [record [id "t4"] [project "p3"] [reporter "u4"] [title "Document seed rows"]
+    [body "LANGUAGE.md should mention example feeds."] [kind TASK] [status DONE] [priority LOW]
+    [points 1] [createdAt "2026-09-10T08:00:00Z"]]
+  [record [id "t5"] [project "p4"] [reporter "u1"] [assignee "u2"] [title "QoS 1 retry window"]
+    [body "PUBLISH retry must stay inside the transaction."] [kind BUG] [status OPEN] [priority HIGH]
+    [points 8] [createdAt "2026-10-01T13:00:00Z"]]]]
+[seed Comment [rows
+  [record [id "c1"] [ticket "t1"] [author "m1"] [body "Five rows per entity is enough."] [createdAt "2026-09-20T12:00:00Z"]]
+  [record [id "c2"] [ticket "t2"] [author "u1"] [body "Reproduced with a self-like."] [createdAt "2026-09-22T15:00:00Z"]]
+  [record [id "c3"] [ticket "t3"] [author "u3"] [body "Copy is in the mock."] [createdAt "2026-09-26T08:00:00Z"]]
+  [record [id "c4"] [ticket "t4"] [author "u4"] [body "Merged the paragraph."] [createdAt "2026-09-11T09:00:00Z"]]
+  [record [id "c5"] [ticket "t5"] [author "u2"] [body "Need a failing test first."] [createdAt "2026-10-01T16:00:00Z"]]]]
 
 [auth
   [user User
