@@ -12,8 +12,8 @@ other sample projects. JWTs are HS256 tokens for the seeded identities
 The public HTTP router admits at least 16 in-flight application requests and
 scales with CPU and RAM. SQLite work is serialized per project. The `traffic`
 profile stays at 8 VUs with think time. `stress` ramps past a small admission
-cap so some requests return 503 `overloaded`. `breakpoint.js` raises arrival
-rate until errors hit 1%, p50 exceeds 250 ms, or p95 exceeds 1 s, then aborts.
+cap so some requests return 503 `overloaded`. `breakpoint.js` ramps arrival
+rate past HTTP admission and holds high load so the host stays saturated.
 
 ## Prerequisites
 
@@ -67,18 +67,19 @@ Stress (ramps to 24 VUs; 503s are expected):
 k6 run -e PROFILE=stress ./k6/traffic.js
 ```
 
-Breakpoint (one HTTP call per iteration, ramp until an SLO trips):
+Breakpoint (one HTTP call per iteration, ramp until the host is saturated):
 
 ```sh
 k6 run ./k6/breakpoint.js
 ./k6/run.sh breakpoint.js
 ```
 
-It stops at the first of: HTTP error rate ≥ 1%, p50 ≥ 250 ms, p95 ≥ 1 s.
-Sold-out `POST /demo/api/orders` (400) does not count as an HTTP error.
-If every stage finishes, the host stayed inside those limits up to the last
-stage (20 000 requests/s). Error rate usually trips first once arrival outruns
-HTTP admission (`overloaded` 503).
+Stages: 200 → 1 000 → 5 000 → 15 000 → 40 000 requests/s over ~2.5 minutes,
+up to 2048 VUs. The run does not abort on 503 `overloaded` or latency; it
+finishes every stage so admitted work keeps hitting SQLite. Sold-out
+`POST /demo/api/orders` (400) does not count as an HTTP error. Most requests
+above the admission cap return 503. Watch `http_overloaded`, `http_req_failed`,
+and duration percentiles for how hard the host is failing.
 
 Override the target and signing key:
 

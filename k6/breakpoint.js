@@ -42,27 +42,18 @@ export const options = {
   scenarios: {
     breakpoint: {
       executor: "ramping-arrival-rate",
-      startRate: 10,
+      startRate: 50,
       timeUnit: "1s",
-      preAllocatedVUs: 32,
-      maxVUs: 256,
+      preAllocatedVUs: 128,
+      maxVUs: 2048,
       stages: [
-        { duration: "20s", target: 100 },
-        { duration: "20s", target: 500 },
-        { duration: "20s", target: 2000 },
-        { duration: "20s", target: 8000 },
-        { duration: "20s", target: 20000 },
+        { duration: "15s", target: 200 },
+        { duration: "20s", target: 1000 },
+        { duration: "30s", target: 5000 },
+        { duration: "45s", target: 15000 },
+        { duration: "45s", target: 40000 },
       ],
     },
-  },
-  thresholds: {
-    http_req_failed: [
-      { threshold: "rate<0.01", abortOnFail: true, delayAbortEval: "10s" },
-    ],
-    http_req_duration: [
-      { threshold: "p(50)<250", abortOnFail: true, delayAbortEval: "10s" },
-      { threshold: "p(95)<1000", abortOnFail: true, delayAbortEval: "10s" },
-    ],
   },
 };
 
