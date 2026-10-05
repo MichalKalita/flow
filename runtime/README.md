@@ -93,13 +93,26 @@ ssh -L 9090:127.0.0.1:9090 user@server
 
 Open `http://127.0.0.1:9090` and enter the token. The token is kept only in the
 page's memory. The public application listener does not expose admin APIs.
-The dashboard lists HTTP endpoints and WebSocket subscriptions, call counts,
-error counts, mean latency, approximate p50/p95/p99, minute history, recent logs,
-and paginated audit records. The HTTP console calls local declared endpoints
-using the application's own credentials and permissions. Mutations from the
-console change production data and are audited. WebSocket latency measures the
-HTTP upgrade, not the lifetime of a subscription. Unmatched routes and overload
-rejections use fixed metric labels to avoid unbounded cardinality.
+The Preact control plane has a left navigation menu with Overview, Traffic &
+latency, Streaming, Runtime & storage, Log explorer, Mutation audit, HTTP console,
+and Access tokens. Interactive SVG charts show request volume, errors, latency
+percentiles, event throughput, connection counts, process memory and CPU. Select
+15 minutes, one hour or six hours and control automatic refresh.
+
+Endpoint inventory links directly to filtered logs and the HTTP console.
+The console calls local declared endpoints with normal application credentials
+and permissions; mutations change production data and are audited. The token
+issuer signs HS256 application JWTs for existing identities, using configured
+adapter issuer, audience and key. TTL is limited to 60 seconds through 24 hours.
+Signing keys never leave the server and credentials stay in page memory.
+Possession of the admin token allows issuing application credentials, so protect
+it accordingly. Tokens still have the selected identity's normal permissions.
+
+WebSocket latency measures the HTTP upgrade, not subscription lifetime.
+Unmatched routes and overload rejections use fixed metric labels to bound
+cardinality. Connection and subscription gauges release on session exit.
+MQTT delivery counters measure successful socket writes, not broker acknowledgments.
+Event and automation counters advance only after the enclosing transaction commits.
 
 ### Application logs
 
@@ -111,6 +124,12 @@ transaction execution and commit/rollback; nested read/apply spans give more
 specific timings. Request IDs are returned in `X-Request-ID`. Logs exclude
 request bodies, credentials and plugin arguments. The dashboard retains the
 last 200 events in memory; older entries remain in rotating disk files.
+Log explorer filters by text, kind, level, endpoint, status and time, and pages
+back through archives. Each query scans at most 4 MiB and returns at most 200 rows;
+a continuation cursor resumes bounded scans. Archive rotation preserves cursors
+until the underlying file is removed. Details show request IDs for correlation.
+Audit filters entity, action and transport, with before/after snapshots decoded
+to their logical JSON values, including records created by older versions.
 
 A single background writer uses a bounded 512-event queue and a 64 KiB write
 buffer, flushed every second. At 8 MiB, the log rotates through three archives
@@ -125,7 +144,12 @@ not keep individual request samples. p50/p95/p99 are upper bucket boundaries,
 not exact percentiles; a percentile above 60 seconds is shown as `>60000`.
 Counts and histograms are cumulative across restarts. The chart retains up to
 360 one-minute aggregates per endpoint (six hours), with count, errors and mean
-latency. HTTP 4xx and 5xx responses count as errors.
+latency and histogram buckets. Charts aggregate histogram counts across endpoints
+rather than averaging percentiles. HTTP 4xx and 5xx responses count as errors.
+I/O and plugin spans have separate bounded latency metrics. Streaming counters
+are cumulative, with six hours of minute history and 60 seconds of throughput
+history. Active connection gauges reset on restart. A five-second sampler records
+RSS and computes process CPU percentage from cumulative CPU time.
 
 The writer atomically replaces `metrics.json` every 30 seconds and flushes it
 on normal Ctrl-C shutdown. An abrupt termination can lose up to 30 seconds of
@@ -174,8 +198,18 @@ cargo fmt
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-npx prettier@3.6.2 --write src/admin.html
-npx prettier@3.6.2 --check src/admin.html
+cd ../admin-ui
+bun install --frozen-lockfile
+bun run format
+bun run check
+bun test src
+bun run build
+bunx playwright install chromium
+bun run test:e2e
 ```
 
-The HTML includes its CSS and JavaScript and has no third-party browser assets.
+The frontend ships as small embedded HTML, CSS and JS assets with no CDN, chart
+framework or frontend server. Bun, Tailwind and Playwright are development tools;
+production needs only the Rust executable. Commit regenerated `src/admin-assets/`
+alongside frontend source changes. E2E tests start the real runtime on isolated
+ports and a temporary database; they never use the project's `.env` or production data.

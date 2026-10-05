@@ -5,3 +5,7 @@ runtime/data/
 # Local credentials and generated runtime state.
 /.env
 /data/
+/admin-ui/node_modules/
+
+admin-ui/test-results/
+admin-ui/playwright-report/
