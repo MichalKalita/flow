@@ -2,6 +2,22 @@
 
 Minimalistický deklarativní runtime v Rustu: Flow soubor → SQLite + HTTP/MQTT/WebSocket + centrální permissions.
 
+Run from the repository root using local configuration:
+
+```sh
+./start.sh
+```
+
+If `.env` is missing, copy `.env.example` to `.env` and fill in `FLOW_ADMIN_TOKEN`
+with a random secret of at least 32 bytes (`openssl rand -hex 32`). The script
+loads `.env`, creates the data directories, and runs a release build with one
+build job. Relative configuration paths are resolved from the repository root.
+Application HTTP defaults to `127.0.0.1:8080`, MQTT to `127.0.0.1:1883`, and the
+admin dashboard to `127.0.0.1:9090`. The local `.env` and generated `data/` are
+excluded from Git. Credentials in the example are for development.
+
+Direct Cargo invocation:
+
 ```sh
 cd runtime
 cargo run -- --check application.flow
