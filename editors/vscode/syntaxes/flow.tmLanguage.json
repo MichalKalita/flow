@@ -1,0 +1,144 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Flow",
+  "scopeName": "source.flow",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#list" },
+    { "include": "#atom" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.flow",
+      "match": "#.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.flow",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.flow",
+          "match": "\\\\(?:[\"\\\\/bfnrt]|u[0-9A-Fa-f]{4})"
+        }
+      ]
+    },
+    "number": {
+      "name": "constant.numeric.flow",
+      "match": "[+-]?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+    },
+    "list": {
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.brackets.begin.flow" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.brackets.end.flow" }
+      },
+      "patterns": [
+        { "include": "#head-declaration" },
+        { "include": "#head-type" },
+        { "include": "#head-expression" },
+        { "include": "#head-clause" },
+        { "include": "#head-action" },
+        { "include": "#comment" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#head-other" },
+        { "include": "#list" },
+        { "include": "#atom" }
+      ]
+    },
+    "head-declaration": {
+      "match": "\\G\\s*(type|enum|entity|stream|seed|auth|transport|permissions|query|mutate|plugin|on)(?=$|[\\s\\[\\]#\"])",
+      "captures": {
+        "1": { "name": "keyword.control.declaration.flow" }
+      }
+    },
+    "head-type": {
+      "match": "\\G\\s*(id|integer|decimal|record|list|optional|image|range|scale|min|max|maxBytes|maxWidth|maxHeight|unique|inverse|field|rows)(?=$|[\\s\\[\\]#\"])",
+      "captures": {
+        "1": { "name": "storage.type.flow" }
+      }
+    },
+    "head-expression": {
+      "match": "\\G\\s*(eq|ne|gt|ge|lt|le|add|sub|mul|div|pow|and|or|not|contains|can|as|set|create|publish|last|first|since|creates|invoke|only|any|all|where|flatMap|sum|order|map|groupSum|new|entities|single|count|ago|delete|live|concat)(?=$|[\\s\\[\\]#\"])",
+      "captures": {
+        "1": { "name": "support.function.flow" }
+      }
+    },
+    "head-clause": {
+      "match": "\\G\\s*(input|output|result|atomic|default|actor|when|history|duration|maxMessages|receivedAt|status|source|includes|parent|pure|transactional|jwt|issuer|audience|apiKey|certificate|http|mqtt|websocket|anonymous|user|service|device|deviceKey)(?=$|[\\s\\[\\]#\"])",
+      "captures": {
+        "1": { "name": "keyword.other.clause.flow" }
+      }
+    },
+    "head-action": {
+      "match": "\\G\\s*(READ|CREATE|UPDATE|DELETE|INVOKE|GET|POST|PUT|PATCH)(?=$|[\\s\\[\\]#\"])",
+      "captures": {
+        "1": { "name": "keyword.other.action.flow" }
+      }
+    },
+    "head-other": {
+      "match": "\\G\\s*([^\\s\\[\\]#\"]+)",
+      "captures": {
+        "1": { "name": "entity.other.attribute-name.flow" }
+      }
+    },
+    "atom": {
+      "patterns": [
+        { "include": "#variable" },
+        { "include": "#boolean" },
+        { "include": "#wildcard" },
+        { "include": "#builtin-type" },
+        { "include": "#special" },
+        { "include": "#member" },
+        { "include": "#enum" },
+        { "include": "#named-type" },
+        { "include": "#symbol" }
+      ]
+    },
+    "variable": {
+      "name": "variable.parameter.flow",
+      "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
+    },
+    "boolean": {
+      "name": "constant.language.boolean.flow",
+      "match": "\\b(?:true|false)\\b"
+    },
+    "wildcard": {
+      "name": "constant.language.wildcard.flow",
+      "match": "\\*(?=$|[\\s\\[\\]#\"])"
+    },
+    "special": {
+      "name": "variable.language.flow",
+      "match": "\\b(?:actor|target|before|after|changed|transaction|request|event|args|claims|credential)\\b"
+    },
+    "builtin-type": {
+      "name": "support.type.builtin.flow",
+      "match": "\\b(?:String|Bool|DateTime)\\b"
+    },
+    "enum": {
+      "name": "constant.other.enum.flow",
+      "match": "\\b[A-Z][A-Z0-9_]*\\b"
+    },
+    "named-type": {
+      "name": "entity.name.type.flow",
+      "match": "\\b[A-Z][A-Za-z0-9]*\\b"
+    },
+    "member": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)((?:\\.[A-Za-z_][A-Za-z0-9_]*)+)",
+      "captures": {
+        "1": { "name": "variable.other.object.flow" },
+        "2": { "name": "variable.other.property.flow" }
+      }
+    },
+    "symbol": {
+      "name": "variable.other.flow",
+      "match": "[^\\s\\[\\]#\"]+"
+    }
+  }
+}
