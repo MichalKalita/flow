@@ -31,28 +31,45 @@ The JWT secret must match `FLOW_JWT_SECRET`. The development default is
 
 ## Run
 
+k6 resolves the script path from the current working directory. `k6/traffic.js`
+only exists at the repository root; from inside this folder that path is a
+missing module and k6 prints `moduleSpecifier "k6/traffic.js" couldn't be found`.
+
 From the repository root:
 
 ```sh
-k6 run k6/traffic.js
+k6 run ./k6/traffic.js
+```
+
+From this folder:
+
+```sh
+k6 run traffic.js
+```
+
+From any directory, using the wrapper (extra flags are passed to k6):
+
+```sh
+./k6/run.sh
+./k6/run.sh -e PROFILE=smoke
 ```
 
 Smoke (1 VU, 20 seconds):
 
 ```sh
-k6 run -e PROFILE=smoke k6/traffic.js
+k6 run -e PROFILE=smoke ./k6/traffic.js
 ```
 
 Stress (ramps to 24 VUs; 503s are expected):
 
 ```sh
-k6 run -e PROFILE=stress k6/traffic.js
+k6 run -e PROFILE=stress ./k6/traffic.js
 ```
 
 Override the target and signing key:
 
 ```sh
-k6 run -e BASE_URL=http://127.0.0.1:8080 -e JWT_SECRET='your-secret' k6/traffic.js
+k6 run -e BASE_URL=http://127.0.0.1:8080 -e JWT_SECRET='your-secret' ./k6/traffic.js
 ```
 
 ## What the mix does
@@ -76,5 +93,6 @@ Grouped URL tags keep path parameters out of metric cardinality
 
 ## Files
 
+- `run.sh` — `cd` to this folder and run `traffic.js`
 - `traffic.js` — profiles `smoke`, `traffic`, `stress`
 - `jwt.js` — HS256 helper matching the demo issuer and audience
