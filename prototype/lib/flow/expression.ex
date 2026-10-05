@@ -11,7 +11,16 @@ defmodule Flow.Expression do
       check(node)
       :ok
     rescue
-      error in Flow.ValidationError -> {:error, error}
+      error in Flow.ValidationError ->
+        {:error, error}
+
+      _error in [MatchError, CaseClauseError, KeyError] ->
+        {:error,
+         %Flow.ValidationError{
+           code: :invalid_expression,
+           message: "Malformed expression",
+           span: node.span
+         }}
     end
   end
 
@@ -24,6 +33,7 @@ defmodule Flow.Expression do
       field: Keyword.get(options, :field, &plain_field/2),
       can: Keyword.get(options, :can, fn _, _, _, _ -> false end),
       creates: Keyword.get(options, :creates, fn _, _ -> [] end),
+      updates: Keyword.get(options, :updates, fn _, _, _, _ -> false end),
       resolve: Keyword.get(options, :resolve, fn env, name -> Map.fetch!(env, name) end),
       extension:
         Keyword.get(options, :extension, fn _, _, _, _ ->
@@ -82,6 +92,24 @@ defmodule Flow.Expression do
           do: Syntax.fail(transaction, :invalid_expression, "creates requires transaction")
 
         Syntax.identifier(entity)
+
+      operator == "updates" and length(args) == 4 ->
+        [transaction, target, before, after_state] = args
+
+        unless Syntax.symbol(transaction) == "transaction",
+          do: Syntax.fail(transaction, :invalid_expression, "updates requires transaction")
+
+        check(target)
+
+        for {node, name} <- [{before, "before"}, {after_state, "after"}] do
+          {^name, fields} = Syntax.form(node)
+
+          Syntax.unique(fields, fn field ->
+            {key, [value]} = Syntax.form(field)
+            check(value)
+            key
+          end)
+        end
 
       operator == "record" ->
         Syntax.unique(args, fn field ->
@@ -180,6 +208,24 @@ defmodule Flow.Expression do
       {"creates", [_, entity]} ->
         context.creates.(Map.fetch!(env, "transaction"), Syntax.symbol(entity))
 
+      {"updates", [_, target, before, after_state]} ->
+        patterns =
+          Enum.map([before, after_state], fn pattern ->
+            {_, fields} = Syntax.form(pattern)
+
+            Map.new(fields, fn field ->
+              {name, [value]} = Syntax.form(field)
+              {name, eval(value, env, context)}
+            end)
+          end)
+
+        context.updates.(
+          Map.fetch!(env, "transaction"),
+          eval(target, env, context),
+          hd(patterns),
+          List.last(patterns)
+        ) == true
+
       {"can", [action, target]} ->
         context.can.(
           Map.fetch!(env, "actor"),
@@ -275,6 +321,7 @@ defmodule Flow.Expression do
   def equal?(a, b), do: a === b
 
   defp compare(%DateTime{} = a, %DateTime{} = b), do: DateTime.compare(a, b)
+  defp compare(%ID{entity: entity, value: a}, %ID{entity: entity, value: b}), do: compare(a, b)
 
   defp compare(a, b) when is_binary(a) and is_binary(b) do
     cond do

@@ -174,6 +174,26 @@ defmodule Flow.Transaction do
 
   def random_id, do: :crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false)
 
+  def updates?(session, %Version{reference: reference}, before, after_state),
+    do: updates?(session, reference, before, after_state)
+
+  def updates?(session, reference, before, after_state) do
+    case change(session, reference) do
+      %{action: "UPDATE"} ->
+        Enum.all?([{:before, before}, {:after, after_state}], fn {state, fields} ->
+          Enum.all?(fields, fn {field, value} ->
+            Expression.equal?(
+              Access.raw_field(session, %Version{reference: reference, state: state}, field),
+              value
+            )
+          end)
+        end)
+
+      _ ->
+        false
+    end
+  end
+
   defp check_references!(session, change) do
     Enum.each(change.after, fn {_, value} -> check_value!(session, value) end)
   end

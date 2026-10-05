@@ -77,6 +77,7 @@ defmodule Flow.Runtime do
            program: program,
            store: store,
            handlers: handlers,
+           context_provider: Keyword.get(options, :context, fn _, _ -> %{} end),
            queue_key: Keyword.get(options, :queue_key, :crypto.strong_rand_bytes(32))
          }}
       rescue
@@ -125,7 +126,14 @@ defmodule Flow.Runtime do
         Store.transaction(state.store, fn db ->
           principal = authenticate!(state, db, transport, credential)
           inputs = inputs!(state.program.schema, operation, input)
-          context = %{"now" => DateTime.utc_now()}
+
+          context =
+            Flow.Context.build!(
+              state.program.schema,
+              principal,
+              transport,
+              state.context_provider
+            )
 
           Access.with_session(db, state.program.permissions, principal, context, fn session ->
             :ets.insert(
@@ -134,7 +142,18 @@ defmodule Flow.Runtime do
                %{
                  "transport" => transport,
                  "adapter" => if(credential, do: elem(credential, 0)),
-                 "secret" => if(credential, do: elem(credential, 1))
+                 "secret" =>
+                   if(
+                     credential &&
+                       state.program.auth.adapters[elem(credential, 0)].kind != :certificate,
+                     do: elem(credential, 1)
+                   ),
+                 "certificate_binding" =>
+                   if(
+                     Map.get(principal, :binding) &&
+                       state.program.auth.adapters[principal.adapter].kind == :certificate,
+                     do: principal.binding
+                   )
                }}
             )
 

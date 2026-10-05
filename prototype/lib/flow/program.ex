@@ -15,6 +15,7 @@ defmodule Flow.Program do
           )
 
         plugins = plugins!(schema, names)
+        Flow.PolicyChecker.validate!(schema, permissions, plugins)
 
         operations =
           Map.new(schema.operations, fn {name, node} ->

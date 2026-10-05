@@ -149,6 +149,7 @@ defmodule Flow.Access do
         constants: constants,
         field: &raw_field(session, &1, &2),
         creates: &Transaction.creates/2,
+        updates: &Transaction.updates?/4,
         can: fn actor, action, target, _counter ->
           type = target_type(actor)
 

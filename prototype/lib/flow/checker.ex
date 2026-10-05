@@ -29,6 +29,14 @@ defmodule Flow.Checker do
   end
 
   def compatible?(_schema, type, type), do: true
+  def compatible?(_schema, :any_actor, _), do: true
+  def compatible?(_schema, _, :any_actor), do: true
+
+  def compatible?(schema, {:union, actual}, expected),
+    do: Enum.all?(actual, &compatible?(schema, &1, expected))
+
+  def compatible?(schema, actual, {:union, expected}),
+    do: Enum.any?(expected, &compatible?(schema, actual, &1))
 
   def compatible?(schema, {:optional, actual}, {:optional, expected}),
     do: compatible?(schema, actual, expected)
@@ -87,6 +95,12 @@ defmodule Flow.Checker do
 
   def field!(context, type, field, node) do
     case type do
+      {:optional, inner} ->
+        field!(context, inner, field, node)
+
+      {:union, types} ->
+        {:union, Enum.map(types, &field!(context, &1, field, node)) |> Enum.uniq()}
+
       {:list, inner, min, max} ->
         {:list, field!(context, inner, field, node), min, max}
 
@@ -132,9 +146,11 @@ defmodule Flow.Checker do
             :error ->
               case context.bindings[root] do
                 nil ->
-                  if Enum.any?(context.schema.types, fn {_, type} ->
-                       match?({:enum, _}, type) and value in elem(type, 1)
-                     end),
+                  if (Map.get(context, :kind) == "policy" and
+                        value in ~w(READ USE CREATE UPDATE DELETE INVOKE)) or
+                       Enum.any?(context.schema.types, fn {_, type} ->
+                         match?({:enum, _}, type) and value in elem(type, 1)
+                       end),
                      do: {:enum_literal, value},
                      else: Syntax.fail(node, :unknown_binding, "Unknown binding #{root}")
 
@@ -156,6 +172,65 @@ defmodule Flow.Checker do
     infer = &infer(&1, context)
 
     case {operator, args} do
+      {"can", [action, target]} ->
+        policy!(context, node)
+        action!(action)
+        reference!(schema, infer.(target), target)
+        {:named, "Bool"}
+
+      {"canAs", [actor, action, target]} ->
+        policy!(context, node)
+        action!(action)
+        reference!(schema, infer.(actor), actor)
+        reference!(schema, infer.(target), target)
+        {:named, "Bool"}
+
+      {"only", [changed | fields]} when fields != [] ->
+        policy!(context, node)
+
+        unless Syntax.symbol(changed) == "changed" and Map.has_key?(context.env, "changed"),
+          do: Syntax.fail(node, :invalid_expression, "only requires change state")
+
+        target = Map.fetch!(context.env, "target")
+        Enum.each(fields, &field!(context, target, Syntax.identifier(&1), &1))
+        {:named, "Bool"}
+
+      {"creates", [transaction, entity]} ->
+        policy!(context, node)
+
+        unless Syntax.symbol(transaction) == "transaction" and
+                 Map.has_key?(context.env, "transaction"),
+               do: Syntax.fail(node, :invalid_expression, "creates requires transaction")
+
+        entity = Syntax.identifier(entity)
+
+        unless schema.entities[entity] || schema.streams[entity],
+          do: Syntax.fail(node, :unknown_type, "Unknown created entity")
+
+        {:list, {:named, entity}, 0, nil}
+
+      {"updates", [transaction, reference, before, after_state]} ->
+        policy!(context, node)
+
+        unless Syntax.symbol(transaction) == "transaction" and
+                 Map.has_key?(context.env, "transaction"),
+               do: Syntax.fail(node, :invalid_expression, "updates requires transaction")
+
+        type = infer.(reference)
+        reference!(schema, type, reference)
+
+        for {pattern, name} <- [{before, "before"}, {after_state, "after"}] do
+          {^name, fields} = Syntax.form(pattern)
+
+          fields
+          |> bindings()
+          |> Enum.each(fn {field, value} ->
+            compatible!(schema, infer.(value), field!(context, type, field, pattern), value)
+          end)
+        end
+
+        {:named, "Bool"}
+
       {"record", fields} ->
         fields = bindings(fields)
         {:shape, Map.new(fields, fn {name, value} -> {name, infer.(value)} end)}
@@ -214,6 +289,15 @@ defmodule Flow.Checker do
       {op, [a, b]} when op in ~w(eq ne gt ge lt le) ->
         actual = infer.(a)
         expected = infer.(b)
+
+        if op in ~w(gt ge lt le) and
+             not (comparable?(schema, actual) and comparable?(schema, expected)),
+           do:
+             Syntax.fail(
+               node,
+               :type_mismatch,
+               "Ordering requires numbers, datetimes, strings or branded IDs"
+             )
 
         unless compatible?(schema, actual, expected) or compatible?(schema, expected, actual) or
                  (numeric?(schema, actual) and numeric?(schema, expected)),
@@ -466,13 +550,51 @@ defmodule Flow.Checker do
 
   defp effect!(context, node),
     do:
-      if(context.kind == "query",
+      if(context.kind in ["query", "policy"],
         do: Syntax.fail(node, :query_effect, "Queries cannot mutate data or invoke effects")
       )
+
+  defp policy!(context, node),
+    do:
+      unless(context.kind == "policy",
+        do:
+          Syntax.fail(
+            node,
+            :invalid_expression,
+            "Permission operators are only valid in policies"
+          )
+      )
+
+  defp action!(node),
+    do:
+      unless(Syntax.symbol(node) in ~w(READ USE CREATE UPDATE DELETE INVOKE),
+        do: Syntax.fail(node, :unknown_action, "Unknown permission action")
+      )
+
+  defp reference!(schema, {:optional, type}, node), do: reference!(schema, type, node)
+
+  defp reference!(schema, {:union, types}, node),
+    do: Enum.each(types, &reference!(schema, &1, node))
+
+  defp reference!(schema, {:named, name}, node) do
+    unless schema.entities[name] || schema.streams[name] ||
+             match?({:record, _}, schema.types[name]),
+           do: Syntax.fail(node, :type_mismatch, "Expected a protected reference")
+  end
+
+  defp reference!(_, _, node),
+    do: Syntax.fail(node, :type_mismatch, "Expected a protected reference")
 
   defp numeric?(_, :numeric), do: true
   defp numeric?(_, {:literal_number, _}), do: true
   defp numeric?(schema, type), do: match?({:number, _, _, _, _}, Schema.resolve(schema, type))
+
+  defp comparable?(schema, type),
+    do:
+      numeric?(schema, type) or
+        Schema.resolve(schema, type) in [{:named, "String"}, {:named, "DateTime"}] or
+        match?({:id, _}, Schema.resolve(schema, type))
+
   defp list!({:list, inner, min, max}, _), do: {inner, min, max}
   defp list!(_, node), do: Syntax.fail(node, :type_mismatch, "Expected list")
 

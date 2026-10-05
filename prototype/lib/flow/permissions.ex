@@ -28,7 +28,15 @@ defmodule Flow.Permissions do
 
       {:ok, %__MODULE__{grants: compiled, field_targets: fields}}
     rescue
-      error in Flow.ValidationError -> {:error, error}
+      error in Flow.ValidationError ->
+        {:error, error}
+
+      error in [MatchError, CaseClauseError, KeyError] ->
+        {:error,
+         %Flow.ValidationError{
+           code: :invalid_permission,
+           message: "Malformed permission: #{Exception.message(error)}"
+         }}
     end
   end
 

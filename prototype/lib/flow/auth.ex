@@ -60,10 +60,25 @@ defmodule Flow.Auth do
         {name, secret} when is_binary(name) ->
           unless name in aliases, do: invalid!()
           adapter = Map.fetch!(auth.adapters, name)
-          value = verify!(adapter, secret, options)
+          verified = verify!(adapter, secret, options)
+
+          {value, facts} =
+            case verified do
+              {:verified, value, facts} -> {value, facts}
+              value -> {value, %{}}
+            end
+
           identity = lookup.(adapter.entity, adapter.field, value)
           if identity == nil, do: invalid!()
-          {:ok, %{type: adapter.entity, identity: identity, adapter: name}}
+
+          {:ok,
+           %{
+             type: adapter.entity,
+             identity: identity,
+             adapter: name,
+             facts: facts,
+             binding: value
+           }}
 
         _ ->
           invalid!()
@@ -197,7 +212,7 @@ defmodule Flow.Auth do
       do: invalid!()
 
     unless is_binary(claims["sub"]) and byte_size(claims["sub"]) in 1..256, do: invalid!()
-    claims["sub"]
+    {:verified, claims["sub"], %{"claims" => claims}}
   end
 
   defp verify!(_, _, _), do: invalid!()
