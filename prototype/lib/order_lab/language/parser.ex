@@ -6,6 +6,7 @@ defmodule OrderLab.Language.Parser do
     program = %{
       types: %{},
       tables: %{},
+      seeds: [],
       mqtt: %{},
       websockets: [],
       endpoints: [],
@@ -143,19 +144,56 @@ defmodule OrderLab.Language.Parser do
 
         top(rest, %{program | mqtt: Map.put(program.mqtt, name, source)})
 
+      [{:word, "SEED", _, _}, {:word, name, _, _}, {:word, "WITH", _, _} | tokens] ->
+        value = expression!(tokens, line, program.file)
+        top(rest, %{program | seeds: program.seeds ++ [%{table: name, value: value}]})
+
       [{:word, "WEBSOCKET", _, _} | tokens] ->
         route = Enum.map_join(tokens, fn {_, value, _, _} -> to_string(value) end)
         {clauses, rest} = children(rest, line, program.file)
 
-        sources =
-          Enum.map(clauses, fn clause ->
+        {credentials, clauses} = inputs(clauses, program.file, [])
+
+        endpoint = %{
+          path: route,
+          sources: [],
+          policies: %{},
+          inputs: credentials,
+          authorization: {:literal, true},
+          file: program.file,
+          line: line.line
+        }
+
+        {endpoint, _} =
+          Enum.reduce(clauses, {endpoint, false}, fn clause, {endpoint, authorized} ->
             case clause.tokens do
-              [{:word, "SOURCE", _, _}, {:word, name, _, _}] -> name
-              _ -> error!("WebSocket declaration expects SOURCE name", clause, program.file)
+              [{:word, "AUTHORIZE", _, _} | tokens] ->
+                if authorized, do: error!("Duplicate WebSocket AUTHORIZE", clause, program.file)
+                {%{endpoint | authorization: expression!(tokens, clause, program.file)}, true}
+
+              [{:word, "SOURCE", _, _}, {:word, name, _, _} | tokens] ->
+                policy =
+                  case tokens do
+                    [] -> {:literal, true}
+                    [{:word, "WHERE", _, _} | tokens] -> expression!(tokens, clause, program.file)
+                    _ -> error!("Expected WHERE after WebSocket SOURCE", clause, program.file)
+                  end
+
+                {%{
+                   endpoint
+                   | sources: endpoint.sources ++ [name],
+                     policies: Map.put(endpoint.policies, name, policy)
+                 }, authorized}
+
+              _ ->
+                error!(
+                  "WebSocket expects INPUT, AUTHORIZE or SOURCE name WHERE expression",
+                  clause,
+                  program.file
+                )
             end
           end)
 
-        endpoint = %{path: route, sources: sources, file: program.file, line: line.line}
         top(rest, %{program | websockets: program.websockets ++ [endpoint]})
 
       [{:word, "HTTP", _, _}, {:word, method, _, _} | route_tokens] ->
@@ -175,6 +213,7 @@ defmodule OrderLab.Language.Parser do
                 "MQTT",
                 "ON",
                 "WEBSOCKET",
+                "SEED",
                 "TYPE",
                 "FILTER",
                 "TABLE"

@@ -23,8 +23,18 @@ defmodule OrderLab.Store do
 
   def websocket(path), do: GenServer.call(__MODULE__, {:websocket, path})
 
-  def subscription(source, params, pid, action, latest, keys),
-    do: GenServer.call(__MODULE__, {:subscription, source, params, pid, action, latest, keys})
+  def subscription(endpoint, credentials, source, params, pid, action, latest, keys),
+    do:
+      GenServer.call(
+        __MODULE__,
+        {:subscription, endpoint, credentials, source, params, pid, action, latest, keys}
+      )
+
+  def authenticate_websocket(endpoint, input),
+    do: GenServer.call(__MODULE__, {:ws_authenticate, endpoint, input})
+
+  def authorize_websocket(endpoint, credentials, source, params),
+    do: GenServer.call(__MODULE__, {:ws_authorize, endpoint, credentials, source, params})
 
   def file(id), do: GenServer.call(__MODULE__, {:file, id})
   def mqtt_retained, do: GenServer.call(__MODULE__, :mqtt_retained)
@@ -68,6 +78,7 @@ defmodule OrderLab.Store do
     """)
 
     exec!(db, """
+    CREATE TABLE IF NOT EXISTS flow_seed_keys(table_name TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(table_name,id));
     CREATE TABLE IF NOT EXISTS flow_records(table_name TEXT NOT NULL,id TEXT NOT NULL,value_json TEXT NOT NULL,PRIMARY KEY(table_name,id));
     CREATE TABLE IF NOT EXISTS flow_jobs(
       id TEXT PRIMARY KEY,order_id TEXT,request_id TEXT NOT NULL REFERENCES requests(id),operation TEXT NOT NULL,
@@ -99,13 +110,82 @@ defmodule OrderLab.Store do
       &write!(db, "INSERT OR IGNORE INTO users VALUES (?, ?, ?, ?)", &1)
     )
 
-    {:ok, %{db: db, steps: OrderLab.Workflow.compile!()}}
+    program = OrderLab.Workflow.compile!()
+    exec!(db, "BEGIN IMMEDIATE")
+
+    try do
+      host =
+        OrderLab.Language.Native.host(db, program, %{}, fn _, _, _ ->
+          raise("SEED cannot invoke plugins")
+        end)
+
+      Enum.each(program.seeds, fn seed ->
+        existing =
+          OrderLab.Language.Native.source(db, program, seed.table, now())
+          |> MapSet.new(& &1["id"])
+
+        Enum.each(seed.value, fn row ->
+          seeded =
+            query!(db, "SELECT id FROM flow_seed_keys WHERE table_name=? AND id=?", [
+              seed.table,
+              row["id"]
+            ])
+
+          if seeded == [] do
+            unless MapSet.member?(existing, row["id"]),
+              do: host.(:insert, %{table: seed.table, value: row})
+
+            write!(db, "INSERT INTO flow_seed_keys(table_name,id) VALUES (?,?)", [
+              seed.table,
+              row["id"]
+            ])
+          end
+        end)
+      end)
+
+      exec!(db, "COMMIT")
+    rescue
+      error ->
+        SQL.execute(db, "ROLLBACK")
+        reraise error, __STACKTRACE__
+    end
+
+    {:ok, %{db: db, steps: program}}
   end
 
   def handle_call({:websocket, path}, _, state),
     do: {:reply, Enum.find(state.steps.websockets, &(&1.path == path)), state}
 
-  def handle_call({:subscription, name, params, pid, action, latest, keys}, _, state) do
+  def handle_call({:ws_authenticate, endpoint, input}, _, state) do
+    result =
+      websocket_result(fn ->
+        OrderLab.WebSocketPolicy.authenticate!(state.db, state.steps, endpoint, input)
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:ws_authorize, endpoint, credentials, source, params}, _, state) do
+    result =
+      websocket_result(fn ->
+        OrderLab.WebSocketPolicy.subscription!(
+          state.db,
+          state.steps,
+          endpoint,
+          credentials,
+          source,
+          params
+        )
+      end)
+
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:subscription, endpoint, credentials, name, params, pid, action, latest, keys},
+        _,
+        state
+      ) do
     result =
       try do
         source = Map.fetch!(state.steps.mqtt, name)
@@ -117,6 +197,17 @@ defmodule OrderLab.Store do
           do: raise("Invalid topic parameter")
 
         key = {name, values}
+
+        if action == "subscribe",
+          do:
+            OrderLab.WebSocketPolicy.subscription!(
+              state.db,
+              state.steps,
+              endpoint,
+              credentials,
+              name,
+              params
+            )
 
         last =
           if latest and action == "subscribe" do
@@ -147,7 +238,8 @@ defmodule OrderLab.Store do
 
         {:ok, key, params, last}
       rescue
-        error -> {:error, Exception.message(error)}
+        e in OrderLab.Language.Failure -> {:error, e.code, e.message}
+        _ -> {:error, "invalid_subscription", "Invalid subscription parameters"}
       end
 
     {:reply, result, state}
@@ -508,6 +600,13 @@ defmodule OrderLab.Store do
       end
 
     {:reply, result, state}
+  end
+
+  defp websocket_result(fun) do
+    {:ok, fun.()}
+  rescue
+    e in OrderLab.Language.Failure -> {:error, e.code, e.message}
+    _ -> {:error, "invalid_input", "Invalid WebSocket input"}
   end
 
   defp execute_scenario(db, program, endpoint, input, request_id) do

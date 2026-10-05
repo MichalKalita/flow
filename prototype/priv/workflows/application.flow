@@ -118,6 +118,14 @@ INPUT product_id String
 photos = FROM Photos AS p WHERE p.product_id = :product_id
 RETURN {photos: photos}
 
+TABLE DeviceAccess = {id: String, user_id: UserID, token: String, device_id: DeviceID}
+SEED DeviceAccess WITH [
+    {id: "petra-mower1", user_id: "u1", token: "demo-petra", device_id: "mower1"},
+    {id: "david-mower2", user_id: "u2", token: "demo-david", device_id: "mower2"}
+]
+
 WEBSOCKET /ws
-    SOURCE DeviceStatus
-    SOURCE DevicePosition
+    INPUT token String
+    AUTHORIZE EXISTS access IN DeviceAccess WHERE access.token = :token AND EXISTS user IN Users WHERE user.id = access.user_id
+    SOURCE DeviceStatus WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
+    SOURCE DevicePosition WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id

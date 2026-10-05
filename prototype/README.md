@@ -50,7 +50,7 @@ curl -s http://127.0.0.1:4000/api/orders \
 
 `GET /api/devices/:device_id` vrací poslední MQTT stav a polohy za posledních pět minut. MQTT 3.1.1 server naslouchá na `127.0.0.1:1883` (`MQTT_PORT` mění port). Přijímá striktně typovaný JSON na `devices/:device_id/status` a `devices/:device_id/position`; poskytuje QoS 0/1, subscriptions a retained zprávy. `ON MQTT DeviceStatus` spouští deklarovaný scénář nízké baterie; jeho požadavky a výsledky jsou vidět v adminu.
 
-Admin → **Živá zařízení** otevírá WebSocket `/ws` a odebírá stav i polohu zadané sekačky. Odběr používá typ zdroje a parametry: `{"action":"subscribe","source":"DeviceStatus","params":{"device_id":"mower1"},"latest":true}`. Každý připojený odběratel dostává vlastní kopii validovaných zpráv. Odpojení ukončí odběry; historie se automaticky nedoplňuje.
+Admin → **Živá zařízení** otevírá WebSocket `/ws` a odebírá stav i polohu povolené sekačky. Nejprve pošlete `{"action":"authenticate","input":{"token":"demo-petra"}}`; Petra smí sledovat `mower1`, token `demo-david` smí sledovat `mower2`. Odběr používá typ zdroje a parametry: `{"action":"subscribe","source":"DeviceStatus","params":{"device_id":"mower1"},"latest":true}`. Každý připojený odběratel dostává vlastní kopii validovaných zpráv. Práva jsou deklarována ve stejném Flow souboru a ověřují se i před každou kopií zprávy. Odpojení ukončí odběry; historie se automaticky nedoplňuje.
 
 `POST /api/products/:product_id/photo` přijímá ověřený PNG/JPEG jako JSON/base64, zmenší jej a uloží spolu se záznamem v jedné transakci.
 

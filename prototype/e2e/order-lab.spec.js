@@ -85,17 +85,38 @@ async function mqttClient() {
     close(){socket.end(mqttPacket(0xE0));}
   };
 }
-async function wsClient() {
+async function wsClient(token='demo-petra') {
   const socket=new WebSocket('ws://127.0.0.1:4100/ws');
   const messages=[];const waits=[];
   socket.addEventListener('message',event=>{const data=JSON.parse(event.data);if(waits.length)waits.shift()(data);else messages.push(data);});
   await new Promise((resolve,reject)=>{socket.addEventListener('open',resolve,{once:true});socket.addEventListener('error',reject,{once:true});});
   const next=()=>new Promise((resolve,reject)=>{if(messages.length)return resolve(messages.shift());const timer=setTimeout(()=>reject(new Error('WebSocket message timeout')),3000);waits.push(value=>{clearTimeout(timer);resolve(value);});});
-  return {socket,next,send(value){socket.send(JSON.stringify(value));},close(){socket.close();}};
+  const client={socket,next,send(value){socket.send(JSON.stringify(value));},close(){socket.close();}};
+  if(token !== null){client.send({action:'authenticate',input:{token}});expect((await client.next()).type).toBe('authenticated');}
+  return client;
 }
 const pngFixture=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC','base64');
 const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fixture.png',...extra});
-const extraFlow = `
+const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
+const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
+const extraFlow = seedFixtures+`
+HTTP DELETE /api/test-device-access/:id
+INPUT id String
+TRANSACTION
+    DELETE FROM DeviceAccess AS access WHERE access.id = :id
+    COMMIT
+RETURN {deleted: true}
+
+HTTP POST /api/test-device-access
+INPUT id String
+INPUT user_id UserID
+INPUT token String
+INPUT device_id DeviceID
+TRANSACTION
+    grant = INSERT DeviceAccess WITH {id: :id, user_id: :user_id, token: :token, device_id: :device_id}
+    COMMIT
+RETURN grant
+
 TYPE Rating = Number WHERE value BETWEEN 1.0 AND 5.0
 TYPE Note = {id: String, text: String, rating: Rating, tags: List<String>}
 TABLE Notes = Note
@@ -488,6 +509,11 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
       'HTTP POST /bad\nINPUT file File\nCALL Image.resize WITH {image: :file, width: 2, height: 2}\nRETURN true',
       'HTTP POST /bad\nINPUT file File\nCALL Files.put WITH {file: :file}\nRETURN true',
       'WEBSOCKET /ws\n    SOURCE Missing',
+      'WEBSOCKET /ws\n    AUTHORIZE "yes"\n    SOURCE DeviceStatus',
+      'WEBSOCKET /ws\n    SOURCE DeviceStatus WHERE :device_id > 1',
+      'TABLE T = {id: String, rating: Int}\nSEED T WITH [{id: "x", rating: "bad"}]',
+      'TABLE T = {id: String}\nSEED T WITH [{id: "x"}]\nSEED T WITH [{id: "x"}]',
+
       'TYPE Random = String WHERE uuid("id") = value\nHTTP GET /bad\nRETURN true',
       'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP GET /bad\nrating: Rating = 7\nRETURN rating',
       'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP POST /bad\nINPUT rating Rating = 7\nRETURN :rating',
@@ -625,7 +651,7 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
       expect((await snapshot(request)).websocket.subscriptions).toBe(0);
     } finally {client.close();}
     await page.goto('/admin');
-    await page.evaluate(async()=>{window.copies=[];window.mowerSocket=new WebSocket('ws://'+location.host+'/ws');window.mowerSocket.onmessage=event=>window.copies.push(JSON.parse(event.data));await new Promise(resolve=>window.mowerSocket.onopen=resolve);window.mowerSocket.send(JSON.stringify({action:'subscribe',source:'DeviceStatus',params:{device_id:'browser-mower'}}));});
+    await page.evaluate(async()=>{window.copies=[];window.mowerSocket=new WebSocket('ws://'+location.host+'/ws');window.mowerSocket.onmessage=event=>{const copy=JSON.parse(event.data);window.copies.push(copy);if(copy.type==='authenticated')window.mowerSocket.send(JSON.stringify({action:'subscribe',source:'DeviceStatus',params:{device_id:'browser-mower'}}));};await new Promise(resolve=>window.mowerSocket.onopen=resolve);window.mowerSocket.send(JSON.stringify({action:'authenticate',input:{token:'demo-petra'}}));});
     await expect.poll(()=>page.evaluate(()=>window.copies.some(copy=>copy.type==='subscribed'))).toBe(true);
     const mqtt=await mqttClient();try{await mqtt.publish('devices/browser-mower/status',{online:true,battery:88});}finally{mqtt.close();}
     await expect.poll(()=>page.evaluate(()=>window.copies.find(copy=>copy.type==='message')?.payload.battery)).toBe(88);
@@ -662,6 +688,59 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
       client.send({action:'unsubscribe',source:'DeviceStatus',params:{device_id:'limit-0'}});expect((await client.next()).type).toBe('unsubscribed');
       client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'limit-16'}});expect((await client.next()).type).toBe('subscribed');
     } finally {client.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('WebSocket authenticates tokens and denies both latest and live access to other users devices', async ({request}) => {
+    const unauthenticated=await wsClient(null);
+    try {
+      unauthenticated.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'mower1'},latest:true});expect((await unauthenticated.next()).code).toBe('authentication_required');
+      for(const input of [{token:'wrong'},{token:7},{token:'demo-petra',extra:true},{}]) {unauthenticated.send({action:'authenticate',input});expect((await unauthenticated.next()).type).toBe('error');}
+      unauthenticated.send({action:'authenticate',input:{token:'demo-david'}});expect((await unauthenticated.next()).type).toBe('authenticated');
+      unauthenticated.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'mower1'},latest:true});expect((await unauthenticated.next()).code).toBe('forbidden');
+      unauthenticated.send({action:'authenticate',input:{token:'demo-petra'}});expect((await unauthenticated.next()).code).toBe('already_authenticated');
+      unauthenticated.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'mower2'}});expect((await unauthenticated.next()).type).toBe('subscribed');
+      const mqtt=await mqttClient();try{await mqtt.publish('devices/mower1/status',{online:true,battery:64});await mqtt.publish('devices/mower2/status',{online:true,battery:63},{id:2});expect((await unauthenticated.next()).params.device_id).toBe('mower2');}finally{mqtt.close();}
+    } finally {unauthenticated.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('revoking a grant stops an existing WebSocket subscription before the next copy is delivered', async ({request}) => {
+    await request.post('/api/test-device-access',{data:{id:'revoked-grant',user_id:'u1',token:'revocable-token',device_id:'revoked-mower'}});
+    const client=await wsClient('revocable-token');const mqtt=await mqttClient();
+    try {
+      client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'revoked-mower'}});expect((await client.next()).type).toBe('subscribed');
+      await mqtt.publish('devices/revoked-mower/status',{online:true,battery:56});expect((await client.next()).payload.battery).toBe(56);
+      expect((await request.delete('/api/test-device-access/revoked-grant')).status()).toBe(200);
+      await mqtt.publish('devices/revoked-mower/status',{online:true,battery:55},{id:2});expect((await client.next()).code).toBe('unauthorized');
+      expect((await snapshot(request)).websocket.subscriptions).toBe(0);
+      client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'revoked-mower'},latest:true});expect((await client.next()).code).toBe('unauthorized');
+    } finally {client.close();mqtt.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('per-device revocation removes one stream while the same token retains another permitted device', async ({request}) => {
+    for(const device of ['a','b'])expect((await request.post('/api/test-device-access',{data:{id:'selective-'+device,user_id:'u1',token:'selective-token',device_id:'selective-'+device}})).status()).toBe(200);
+    const client=await wsClient('selective-token');const mqtt=await mqttClient();
+    try {
+      for(const device of ['a','b']) {client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'selective-'+device}});expect((await client.next()).type).toBe('subscribed');}
+      await request.delete('/api/test-device-access/selective-a');
+      await mqtt.publish('devices/selective-a/status',{online:true,battery:44});expect((await client.next()).code).toBe('forbidden');
+      await mqtt.publish('devices/selective-b/status',{online:true,battery:43},{id:2});expect((await client.next()).params.device_id).toBe('selective-b');
+      expect((await snapshot(request)).websocket.subscriptions).toBe(1);
+    } finally {client.close();mqtt.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('SEED initializes once: revoked access stays revoked and changed credentials survive restart', async ({request}) => {
+    expect((await request.delete('/api/test-device-access/david-mower2')).status()).toBe(200);
+    await stopServer();await startServer();
+    const rejected=await wsClient(null);
+    try {rejected.send({action:'authenticate',input:{token:'demo-david'}});expect((await rejected.next()).code).toBe('unauthorized');}finally{rejected.close();}
+    expect((await request.post('/api/test-device-access',{data:{id:'david-mower2',user_id:'u2',token:'changed-david-token',device_id:'mower2'}})).status()).toBe(200);
+    await stopServer();await startServer();
+    const changed=await wsClient('changed-david-token');
+    try {changed.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'mower2'},latest:true});expect((await changed.next()).type).toBe('subscribed');expect((await changed.next()).payload.battery).toBe(63);}finally{changed.close();}
     await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
   });
 

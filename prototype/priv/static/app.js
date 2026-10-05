@@ -171,11 +171,15 @@ $('#device-form').addEventListener('submit', event => {
   socket.onopen = () => {
     if (deviceSocket !== socket) return;
     $('#device-connection').textContent = 'Připojeno';
-    for (const source of ['DeviceStatus', 'DevicePosition']) socket.send(JSON.stringify({action:'subscribe', source, params:{device_id:deviceId}, latest:true}));
+    socket.send(JSON.stringify({action:'authenticate', input:{token:$('#device-token').value}}));
   };
   socket.onmessage = event => {
     if (deviceSocket !== socket) return;
     const copy = JSON.parse(event.data);
+    if (copy.type === 'authenticated') {
+      $('#device-connection').textContent = 'Ověřeno';
+      for (const source of ['DeviceStatus', 'DevicePosition']) socket.send(JSON.stringify({action:'subscribe',source,params:{device_id:deviceId},latest:true}));
+    }
     if (copy.type === 'error') $('#device-connection').textContent = copy.message;
     if (copy.type !== 'message') return;
     const target = copy.source === 'DeviceStatus' ? '#device-status' : '#device-position';

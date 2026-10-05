@@ -222,17 +222,29 @@ WebSocket endpoint se deklaruje ve stejném aplikačním souboru jako HTTP a MQT
 
 ```text
 WEBSOCKET /ws
-    SOURCE DeviceStatus
-    SOURCE DevicePosition
+    INPUT token String
+    AUTHORIZE EXISTS access IN DeviceAccess WHERE access.token = :token AND EXISTS user IN Users WHERE user.id = access.user_id
+    SOURCE DeviceStatus WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
+    SOURCE DevicePosition WHERE EXISTS access IN DeviceAccess WHERE access.token = :token AND access.device_id = :device_id
 ```
 
-`SOURCE` je seznam povolených, již deklarovaných MQTT zdrojů. Kompilátor odmítne neznámý zdroj, duplicitní endpoint či kolizi se stejnou HTTP GET cestou. Zatím jsou podporovány statické WebSocket cesty. Klient po připojení posílá JSON příkazy:
+`INPUT` deklaruje přesně typovaná přihlašovací data. `AUTHORIZE` je Bool predikát pro ověření přihlášení; `SOURCE … WHERE` je Bool predikát pro přístup ke konkrétním parametrům zdroje. Tyto predikáty mohou číst tabulky pomocí EXISTS a dalších dotazů, ale nesmějí používat nedeterministické uuid/now/ago. Kompilátor kontroluje jejich typy i názvy polí.
+
+`SOURCE` je seznam povolených, již deklarovaných MQTT zdrojů. Kompilátor odmítne neznámý zdroj, duplicitní endpoint či kolizi se stejnou HTTP GET cestou. Zatím jsou podporovány statické WebSocket cesty. Klient nejprve pošle přihlašovací zprávu; token se nedává do URL:
+
+```json
+{"action":"authenticate","input":{"token":"demo-petra"}}
+```
+
+Úspěch vrátí `{"type":"authenticated"}`. Chybějící či neplatná přihlašovací data nepovolí žádný odběr. Přihlášené spojení nemůže měnit identitu; pro jiný token se musí připojit znovu. Endpoint bez INPUT a s implicitním AUTHORIZE true může být veřejný.
+
+Následně klient posílá JSON příkazy:
 
 ```json
 {"action":"subscribe","source":"DeviceStatus","params":{"device_id":"mower1"},"latest":true}
 ```
 
-Server ověří parametry podle typu zdroje, potvrdí odběr zprávou `type: "subscribed"` a při `latest: true` pošle i poslední uloženou zprávu, pokud existuje. Každá další přijatá a validovaná MQTT zpráva pro toto zařízení vytvoří kopii pro každého odběratele:
+Server ověří parametry podle typu zdroje a oba autorizační predikáty, potvrdí odběr zprávou `type: "subscribed"` a při `latest: true` pošle i poslední uloženou zprávu, pokud existuje. Každá další přijatá a validovaná MQTT zpráva pro toto zařízení vytvoří kopii pro každého odběratele:
 
 ```json
 {"type":"message","source":"DeviceStatus","params":{"device_id":"mower1"},"payload":{"online":true,"battery":88},"received_at":"2026-10-05T12:00:00.000000Z"}
@@ -240,7 +252,9 @@ Server ověří parametry podle typu zdroje, potvrdí odběr zprávou `type: "su
 
 Odhlášení používá stejný zdroj a parametry s `action: "unsubscribe"`; odpověď má `type: "unsubscribed"`. Opakovaný subscribe nevytváří duplicitní odběr. Neplatné příkazy vrátí `type: "error"` a spojení zůstává použitelné. Nelze odebírat libovolné topic stringy ani wildcardy. Jedno spojení má nejvýše 16 odběrů a příkaz nejvýše 8 KiB. Odpojení klienta odběry automaticky odstraní; pomalý klient s přeplněnou procesní schránkou se odpojí kódem 1013.
 
-Kopie se odesílají po uložení MQTT zprávy, nezávisle na následném úspěchu jejího ON MQTT scénáře. Neplatný payload se neuloží ani nerozešle. Zachycená retransmise QoS1 DUP se znovu nerozešle. Odběr je živý: nemá potvrzování jednotlivých kopií ani trvalou frontu pro odpojeného klienta; `latest` poskytuje poslední známou hodnotu, ne obnovu celé historie. Prototyp nemá autentizaci ani autorizaci odběrů. Admin → Živá zařízení umožňuje odběr stavu a polohy vybrané sekačky.
+Kopie se odesílají po uložení MQTT zprávy, nezávisle na následném úspěchu jejího ON MQTT scénáře. Neplatný payload se neuloží ani nerozešle. Zachycená retransmise QoS1 DUP se znovu nerozešle. Odběr je živý: nemá potvrzování jednotlivých kopií ani trvalou frontu pro odpojeného klienta; `latest` poskytuje poslední známou hodnotu, ne obnovu celé historie. Autorizace probíhá před subscribe, před vrácením latest i před každou živou kopií. Odebrání přístupu vrátí `forbidden` nebo `unauthorized` a odstraní příslušný aktivní odběr, aniž odešle payload. Chyba čtení pravidel přístup nepovolí. Unsubscribe zůstává možný i po odebrání práv. Admin → Živá zařízení umožňuje zadat token a odebírat stav a polohu povolené sekačky.
+
+Demo používá v DeviceAccess tokeny `demo-petra` pro uživatele u1 a zařízení mower1 a `demo-david` pro u2 a mower2. Jde o lokální bearer tokeny uložené v tabulce, nikoliv integraci s OAuth/JWT poskytovatelem. Známé demo tokeny v tomto příkladu jsou určené pro lokální zkoušení. Admin a ostatní HTTP endpointy nejsou tímto pravidlem chráněny.
 
 ## Ověřené soubory a obrázky
 
@@ -260,3 +274,13 @@ RETURN stored
 Image je kompatibilní s File. File se musí ověřit přes `CALL Image.decode WITH {file: :file}`, než může být vstupem Image.resize. Resize zachová poměr stran a původní PNG/JPEG formát, vejde se do zadaného obdélníku a nezvětšuje malé obrázky. Šířka a výška cíle mají rozsah 1–8192. Vstupní soubory mají limit 10 MiB; dekódovaný obrázek nejvýše 8192 × 8192 a současně 20 milionů pixelů. HTTP používá JSON/base64, multipart zatím nepodporuje.
 
 `Files.put` vrací `{id, url, name, media_type, byte_size, sha256}`. `Files.read WITH {id: ...}` vrací File a `Files.delete WITH {id: ...}` vrací `{id, deleted}`. Obsah je uložen v SQLite; put/delete musí být uvnitř TRANSACTION a vracejí se společně s aplikačními záznamy při rollbacku. URL `/files/:id` vrací skutečné bajty souboru. Tyto operace ani Image.resize/decode nelze vložit do QUEUE. Příklad produktu s fotografií je součástí `application.flow`.
+
+
+## Počáteční záznamy
+
+```text
+TABLE DeviceAccess = {id: String, user_id: UserID, token: String, device_id: DeviceID}
+SEED DeviceAccess WITH [{id: "petra-mower1", user_id: "u1", token: "demo-petra", device_id: "mower1"}]
+```
+
+SEED je top-level deklarace deterministického seznamu záznamů, typovaného podle tabulky. Kompilátor odmítne neznámou tabulku, chybný záznam či duplicitní id i napříč více SEED stejné tabulky. Runtime při startu vloží dosud neinicializované klíče v jedné SQLite transakci. Již existující záznam nepřepíše. Trvalá evidence klíčů zabrání obnovení později smazaného záznamu při restartu; odebrané oprávnění se tak samo nevrátí. Změna hodnoty v SEED nemění existující data; jejich úprava patří do explicitního UPDATE/DELETE scénáře.

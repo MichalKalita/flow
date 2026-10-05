@@ -91,7 +91,12 @@ end
 
 defmodule OrderLab.WebSocket do
   @behaviour WebSock
-  def init(endpoint), do: {:ok, %{endpoint: endpoint, subscriptions: MapSet.new()}}
+  def init(endpoint) do
+    credentials =
+      if endpoint.inputs == [] and endpoint.authorization == {:literal, true}, do: %{}, else: nil
+
+    {:ok, %{endpoint: endpoint, credentials: credentials, subscriptions: MapSet.new()}}
+  end
 
   def handle_in({data, [opcode: :text]}, state) do
     if byte_size(data) > 8192 do
@@ -106,8 +111,31 @@ defmodule OrderLab.WebSocket do
 
   def handle_in(_, state), do: reply_error("text_required", "Use a JSON text frame", state)
 
+  defp command(%{"action" => "authenticate"} = command, state) do
+    cond do
+      Map.keys(command) -- ~w(action input) != [] ->
+        reply_error("unknown_fields", "Unknown authentication fields", state)
+
+      state.credentials != nil ->
+        reply_error("already_authenticated", "Reconnect to change credentials", state)
+
+      true ->
+        case OrderLab.Store.authenticate_websocket(state.endpoint, Map.get(command, "input", %{})) do
+          {:ok, credentials} ->
+            {:push, {:text, Jason.encode!(%{"type" => "authenticated"})},
+             %{state | credentials: credentials}}
+
+          {:error, code, message} ->
+            reply_error(code, message, state)
+        end
+    end
+  end
+
   defp command(command, state) do
     cond do
+      state.credentials == nil ->
+        reply_error("authentication_required", "Authenticate before subscribing", state)
+
       Map.keys(command) -- ~w(action source params latest) != [] ->
         reply_error("unknown_fields", "Unknown subscription command fields", state)
 
@@ -126,6 +154,8 @@ defmodule OrderLab.WebSocket do
 
       true ->
         case OrderLab.Store.subscription(
+               state.endpoint,
+               state.credentials,
                command["source"],
                Map.get(command, "params", %{}),
                self(),
@@ -153,16 +183,34 @@ defmodule OrderLab.WebSocket do
 
             {:push, messages, %{state | subscriptions: keys}}
 
-          {:error, message} ->
-            reply_error("invalid_subscription", message, state)
+          {:error, code, message} ->
+            reply_error(code, message, state)
         end
     end
   end
 
   def handle_info({:flow_ws_message, key, message}, state) do
-    if MapSet.member?(state.subscriptions, key),
-      do: {:push, {:text, Jason.encode!(message)}, state},
-      else: {:ok, state}
+    if MapSet.member?(state.subscriptions, key) do
+      case OrderLab.Store.authorize_websocket(
+             state.endpoint,
+             state.credentials,
+             message["source"],
+             message["params"]
+           ) do
+        {:ok, :ok} ->
+          {:push, {:text, Jason.encode!(message)}, state}
+
+        {:error, code, text} ->
+          OrderLab.PubSub.unsubscribe(self(), key)
+
+          reply_error(code, text, %{
+            state
+            | subscriptions: MapSet.delete(state.subscriptions, key)
+          })
+      end
+    else
+      {:ok, state}
+    end
   end
 
   def handle_info(:flow_ws_overflow, state), do: {:stop, :slow_subscriber, 1013, state}

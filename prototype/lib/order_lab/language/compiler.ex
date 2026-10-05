@@ -149,27 +149,83 @@ defmodule OrderLab.Language.Compiler do
         Map.merge(endpoint, %{inputs: inputs, source_names: Map.keys(mqtt)})
       end)
 
-    Enum.each(program.websockets, fn endpoint ->
-      unless Regex.match?(~r{^/[A-Za-z0-9_./-]+$}, endpoint.path),
-        do: fail("WebSocket path must be a static URL path")
+    websockets =
+      Enum.map(program.websockets, fn endpoint ->
+        unless Regex.match?(~r{^/[A-Za-z0-9_./-]+$}, endpoint.path),
+          do: fail("WebSocket path must be a static URL path")
 
-      unless length(endpoint.sources) == length(Enum.uniq(endpoint.sources)),
-        do: fail("Duplicate WebSocket source")
+        unless length(endpoint.sources) == length(Enum.uniq(endpoint.sources)),
+          do: fail("Duplicate WebSocket source")
 
-      Enum.each(endpoint.sources, fn name ->
-        unless Map.has_key?(mqtt, name), do: fail("Unknown WebSocket source #{name}")
+        inputs = Enum.map(endpoint.inputs, &%{&1 | type: Types.resolve!(&1.type, definitions)})
+
+        local =
+          Enum.reduce(inputs, env, fn input, local ->
+            if Map.has_key?(local, input.name), do: fail("WebSocket input shadows #{input.name}")
+
+            if input.default != :missing,
+              do: Checker.expect_expr!(input.default, input.type, local)
+
+            Map.put(local, input.name, input.type)
+          end)
+
+        Checker.pure_refinement!(endpoint.authorization)
+        Checker.expect!(Checker.infer(endpoint.authorization, local), {:named, "Bool"})
+
+        Enum.each(endpoint.sources, fn name ->
+          source = Map.get(mqtt, name) || fail("Unknown WebSocket source #{name}")
+
+          params =
+            Enum.reduce(source.params, local, fn param, local ->
+              if Map.has_key?(local, param.name),
+                do: fail("WebSocket parameter shadows #{param.name}")
+
+              Map.put(local, param.name, param.type)
+            end)
+
+          policy = Map.fetch!(endpoint.policies, name)
+          Checker.pure_refinement!(policy)
+          Checker.expect!(Checker.infer(policy, params), {:named, "Bool"})
+        end)
+
+        if Enum.any?(endpoints, &(&1.method == "GET" and &1.path == endpoint.path)),
+          do: fail("WebSocket and HTTP GET paths cannot overlap")
+
+        %{endpoint | inputs: inputs}
       end)
-
-      if Enum.any?(endpoints, &(&1.method == "GET" and &1.path == endpoint.path)),
-        do: fail("WebSocket and HTTP GET paths cannot overlap")
-    end)
 
     paths = Enum.map(program.websockets, & &1.path)
     unless length(paths) == length(Enum.uniq(paths)), do: fail("Duplicate WebSocket path")
 
     signatures = Enum.map(endpoints, &{&1.method, canonical_route(&1.path)})
     unless length(signatures) == length(Enum.uniq(signatures)), do: fail("Duplicate HTTP route")
-    %{program | types: definitions, tables: tables, mqtt: mqtt, endpoints: endpoints}
+
+    seeds =
+      Enum.map(program.seeds, fn seed ->
+        type = Map.get(tables, seed.table) || fail("Unknown SEED table #{seed.table}")
+        Checker.pure_refinement!(seed.value)
+        Checker.expect_expr!(seed.value, {:list, type}, %{})
+        rows = OrderLab.Language.Evaluator.eval(seed.value, %{}) |> Types.validate!({:list, type})
+        ids = Enum.map(rows, & &1["id"])
+        if length(ids) != length(Enum.uniq(ids)), do: fail("Duplicate SEED id in #{seed.table}")
+        %{seed | value: rows}
+      end)
+
+    Enum.group_by(seeds, & &1.table)
+    |> Enum.each(fn {table, seeds} ->
+      ids = Enum.flat_map(seeds, fn seed -> Enum.map(seed.value, & &1["id"]) end)
+      if length(ids) != length(Enum.uniq(ids)), do: fail("Duplicate SEED id in #{table}")
+    end)
+
+    %{
+      program
+      | types: definitions,
+        tables: tables,
+        mqtt: mqtt,
+        endpoints: endpoints,
+        websockets: websockets,
+        seeds: seeds
+    }
   end
 
   defp check_block(nodes, state), do: Enum.reduce(nodes, state, &check/2)
