@@ -357,6 +357,7 @@ impl Runtime {
                             Value::record(BTreeMap::from([
                                 ("id".into(), Value::Id("Request".into(), request_id())),
                                 ("time".into(), Value::Str(now)),
+                                ("actor".into(), session.actor.clone()),
                             ])),
                         ),
                     ]),
@@ -730,6 +731,7 @@ impl Runtime {
                 Value::record(BTreeMap::from([
                     ("id".into(), Value::Id("Request".into(), request_id())),
                     ("time".into(), Value::Str(now)),
+                    ("actor".into(), session.actor.clone()),
                 ])),
             );
             for binding in op.bindings.keys() {
@@ -1303,6 +1305,12 @@ impl Session<'_> {
         Ok(true)
     }
     fn field(&mut self, target: &Value, field: &str, policy: bool) -> Result<Value> {
+        if field == "id"
+            && equal(target, &self.actor)
+            && let Value::Ref { entity, id, .. } = target
+        {
+            return Ok(Value::Id(entity.clone(), *id));
+        }
         if policy {
             return self.raw(target, field);
         };

@@ -94,7 +94,7 @@ async fn real_http_routes_and_permissions() {
         address,
         "POST",
         "/api/orders",
-        r#"{"userId":1,"items":[{"productId":1,"quantity":2}],"paymentMethod":"CARD"}"#,
+        r#"{"items":[{"productId":1,"quantity":2}],"paymentMethod":"CARD"}"#,
         Some(&auth),
     )
     .await;

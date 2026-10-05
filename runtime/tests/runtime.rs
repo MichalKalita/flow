@@ -41,8 +41,8 @@ fn token_claims(claims: Value, algorithm: &str, key: &[u8]) -> String {
 fn runtime() -> Runtime {
     Runtime::open(APP, ":memory:", config()).unwrap()
 }
-fn order(user: i64, qty: u32) -> Value {
-    json!({"userId":user,"items":[{"productId":1,"quantity":qty}],"paymentMethod":"CARD"})
+fn order(_user: i64, qty: u32) -> Value {
+    json!({"items":[{"productId":1,"quantity":qty}],"paymentMethod":"CARD"})
 }
 #[test]
 fn parser_and_exact_numbers() {
@@ -156,10 +156,18 @@ fn failed_permissions_and_stock_validation_roll_back() {
     let mut r = runtime();
     let auth = token("idp:u1");
     assert_eq!(
-        r.execute("CreateOrder", order(2, 2), Some(&auth))
-            .unwrap_err()
-            .code,
-        "not_found"
+        r.execute(
+            "CreateOrder",
+            {
+                let mut input = order(1, 2);
+                input["userId"] = json!(2);
+                input
+            },
+            Some(&auth)
+        )
+        .unwrap_err()
+        .code,
+        "invalid_input"
     );
     let receipt = r.execute("CreateOrder", order(1, 12), Some(&auth)).unwrap();
     assert_eq!(receipt["order"]["items"][0]["quantity"], 12);
@@ -181,7 +189,6 @@ fn duplicate_cart_rows_group_before_stock_update() {
         .execute(
             "CreateOrder",
             json!({
-                "userId": 1,
                 "items": [
                     {"productId": 1, "quantity": 1},
                     {"productId": 1, "quantity": 2}
@@ -401,7 +408,18 @@ fn audit_is_atomic_attributes_actors_and_survives_restart() {
         wal
     );
     assert_eq!(r.audit(0, 200).unwrap(), seeds);
-    assert!(r.execute("CreateOrder", order(2, 1), Some(&auth)).is_err());
+    assert!(
+        r.execute(
+            "CreateOrder",
+            {
+                let mut input = order(1, 1);
+                input["userId"] = json!(2);
+                input
+            },
+            Some(&auth)
+        )
+        .is_err()
+    );
     assert_eq!(r.audit(0, 200).unwrap(), seeds);
     r.execute("CreateOrder", order(1, 2), Some(&auth)).unwrap();
     let audit = r.audit(0, 200).unwrap();
@@ -653,4 +671,34 @@ fn legacy_text_id_database_is_rejected_without_changing_stored_data() {
     );
     drop(db);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn request_actor_is_verified_and_cannot_be_overridden() {
+    let mut runtime = runtime();
+    let auth = token("idp:u1");
+    let receipt = runtime
+        .execute("CreateOrder", order(1, 1), Some(&auth))
+        .unwrap();
+    assert_eq!(receipt["order"]["user"]["id"], 1);
+    let mut spoofed = order(1, 1);
+    spoofed["userId"] = json!(2);
+    assert_eq!(
+        runtime
+            .execute("CreateOrder", spoofed, Some(&auth))
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+    let source = APP.replace(
+        "[result [first [entities User] 100]]",
+        "[result [list request.actor]]",
+    );
+    let mut runtime = Runtime::open(&source, ":memory:", config()).unwrap();
+    assert_eq!(
+        runtime
+            .execute("Users", json!({}), Some(&token("idp:u2")))
+            .unwrap()[0]["id"],
+        2
+    );
 }
