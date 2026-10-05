@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Flow application runtime"
+supervisor="supervise-daemon"
+command="/usr/local/bin/flow-start"
+command_user="flow:flow"
+directory="/data/flow/current"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_logger="logger -t flow"
+error_logger="logger -t flow"
+respawn_delay=2
+respawn_max=5
+respawn_period=60
+retry="SIGINT/30/SIGKILL/5"
+umask="0077"
+
+depend() {
+    need net localmount
+    after chronyd
+}

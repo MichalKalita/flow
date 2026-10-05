@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+umask 077
+set -a
+. /etc/flow/runtime.env
+set +a
+exec /data/flow/current/flow-runtime "$FLOW_APPLICATION" "$FLOW_DATABASE" "$FLOW_HTTP_BIND" "$FLOW_MQTT_BIND"
