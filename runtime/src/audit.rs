@@ -22,7 +22,7 @@ pub(crate) fn install(db: &Connection, program: &Program) -> Result<()> {
         CREATE TABLE IF NOT EXISTS _flow_audit (
             id INTEGER PRIMARY KEY, time TEXT NOT NULL, transaction_id TEXT NOT NULL,
             operation TEXT NOT NULL, transport TEXT NOT NULL, actor TEXT NOT NULL,
-            entity TEXT NOT NULL, entity_id TEXT NOT NULL, action TEXT NOT NULL,
+            entity TEXT NOT NULL, entity_id INTEGER NOT NULL, action TEXT NOT NULL,
             before_json TEXT, after_json TEXT
         );
         CREATE INDEX IF NOT EXISTS _flow_audit_transaction ON _flow_audit(transaction_id);",
@@ -189,7 +189,7 @@ impl Runtime {
                         "transport": r.get::<_, String>(4)?,
                         "actor": parse(5)?,
                         "entity": r.get::<_, String>(6)?,
-                        "entity_id": r.get::<_, String>(7)?,
+                        "entity_id": r.get::<_, i64>(7)?,
                         "action": r.get::<_, String>(8)?,
                         "before": decode_snapshot(parse(9)?, &self.program, &r.get::<_, String>(6)?),
                         "after": decode_snapshot(parse(10)?, &self.program, &r.get::<_, String>(6)?)

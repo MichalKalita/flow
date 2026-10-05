@@ -13,10 +13,10 @@ pub enum Value {
     Str(String),
     Num(Number),
     BrandedNumber(String, Number),
-    Id(String, String),
+    Id(String, i64),
     Ref {
         entity: String,
-        id: String,
+        id: i64,
         before: bool,
     },
     List(Vec<Value>),
@@ -34,16 +34,23 @@ impl Value {
             parent: None,
         }
     }
-    pub fn reference(entity: &str, id: &str) -> Self {
+    pub fn reference(entity: &str, id: &i64) -> Self {
         Self::Ref {
             entity: entity.into(),
-            id: id.into(),
+            id: *id,
             before: false,
+        }
+    }
+    pub fn id(&self) -> Result<i64> {
+        match self {
+            Self::Id(_, id) | Self::Ref { id, .. } => Ok(*id),
+            value => crate::program::valid_id(value.clone()),
         }
     }
     pub fn text(&self) -> Result<String> {
         match self {
-            Self::Str(s) | Self::Id(_, s) | Self::Ref { id: s, .. } => Ok(s.clone()),
+            Self::Str(s) => Ok(s.clone()),
+            Self::Id(_, id) | Self::Ref { id, .. } => Ok(id.to_string()),
             Self::Num(n) | Self::BrandedNumber(_, n) => decimal(n),
             _ => Err(Error::new("invalid_input", "Expected text")),
         }
@@ -76,7 +83,7 @@ impl Value {
         match self {
             Self::Ref { entity, id, .. } => Self::Ref {
                 entity: entity.clone(),
-                id: id.clone(),
+                id: *id,
                 before: true,
             },
             Self::List(v) => Self::List(v.iter().map(Self::pin).collect()),
@@ -101,7 +108,8 @@ impl Value {
             }
             Self::Null => J::Null,
             Self::Bool(v) => J::Bool(*v),
-            Self::Str(s) | Self::Id(_, s) | Self::Ref { id: s, .. } => J::String(s.clone()),
+            Self::Str(s) => J::String(s.clone()),
+            Self::Id(_, id) | Self::Ref { id, .. } => J::Number((*id).into()),
             Self::Num(n) | Self::BrandedNumber(_, n) => serde_json::from_str(&decimal(n)?)?,
             Self::List(v) => J::Array(v.iter().map(Self::json).collect::<Result<_>>()?),
             Self::Record { fields, .. } => J::Object(

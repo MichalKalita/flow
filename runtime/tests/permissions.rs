@@ -21,9 +21,9 @@ fn source(rules: &str, operations: &str) -> String {
 [type DocOutput [record [field id DocumentID] [field title String]]]
 [type SecretOutput [record [field secret String]]]
 [type RoleOutput [record [field roles [list String [max 2]]]]]
-[seed User [rows [record [id "u1"] [hash "{hash}"] [roles [list]]]]]
-[seed Document [rows [record [id "d1"] [owner "u1"] [title "Original"] [secret "private"] [salary 2500] [contact "u1"]]]]
-[seed Folder [rows [record [id "owned"] [owner "u1"]] [record [id "child"] [parent "owned"]] [record [id "orphan"]]]]
+[seed User [rows [record [id 1] [hash "{hash}"] [roles [list]]]]]
+[seed Document [rows [record [id 1] [owner 1] [title "Original"] [secret "private"] [salary 2500] [contact 1]]]]
+[seed Folder [rows [record [id 1] [owner 1]] [record [id 2] [parent 1]] [record [id 3]]]]
 [auth [key User [apiKey] [entity [eq User.hash credential.hash]]] [anonymous Anonymous]]
 [transport HTTP [auth key anonymous]]
 {rules}
@@ -73,7 +73,7 @@ fn field_permissions_are_additional_and_permission_dependencies_private() {
         "Original"
     );
     assert_eq!(
-        r.execute("Secrets", json!({"id":"d1"}), Some(AUTH))
+        r.execute("Secrets", json!({"id":1}), Some(AUTH))
             .unwrap_err()
             .code,
         "not_found"
@@ -85,7 +85,7 @@ fn can_cannot_evaluate_business_bindings_with_permission_privileges() {
     let op = r#"[query Leak [input id DocumentID] [output UserID] [http GET "/leak/{id}"] [document [entity $id]] [aCheck [can READ [entity protected]]] [protected document.contact] [result protected]]"#;
     let mut r = Runtime::open(&source(rules, op), ":memory:", Config::default()).unwrap();
     assert_eq!(
-        r.execute("Leak", json!({"id":"d1"}), Some(AUTH))
+        r.execute("Leak", json!({"id":1}), Some(AUTH))
             .unwrap_err()
             .code,
         "not_found"
@@ -98,13 +98,13 @@ fn actor_cannot_use_new_role_to_authorize_another_change() {
 [query Roles [input id UserID] [output RoleOutput] [http GET "/roles/{id}"] [result [entity $id]]]"#;
     let mut r = Runtime::open(&source(rules, op), ":memory:", Config::default()).unwrap();
     assert_eq!(
-        r.execute("Elevate", json!({"id":"u1","docId":"d1"}), Some(AUTH))
+        r.execute("Elevate", json!({"id":1,"docId":1}), Some(AUTH))
             .unwrap_err()
             .code,
         "forbidden"
     );
     assert_eq!(
-        r.execute("Roles", json!({"id":"u1"}), Some(AUTH)).unwrap(),
+        r.execute("Roles", json!({"id":1}), Some(AUTH)).unwrap(),
         json!({"roles":[]})
     );
 }
@@ -115,7 +115,7 @@ fn recursive_relation_permissions_fail_closed_at_null_parent() {
 [query Folders [output [list FolderOutput [max 10]]] [http GET "/folders"] [result [first [entities Folder] 10]]]"#;
     let mut r = Runtime::open(&source(rules, op), ":memory:", Config::default()).unwrap();
     let ids = r.execute("Folders", json!({}), Some(AUTH)).unwrap();
-    assert_eq!(ids, json!([{"id":"child"},{"id":"owned"}]));
+    assert_eq!(ids, json!([{"id":1},{"id":2}]));
 }
 #[test]
 fn write_fields_require_their_own_grants() {
@@ -123,7 +123,7 @@ fn write_fields_require_their_own_grants() {
     let op = r#"[mutate Change [input id DocumentID] [output Bool] [http POST "/change/{id}"] [atomic] [document [entity $id]] [changed [set document.secret "changed"]] [result true]]"#;
     let mut r = Runtime::open(&source(rules, op), ":memory:", Config::default()).unwrap();
     assert_eq!(
-        r.execute("Change", json!({"id":"d1"}), Some(AUTH))
+        r.execute("Change", json!({"id":1}), Some(AUTH))
             .unwrap_err()
             .code,
         "forbidden"
@@ -157,7 +157,7 @@ fn delete_honors_entity_and_field_rights() {
     .unwrap();
     assert_eq!(
         runtime
-            .execute("Remove", json!({"id":"d1"}), Some(AUTH))
+            .execute("Remove", json!({"id":1}), Some(AUTH))
             .unwrap(),
         true
     );
@@ -174,7 +174,7 @@ fn delete_honors_entity_and_field_rights() {
     .unwrap();
     assert_eq!(
         runtime
-            .execute("Remove", json!({"id":"d1"}), Some(AUTH))
+            .execute("Remove", json!({"id":1}), Some(AUTH))
             .unwrap_err()
             .code,
         "forbidden"
@@ -204,7 +204,7 @@ fn newly_created_records_can_be_updated_before_commit() {
     .unwrap();
     assert_eq!(
         runtime
-            .execute("Add", json!({"id":"d2","userId":"u1"}), Some(AUTH))
+            .execute("Add", json!({"id":2,"userId":1}), Some(AUTH))
             .unwrap(),
         true
     );

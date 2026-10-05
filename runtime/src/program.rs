@@ -56,7 +56,7 @@ pub struct Stream {
 pub struct Event {
     pub source: String,
     pub adapter: String,
-    pub actor_id: String,
+    pub actor_id: i64,
     pub condition: Node,
 }
 #[derive(Clone, Debug)]
@@ -584,7 +584,7 @@ impl Program {
                     };
                     let actor = opt(on, "actor")?.arg(0)?;
                     let adapter = ident(actor.head())?;
-                    let actor_id = actor.arg(0)?.text()?.to_owned();
+                    let actor_id = valid_id(literal(actor.arg(0)?)?)?;
                     if !p.auth.iter().any(|a| {
                         a.alias == adapter && a.mode != "anonymous" && a.mode != "certificate"
                     }) {
@@ -897,9 +897,17 @@ impl Program {
 
                 if self.entities.contains_key(name) {
                     let id = match value {
-                        Value::Ref { entity, id, .. } if entity == *name => id,
-                        Value::Id(entity, id) if entity == *name => id,
-                        Value::Str(id) => valid_id(id)?,
+                        Value::Ref { entity, id, .. }
+                            if entity == *name && (1..=9_007_199_254_740_991).contains(&id) =>
+                        {
+                            id
+                        }
+                        Value::Id(entity, id)
+                            if entity == *name && (1..=9_007_199_254_740_991).contains(&id) =>
+                        {
+                            id
+                        }
+                        Value::Num(id) => valid_id(Value::Num(id))?,
                         _ => return Err(invalid()),
                     };
                     Value::reference(name, &id)
@@ -918,8 +926,12 @@ impl Program {
             }
             Type::Id(entity) => {
                 let id = match value {
-                    Value::Id(brand, id) if brand == *entity => id,
-                    Value::Str(id) => valid_id(id)?,
+                    Value::Id(brand, id)
+                        if brand == *entity && (1..=9_007_199_254_740_991).contains(&id) =>
+                    {
+                        id
+                    }
+                    Value::Num(id) => valid_id(Value::Num(id))?,
                     _ => return Err(invalid()),
                 };
                 Value::Id(entity.clone(), id)
@@ -1016,13 +1028,21 @@ impl Program {
         })
     }
 }
-fn valid_id(id: String) -> Result<String> {
-    if id.is_empty() || id.len() > 256 || id.contains('\0') {
-        Err(Error::new("invalid_input", "Invalid ID"))
-    } else {
-        Ok(id)
+pub fn valid_id(value: Value) -> Result<i64> {
+    use num_traits::ToPrimitive;
+    match value {
+        Value::Num(n) if n.is_integer() => n
+            .to_integer()
+            .to_i64()
+            .filter(|id| (1..=9_007_199_254_740_991).contains(id))
+            .ok_or_else(|| Error::new("invalid_input", "ID must be a positive safe integer")),
+        _ => Err(Error::new(
+            "invalid_input",
+            "ID must be a positive safe integer",
+        )),
     }
 }
+
 pub fn literal(n: &Node) -> Result<Value> {
     Ok(match n {
         Node::Number(s) => Value::Num(number(s)?),

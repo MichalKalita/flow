@@ -46,14 +46,14 @@ struct Session<'a> {
     db: &'a Connection,
     actor: Value,
     actor_type: String,
-    changes: BTreeMap<(String, String), Change>,
-    cache: BTreeMap<(String, String, String), Value>,
+    changes: BTreeMap<(String, i64), Change>,
+    cache: BTreeMap<(String, i64, String), Value>,
     permission_stack: BTreeSet<(String, String, String)>,
     steps: usize,
     now: String,
     sql: Vec<String>,
     invocations: Vec<(String, Value)>,
-    blobs: BTreeMap<String, Vec<u8>>,
+    blobs: BTreeMap<i64, Vec<u8>>,
 }
 impl Runtime {
     pub fn open(source: &str, path: &str, config: Config) -> Result<Self> {
@@ -104,11 +104,20 @@ impl Runtime {
         let db = Connection::open(path)?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;")?;
         let result = (|| -> Result<()> {
-            db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_schema (id INTEGER PRIMARY KEY CHECK(id=1), hash TEXT NOT NULL);")?;
-            let hash = format!("{:x}", Sha256::digest(source));
+            db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_id_sequences(entity TEXT PRIMARY KEY, value INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS _flow_schema (id INTEGER PRIMARY KEY CHECK(id=1), hash TEXT NOT NULL);")?;
+            let hash = format!("numeric-v1:{:x}", Sha256::digest(source));
             let stored: Option<String> = db
                 .query_row("SELECT hash FROM _flow_schema WHERE id=1", [], |r| r.get(0))
                 .optional()?;
+            if stored
+                .as_ref()
+                .is_some_and(|s| !s.starts_with("numeric-v1:"))
+            {
+                return Err(Error::new(
+                    "configuration",
+                    "Database uses legacy text IDs; start with a new database",
+                ));
+            }
             if stored.is_some_and(|s| s != hash) {
                 return Err(Error::new(
                     "configuration",
@@ -122,12 +131,23 @@ impl Runtime {
                         continue;
                     };
                     let t = program.resolve(&f.ty)?;
-                    let mut def = format!("{} TEXT", q(field));
+                    let base = if let Type::Optional(inner) = t {
+                        program.resolve(inner)?
+                    } else {
+                        t
+                    };
+                    let numeric = matches!(base, Type::Id(_))
+                        || matches!(base, Type::Named(target) if program.entities.contains_key(target));
+                    let mut def =
+                        format!("{} {}", q(field), if numeric { "INTEGER" } else { "TEXT" });
                     if field == "id" {
                         def.push_str(" PRIMARY KEY NOT NULL")
                     } else if !matches!(t, Type::Optional(_)) {
                         def.push_str(" NOT NULL")
                     };
+                    if numeric {
+                        def.push_str(&format!(" CHECK({0} IS NULL OR (typeof({0})='integer' AND {0} BETWEEN 1 AND 9007199254740991))", q(field)));
+                    }
                     if f.unique {
                         def.push_str(" UNIQUE")
                     };
@@ -164,16 +184,18 @@ impl Runtime {
                 }
             }
             if program.plugins.contains_key("Files.put") {
-                db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_blobs(file_id TEXT PRIMARY KEY REFERENCES File(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,bytes BLOB NOT NULL);")?;
+                db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_blobs(file_id INTEGER PRIMARY KEY REFERENCES File(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,bytes BLOB NOT NULL);")?;
             }
             crate::audit::install(&db, &program)?;
             for (entity, rows) in &program.seeds {
                 for node in rows {
                     let fields = literal(node)?.fields()?.clone();
-                    let id = fields
-                        .get("id")
-                        .ok_or_else(|| err("invalid_input"))?
-                        .text()?;
+                    let id = crate::program::valid_id(
+                        fields
+                            .get("id")
+                            .ok_or_else(|| err("invalid_input"))?
+                            .clone(),
+                    )?;
                     if exists(&db, entity, &id)? {
                         continue;
                     };
@@ -194,7 +216,7 @@ impl Runtime {
                         Some(credential),
                         std::slice::from_ref(&event.adapter),
                     )?;
-                    if actor.text()? != event.actor_id {
+                    if actor.id()? != event.actor_id {
                         return Err(Error::new(
                             "configuration",
                             "Event credential does not match declared actor",
@@ -232,7 +254,7 @@ impl Runtime {
             ))?;
             let subjects=statement.query_map([],|row| {
                 let subject:String=row.get(1)?;
-                Ok(serde_json::json!({"actor_id":row.get::<_,String>(0)?,"subject":serde_json::from_str::<serde_json::Value>(&subject).unwrap_or(serde_json::Value::Null)}))
+                Ok(serde_json::json!({"actor_id":row.get::<_,i64>(0)?,"subject":serde_json::from_str::<serde_json::Value>(&subject).unwrap_or(serde_json::Value::Null)}))
             })?.collect::<std::result::Result<Vec<_>,_>>()?;
             adapters.push(serde_json::json!({"alias":auth.alias,"issuer":auth.issuer,"audience":auth.audience,"configured":self.config.jwt_keys.contains_key(&auth.alias),"subjects":subjects}));
         }
@@ -307,7 +329,7 @@ impl Runtime {
                     Some(credential),
                     std::slice::from_ref(&event.adapter),
                 )?;
-                if actor.text()? != event.actor_id {
+                if actor.id()? != event.actor_id {
                     return Err(err("forbidden"));
                 };
                 let now = Utc::now().to_rfc3339();
@@ -333,10 +355,7 @@ impl Runtime {
                         (
                             "request".into(),
                             Value::record(BTreeMap::from([
-                                (
-                                    "id".into(),
-                                    Value::Id("Request".into(), uuid::Uuid::new_v4().to_string()),
-                                ),
+                                ("id".into(), Value::Id("Request".into(), request_id())),
                                 ("time".into(), Value::Str(now)),
                             ])),
                         ),
@@ -357,7 +376,7 @@ impl Runtime {
                         "UPDATE _flow_audit_context SET operation=?1, transport='event', actor=?2 WHERE id=1",
                         rusqlite::params![
                             operation.name,
-                            serde_json::json!({"type": session.actor_type, "id": session.actor.text().ok()}).to_string()
+                            serde_json::json!({"type": session.actor_type, "id": session.actor.id().ok()}).to_string()
                         ],
                     )?;
                 }
@@ -376,7 +395,7 @@ impl Runtime {
         }
         Ok((count as u64, handlers))
     }
-    pub fn file_bytes(&self, id: &str, credential: Option<&str>) -> Result<Vec<u8>> {
+    pub fn file_bytes(&self, id: &i64, credential: Option<&str>) -> Result<Vec<u8>> {
         let mut span = self.observability.span("io", "sqlite.file_bytes");
         let result = self.file_bytes_inner(id, credential);
         if result.is_ok() {
@@ -384,7 +403,7 @@ impl Runtime {
         }
         result
     }
-    fn file_bytes_inner(&self, id: &str, credential: Option<&str>) -> Result<Vec<u8>> {
+    fn file_bytes_inner(&self, id: &i64, credential: Option<&str>) -> Result<Vec<u8>> {
         if !self.program.plugins.contains_key("Files.put") {
             return Err(err("not_found"));
         };
@@ -489,7 +508,7 @@ impl Runtime {
                 &self.db,
                 stream,
                 transport,
-                &serde_json::json!({"type":session.actor_type,"id":session.actor.text().ok()}),
+                &serde_json::json!({"type":session.actor_type,"id":session.actor.id().ok()}),
             )?;
             let fields = Value::from_json(&input)?.fields()?.clone();
             let reference = session.create(stream, fields)?;
@@ -535,13 +554,14 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| err("invalid_input"))?;
         for (field, id) in fields {
+            let id = id.parse::<i64>().map_err(|_| err("invalid_input"))?;
             if input
                 .get(&field)
-                .is_some_and(|v| v != &serde_json::Value::String(id.clone()))
+                .is_some_and(|v| v != &serde_json::json!(id))
             {
                 return Err(err("invalid_input"));
             };
-            input.insert(field, serde_json::Value::String(id));
+            input.insert(field, serde_json::json!(id));
         }
         self.publish(&name, serde_json::Value::Object(input), credential, "MQTT")
     }
@@ -575,7 +595,7 @@ impl Runtime {
                 let mut span = self.observability.span("io", "sqlite.scan_entities");
                 let mut statement = self.db.prepare(&sql)?;
                 let ids = statement
-                    .query_map([], |r| r.get::<_, String>(0))?
+                    .query_map([], |r| r.get::<_, i64>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 span.success();
                 for id in ids {
@@ -708,10 +728,7 @@ impl Runtime {
             scope.values.insert(
                 "request".into(),
                 Value::record(BTreeMap::from([
-                    (
-                        "id".into(),
-                        Value::Id("Request".into(), uuid::Uuid::new_v4().to_string()),
-                    ),
+                    ("id".into(), Value::Id("Request".into(), request_id())),
                     ("time".into(), Value::Str(now)),
                 ])),
             );
@@ -735,7 +752,7 @@ impl Runtime {
                     &self.db,
                     name,
                     transport,
-                    &serde_json::json!({"type": session.actor_type, "id": session.actor.text().ok()}),
+                    &serde_json::json!({"type": session.actor_type, "id": session.actor.id().ok()}),
                 )?;
             }
             session.apply()?;
@@ -799,7 +816,33 @@ fn wire_type(p: &Program, t: &Type) -> Result<Type> {
         t => t.clone(),
     })
 }
-fn exists(db: &Connection, entity: &str, id: &str) -> Result<bool> {
+fn request_id() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = Utc::now().timestamp_micros();
+    LAST.try_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
+        Some(now.max(last + 1))
+    })
+    .unwrap()
+    .max(now - 1)
+        + 1
+}
+fn next_id(db: &Connection, entity: &str) -> Result<i64> {
+    if entity == "Request" {
+        return Ok(request_id());
+    }
+    let sql = format!(
+        "INSERT INTO _flow_id_sequences(entity,value) VALUES(?1,(SELECT COALESCE(MAX(id),0)+1 FROM {})) ON CONFLICT(entity) DO UPDATE SET value=MAX(value,(SELECT COALESCE(MAX(id),0) FROM {}))+1 RETURNING value",
+        q(entity),
+        q(entity)
+    );
+    let id: i64 = db.query_row(&sql, [entity], |row| row.get(0))?;
+    if id > 9_007_199_254_740_991 {
+        return Err(err("limit"));
+    }
+    Ok(id)
+}
+fn exists(db: &Connection, entity: &str, id: &i64) -> Result<bool> {
     Ok(db
         .query_row(
             &format!("SELECT id FROM {} WHERE id=?1", q(entity)),
@@ -812,7 +855,7 @@ fn exists(db: &Connection, entity: &str, id: &str) -> Result<bool> {
 fn storage(v: &Value) -> Result<Option<String>> {
     Ok(match v {
         Value::Null => None,
-        Value::Ref { id, .. } | Value::Id(_, id) => Some(id.clone()),
+        Value::Ref { id, .. } | Value::Id(_, id) => Some(id.to_string()),
         _ => Some(v.json()?.to_string()),
     })
 }
@@ -834,7 +877,7 @@ fn insert(db: &Connection, entity: &str, values: &BTreeMap<String, Value>) -> Re
 }
 fn lookup(db: &Connection, auth: &crate::program::Auth, value: &str) -> Result<Option<Value>> {
     let encoded = serde_json::to_string(value)?;
-    let id: Option<String> = db
+    let id: Option<i64> = db
         .query_row(
             &format!(
                 "SELECT id FROM {} WHERE {}=?1",
@@ -1047,7 +1090,7 @@ impl Session<'_> {
                     .ok_or_else(|| err("invalid_input"))
             }
             Value::Ref { entity, id, before } => {
-                if let Some(change) = self.changes.get(&(entity.clone(), id.clone()))
+                if let Some(change) = self.changes.get(&(entity.clone(), *id))
                     && !before
                 {
                     if change.action == "DELETE" {
@@ -1074,7 +1117,7 @@ impl Session<'_> {
                     let mut span = self.observer.span("io", "sqlite.read_relation");
                     let mut statement = self.db.prepare(&sql)?;
                     let ids = statement
-                        .query_map([id], |r| r.get::<_, String>(0))?
+                        .query_map([id], |r| r.get::<_, i64>(0))?
                         .collect::<std::result::Result<Vec<_>, _>>()?;
                     span.success();
                     let mut ids = ids;
@@ -1091,7 +1134,7 @@ impl Session<'_> {
                                     .is_some_and(|v| equal(v, target))
                                     && !ids.contains(id)
                                 {
-                                    ids.push(id.clone());
+                                    ids.push(*id);
                                 }
                             }
                         }
@@ -1105,15 +1148,25 @@ impl Session<'_> {
                             .collect(),
                     ))
                 } else {
-                    let key = (entity.clone(), id.clone(), field.into());
+                    let key = (entity.clone(), *id, field.into());
                     if let Some(v) = self.cache.get(&key) {
                         return Ok(if *before { v.pin() } else { v.clone() });
                     };
                     let sql = format!("SELECT {} FROM {} WHERE id=?1", q(field), q(entity));
                     self.sql.push(sql.clone());
                     let mut span = self.observer.span("io", "sqlite.read_field");
-                    let stored: Option<Option<String>> =
-                        self.db.query_row(&sql, [id], |r| r.get(0)).optional()?;
+                    let stored: Option<Option<String>> = self
+                        .db
+                        .query_row(&sql, [id], |r| {
+                            use rusqlite::types::ValueRef;
+                            Ok(match r.get_ref(0)? {
+                                ValueRef::Null => None,
+                                ValueRef::Integer(n) => Some(n.to_string()),
+                                ValueRef::Text(t) => Some(String::from_utf8_lossy(t).into_owned()),
+                                _ => None,
+                            })
+                        })
+                        .optional()?;
                     span.success();
                     let stored = stored.ok_or_else(|| err("not_found"))?;
                     let t = self.p.resolve(&f.ty)?;
@@ -1126,7 +1179,7 @@ impl Session<'_> {
                         None => Value::Null,
                         Some(s) => {
                             if matches!(base, Type::Id(_) | Type::Named(_)) {
-                                Value::Str(s)
+                                Value::Num(number(&s)?)
                             } else {
                                 Value::from_json(&serde_json::from_str(&s)?)?
                             }
@@ -1383,7 +1436,7 @@ impl Session<'_> {
                 let Value::Id(entity, id) = id else {
                     return Err(err("invalid_input"));
                 };
-                if !self.changes.contains_key(&(entity.clone(), id.clone()))
+                if !self.changes.contains_key(&(entity.clone(), id))
                     && !exists(self.db, &entity, &id)?
                 {
                     return Err(err("not_found"));
@@ -1400,7 +1453,7 @@ impl Session<'_> {
                 let mut span = self.observer.span("io", "sqlite.scan_entities");
                 let mut statement = self.db.prepare(&sql)?;
                 let ids = statement
-                    .query_map([], |r| r.get::<_, String>(0))?
+                    .query_map([], |r| r.get::<_, i64>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 span.success();
                 let mut values = ids
@@ -1422,7 +1475,7 @@ impl Session<'_> {
                 let Type::Id(entity) = self.p.resolve(&t)? else {
                     return Err(err("invalid_program"));
                 };
-                Ok(Value::Id(entity.clone(), uuid::Uuid::new_v4().to_string()))
+                Ok(Value::Id(entity.clone(), next_id(self.db, entity)?))
             }
             "as" => {
                 let value = self.eval(arg(1)?, scope, policy)?;
@@ -1492,11 +1545,11 @@ impl Session<'_> {
                         else {
                             return Err(err("invalid_input"));
                         };
-                        let id = uuid::Uuid::new_v4().to_string();
+                        let id = next_id(self.db, "File")?;
                         let reference = self.create(
                             "File",
                             BTreeMap::from([
-                                ("id".into(), Value::Id("File".into(), id.clone())),
+                                ("id".into(), Value::Id("File".into(), id)),
                                 ("url".into(), Value::Str(format!("/api/files/{id}"))),
                             ]),
                         )?;
@@ -1694,7 +1747,7 @@ impl Session<'_> {
                 if !exists(self.db, entity, id)? {
                     return Err(err("not_found"));
                 };
-                let key = (entity.clone(), id.clone());
+                let key = (entity.clone(), *id);
                 if self.changes.contains_key(&key) {
                     return Err(err("invalid_input"));
                 };
@@ -1748,24 +1801,21 @@ impl Session<'_> {
                     return Err(err("invalid_input"));
                 };
                 let v = if name == "id" {
-                    Value::Id(entity.into(), uuid::Uuid::new_v4().to_string())
+                    Value::Id(entity.into(), next_id(self.db, entity)?)
                 } else {
                     Value::Str(self.now.clone())
                 };
                 fields.insert(name.clone(), v);
             }
         }
-        let id = fields
-            .get("id")
-            .ok_or_else(|| err("invalid_input"))?
-            .text()?;
+        let id = fields.get("id").ok_or_else(|| err("invalid_input"))?.id()?;
         let reference = Value::reference(entity, &id);
         let row = self.p.validate(
             &stored_type(self.p, entity)?,
             Value::record(fields),
             Some(reference.clone()),
         )?;
-        let key = (entity.into(), id.clone());
+        let key = (entity.into(), id);
         if self.changes.contains_key(&key) || exists(self.db, entity, &id)? {
             return Err(err("conflict"));
         };
@@ -1799,7 +1849,7 @@ impl Session<'_> {
             return Err(err("invalid_input"));
         };
         let value = self.p.validate(&f.ty, value, Some(target.clone()))?;
-        let key = (entity.clone(), id.clone());
+        let key = (entity.clone(), *id);
         if !self.changes.get(&key).is_some_and(|c| c.action == "CREATE") {
             self.raw(&target.pin(), field)?;
         }
@@ -1913,7 +1963,7 @@ impl Session<'_> {
     fn references(&self, v: &Value) -> Result<()> {
         match v {
             Value::Ref { entity, id, .. } => {
-                if let Some(c) = self.changes.get(&(entity.clone(), id.clone())) {
+                if let Some(c) = self.changes.get(&(entity.clone(), *id)) {
                     if c.action == "DELETE" {
                         return Err(err("invalid_input"));
                     }
@@ -2026,7 +2076,7 @@ impl Session<'_> {
                         .values()
                         .map(storage)
                         .collect::<Result<Vec<_>>>()?;
-                    values.push(Some(id.clone()));
+                    values.push(Some(id.to_string()));
                     self.db.execute(
                         &format!(
                             "UPDATE {} SET {setters} WHERE id=?{}",

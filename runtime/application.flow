@@ -109,21 +109,21 @@
   [field device Device]]
 
 [seed Product [rows
-  [record [id "p1"] [name "Studio sluchátka"] [price 2490.00] [stock 12]]
-  [record [id "p2"] [name "Mechanická klávesnice"] [price 3290.00] [stock 5]]
-  [record [id "p3"] [name "USB-C rozbočovač"] [price 1290.00] [stock 2]]
-  [record [id "p4"] [name "Webkamera"] [price 1890.00] [stock 0]]]]
+  [record [id 1] [name "Studio sluchátka"] [price 2490.00] [stock 12]]
+  [record [id 2] [name "Mechanická klávesnice"] [price 3290.00] [stock 5]]
+  [record [id 3] [name "USB-C rozbočovač"] [price 1290.00] [stock 2]]
+  [record [id 4] [name "Webkamera"] [price 1890.00] [stock 0]]]]
 [seed User [rows
-  [record [id "u1"] [identitySubject "idp:u1"] [roles [list]]
+  [record [id 1] [identitySubject "idp:u1"] [roles [list]]
     [name "Petra Nováková"] [email "petra@example.test"] [country "CZ"]]
-  [record [id "u2"] [identitySubject "idp:u2"] [roles [list]]
+  [record [id 2] [identitySubject "idp:u2"] [roles [list]]
     [name "David Miller"] [email "david@example.test"] [country "US"]]
-  [record [id "u3"] [identitySubject "idp:u3"] [roles [list]]
+  [record [id 3] [identitySubject "idp:u3"] [roles [list]]
     [name "Nora Silva"] [email "nora@example.test"] [country "BR"]]]]
-[seed Device [rows [record [id "mower1"] [keyHash "0e2adcdce6bbb8e00f024743d68a57644b9b100853fe4a6efc465e22a844b17c"]] [record [id "mower2"]]]]
+[seed Device [rows [record [id 1] [keyHash "0e2adcdce6bbb8e00f024743d68a57644b9b100853fe4a6efc465e22a844b17c"]] [record [id 2]]]]
 [seed DeviceAccess [rows
-  [record [id "petra-mower1"] [user "u1"] [device "mower1"] [rights [list READ CONTROL]]]
-  [record [id "david-mower2"] [user "u2"] [device "mower2"] [rights [list READ CONTROL]]]]]
+  [record [id 1] [user 1] [device 1] [rights [list READ CONTROL]]]
+  [record [id 2] [user 2] [device 2] [rights [list READ CONTROL]]]]]
 
 [stream DeviceStatus
   [mqtt "devices/{device}/status"]
@@ -371,7 +371,7 @@
 
 [mutate LowBattery
   [output AlertOutput]
-  [on DeviceStatus [actor [service "device-automation"]]]
+  [on DeviceStatus [actor [service 1]]]
   [when [lt event.battery 20]]
   [atomic]
   [alert [create DeviceAlert [record [id [new AlertID]] [device event.device]
@@ -379,7 +379,7 @@
   [result alert]]
 
 
-[seed Service [rows [record [id "device-automation"] [keyHash "b2430e50684c45ecef24f0f00985f1287ea9cf4d7d86f2949eb9ea6849cc299d"] [roles [list DEVICE_AUTOMATION]]]]]
+[seed Service [rows [record [id 1] [keyHash "b2430e50684c45ecef24f0f00985f1287ea9cf4d7d86f2949eb9ea6849cc299d"] [roles [list DEVICE_AUTOMATION]]]]]
 
 [type ProductPhoto [image [maxBytes 10485760] [maxWidth 8000] [maxHeight 8000]]]
 [plugin Payment
@@ -413,4 +413,4 @@
 [Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
 [permissions Service [Image.resize [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]] [Files.put [INVOKE [when [contains actor.roles CATALOG_ADMIN]]]]]
 
-[seed User [rows [record [id "catalog-admin"] [identitySubject "idp:catalog-admin"] [roles [list CATALOG_ADMIN]] [name "Catalog admin"] [email "catalog@example.test"] [country "CZ"]]]]
+[seed User [rows [record [id 4] [identitySubject "idp:catalog-admin"] [roles [list CATALOG_ADMIN]] [name "Catalog admin"] [email "catalog@example.test"] [country "CZ"]]]]

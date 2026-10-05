@@ -25,9 +25,9 @@ fn source() -> String {
 [entity Device [field id DeviceID] [field hash String [unique]] [field access [list Access] [inverse Access.device]] [field status [list Status] [stream Status.device]]]
 [entity Access [field id AccessID] [field device Device] [field user User] [field active Bool]]
 [stream Status [mqtt "devices/{{device}}/status"] [history [duration "1h"] [maxMessages 2]] [field device Device] [field battery Battery] [field online Bool]]
-[seed User [rows [record [id "u1"] [hash "{user}"]]]]
-[seed Device [rows [record [id "d1"] [hash "{device}"]] [record [id "d2"] [hash "other"]]]]
-[seed Access [rows [record [id "a1"] [device "d1"] [user "u1"] [active true]]]]
+[seed User [rows [record [id 1] [hash "{user}"]]]]
+[seed Device [rows [record [id 1] [hash "{device}"]] [record [id 2] [hash "other"]]]]
+[seed Access [rows [record [id 1] [device 1] [user 1] [active true]]]]
 [auth [user User [apiKey] [entity [eq User.hash credential.hash]]] [device Device [apiKey] [entity [eq Device.hash credential.hash]]]]
 [transport HTTP [auth user]] [transport MQTT [auth device user]] [transport WebSocket [auth user]]
 [permissions Device [Status [CREATE [when [eq actor after.device]]]]]
@@ -53,7 +53,7 @@ fn publish_auth_retention_and_latest_projection() {
     let user = auth(USER_KEY);
     assert!(
         r.publish_topic(
-            "devices/d2/status",
+            "devices/2/status",
             json!({"battery":50,"online":true}),
             Some(&device)
         )
@@ -61,7 +61,7 @@ fn publish_auth_retention_and_latest_projection() {
     );
     assert!(
         r.publish_topic(
-            "devices/d1/status",
+            "devices/1/status",
             json!({"battery":50,"online":true,"receivedAt":"2000-01-01T00:00:00Z"}),
             Some(&device)
         )
@@ -69,29 +69,26 @@ fn publish_auth_retention_and_latest_projection() {
     );
     for value in [50, 40, 30] {
         r.publish_topic(
-            "devices/d1/status",
+            "devices/1/status",
             json!({"battery":value,"online":true}),
             Some(&device),
         )
         .unwrap();
     }
-    let latest = r
-        .execute("Latest", json!({"id":"d1"}), Some(&user))
-        .unwrap();
+    let latest = r.execute("Latest", json!({"id":1}), Some(&user)).unwrap();
     assert_eq!(latest["status"]["battery"], 30);
     let (values, trace, keys) = r
-        .execute_transport("LiveStatus", json!({"id":"d1"}), Some(&user), "WebSocket")
+        .execute_transport("LiveStatus", json!({"id":1}), Some(&user), "WebSocket")
         .unwrap();
     assert_eq!(values, json!([{"battery":40},{"battery":30}]));
     assert_eq!(keys.len(), 2);
     assert!(trace.iter().all(|s| !s.contains("online")));
     let messages = r.mqtt_messages("devices/+/status", Some(&user)).unwrap();
     assert_eq!(messages.len(), 2);
-    r.execute("Revoke", json!({"id":"a1"}), Some(&user))
-        .unwrap();
+    r.execute("Revoke", json!({"id":1}), Some(&user)).unwrap();
     assert_eq!(r.mqtt_messages("devices/#", Some(&user)).unwrap().len(), 0);
     assert!(
-        r.execute_transport("LiveStatus", json!({"id":"d1"}), Some(&user), "WebSocket")
+        r.execute_transport("LiveStatus", json!({"id":1}), Some(&user), "WebSocket")
             .is_err()
     );
 }
@@ -159,7 +156,7 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
     let (mut websocket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     websocket
         .send(Message::Text(
-            json!({"id":"s1","query":"LiveStatus","input":{"id":"d1"}})
+            json!({"id":"s1","query":"LiveStatus","input":{"id":1}})
                 .to_string()
                 .into(),
         ))
@@ -173,7 +170,7 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
     assert_eq!(read_packet(&mut subscriber).await, (0x90, vec![0, 1, 0]));
     let mut publisher = connect(mqtt_address, "device", DEVICE_KEY).await;
     let mut body = vec![];
-    string(&mut body, "devices/d1/status");
+    string(&mut body, "devices/1/status");
     body.extend([0, 2]);
     body.extend(br#"{"battery":12,"online":true}"#);
     // A frame arriving across timer ticks must not lose its partial parser state.
@@ -209,7 +206,7 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
     runtime
         .lock()
         .unwrap()
-        .execute("Revoke", json!({"id":"a1"}), Some(&auth(USER_KEY)))
+        .execute("Revoke", json!({"id":1}), Some(&auth(USER_KEY)))
         .unwrap();
     let ws = timeout(Duration::from_secs(3), websocket.next())
         .await
@@ -221,7 +218,7 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
         "not_found"
     );
     let mut body = vec![];
-    string(&mut body, "devices/d1/status");
+    string(&mut body, "devices/1/status");
     body.extend([0, 3]);
     body.extend(br#"{"battery":11,"online":true}"#);
     write_packet(&mut publisher, 0x32, &body).await;
@@ -238,7 +235,7 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
 const AUTOMATION_KEY: &str = "automation-key-long-enough-123456789";
 fn event_source() -> String {
     let hash = format!("{:x}", Sha256::digest(AUTOMATION_KEY));
-    source().replacen("[auth ", &format!("[type ServiceID [id Service]] [type AlertID [id Alert]]\n[entity Service [field id ServiceID] [field hash String [unique]]]\n[entity Alert [field id AlertID] [field device Device] [field battery Battery]]\n[seed Service [rows [record [id \"automation\"] [hash \"{hash}\"]]]]\n[permissions Service [Device [READ [when true]]] [Status [READ [when [can READ target.device]]]] [Alert [CREATE [when true]] [READ [when true]]]]\n[type AlertOutput [record [field id AlertID] [field battery Battery]]]\n[mutate LowBattery [output AlertOutput] [on Status [actor [service \"automation\"]]] [when [lt event.battery 20]] [atomic] [alert [create Alert [record [id [new AlertID]] [device event.device] [battery event.battery]]]] [result alert]]\n[query Alerts [output [list AlertOutput [max 10]]] [http GET \"/alerts\"] [result [first [entities Alert] 10]]]\n[auth [service Service [apiKey] [entity [eq Service.hash credential.hash]]] "),1).replace("[transport HTTP [auth user]]", "[transport HTTP [auth user service]]")
+    source().replacen("[auth ", &format!("[type ServiceID [id Service]] [type AlertID [id Alert]]\n[entity Service [field id ServiceID] [field hash String [unique]]]\n[entity Alert [field id AlertID] [field device Device] [field battery Battery]]\n[seed Service [rows [record [id 1] [hash \"{hash}\"]]]]\n[permissions Service [Device [READ [when true]]] [Status [READ [when [can READ target.device]]]] [Alert [CREATE [when true]] [READ [when true]]]]\n[type AlertOutput [record [field id AlertID] [field battery Battery]]]\n[mutate LowBattery [output AlertOutput] [on Status [actor [service 1]]] [when [lt event.battery 20]] [atomic] [alert [create Alert [record [id [new AlertID]] [device event.device] [battery event.battery]]]] [result alert]]\n[query Alerts [output [list AlertOutput [max 10]]] [http GET \"/alerts\"] [result [first [entities Alert] 10]]]\n[auth [service Service [apiKey] [entity [eq Service.hash credential.hash]]] "),1).replace("[transport HTTP [auth user]]", "[transport HTTP [auth user service]]")
 }
 #[test]
 fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
@@ -247,13 +244,13 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
     let mut config = Config::default();
     config
         .event_credentials
-        .insert("service:automation".into(), auth(AUTOMATION_KEY));
+        .insert("service:1".into(), auth(AUTOMATION_KEY));
     let mut runtime = Runtime::open(&source, ":memory:", config.clone()).unwrap();
     let device = auth(DEVICE_KEY);
     let service = auth(AUTOMATION_KEY);
     runtime
         .publish_topic(
-            "devices/d1/status",
+            "devices/1/status",
             json!({"battery":30,"online":true}),
             Some(&device),
         )
@@ -266,7 +263,7 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
     );
     runtime
         .publish_topic(
-            "devices/d1/status",
+            "devices/1/status",
             json!({"battery":12,"online":true}),
             Some(&device),
         )
@@ -293,7 +290,7 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
     assert_eq!(
         runtime
             .publish_topic(
-                "devices/d1/status",
+                "devices/1/status",
                 json!({"battery":12,"online":true}),
                 Some(&device)
             )
@@ -317,7 +314,7 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
     );
     assert_eq!(
         runtime
-            .execute("Latest", json!({"id":"d1"}), Some(&auth(USER_KEY)))
+            .execute("Latest", json!({"id":1}), Some(&auth(USER_KEY)))
             .unwrap()["status"],
         Value::Null
     );
@@ -329,7 +326,7 @@ fn audit_includes_stream_retention_and_automation_actor() {
     let key = auth(DEVICE_KEY);
     for battery in [30, 20, 10] {
         r.publish_topic(
-            "devices/d1/status",
+            "devices/1/status",
             json!({"battery":battery,"online":true}),
             Some(&key),
         )
@@ -347,7 +344,7 @@ fn audit_includes_stream_retention_and_automation_actor() {
         3
     );
     let deletion = changes.iter().find(|v| v["action"] == "DELETE").unwrap();
-    assert_eq!(deletion["actor"]["id"], "d1");
+    assert_eq!(deletion["actor"]["id"], 1);
     assert_eq!(deletion["transport"], "MQTT");
     assert_eq!(deletion["transaction_id"], changes[0]["transaction_id"]);
     assert!(deletion["before"].is_object());
@@ -356,12 +353,12 @@ fn audit_includes_stream_retention_and_automation_actor() {
     let app = include_str!("../application.flow");
     let mut config = Config::default();
     config.event_credentials.insert(
-        "service:device-automation".into(),
+        "service:1".into(),
         "ApiKey automation-key-long-enough-123456789".into(),
     );
     let mut r = Runtime::open(app, ":memory:", config).unwrap();
     r.publish_topic(
-        "devices/mower1/status",
+        "devices/1/status",
         json!({"online":true,"battery":12}),
         Some("ApiKey device-key-32-bytes-minimum-123456789"),
     )
@@ -370,7 +367,7 @@ fn audit_includes_stream_retention_and_automation_actor() {
     let rows = audit.as_array().unwrap();
     let alert = rows.iter().find(|v| v["entity"] == "DeviceAlert").unwrap();
     let status = rows.iter().find(|v| v["entity"] == "DeviceStatus").unwrap();
-    assert_eq!(alert["actor"]["id"], "device-automation");
+    assert_eq!(alert["actor"]["id"], 1);
     assert_eq!(alert["transport"], "event");
     assert_eq!(alert["operation"], "LowBattery");
     assert_eq!(alert["transaction_id"], status["transaction_id"]);

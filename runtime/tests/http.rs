@@ -57,7 +57,7 @@ async fn real_http_routes_and_permissions() {
         b"development-key-32-bytes-minimum-123456".to_vec(),
     );
     config.event_credentials.insert(
-        "service:device-automation".into(),
+        "service:1".into(),
         "ApiKey automation-key-long-enough-123456789".into(),
     );
     let runtime = std::sync::Arc::new(std::sync::Mutex::new(
@@ -94,19 +94,19 @@ async fn real_http_routes_and_permissions() {
         address,
         "POST",
         "/api/orders",
-        r#"{"userId":"u1","items":[{"productId":"p1","quantity":2}],"paymentMethod":"CARD"}"#,
+        r#"{"userId":1,"items":[{"productId":1,"quantity":2}],"paymentMethod":"CARD"}"#,
         Some(&auth),
     )
     .await;
     assert_eq!(status, 201, "{receipt}");
-    let path = format!("/api/orders/{}", receipt["order"]["id"].as_str().unwrap());
+    let path = format!("/api/orders/{}", receipt["order"]["id"].as_i64().unwrap());
     assert_eq!(request(address, "GET", &path, "", Some(&auth)).await.0, 200);
     assert_eq!(request(address, "GET", &path, "", None).await.0, 404);
     assert_eq!(
         request(
             address,
             "POST",
-            "/api/devices/mower1/commands",
+            "/api/devices/1/commands",
             r#"{"action":"START"}"#,
             Some(&auth)
         )
@@ -118,7 +118,7 @@ async fn real_http_routes_and_permissions() {
         request(
             address,
             "POST",
-            "/api/devices/mower2/commands",
+            "/api/devices/2/commands",
             r#"{"action":"STOP"}"#,
             Some(&auth)
         )
@@ -130,8 +130,8 @@ async fn real_http_routes_and_permissions() {
         request(
             address,
             "POST",
-            "/api/devices/mower1/commands",
-            r#"{"deviceId":"mower2","action":"STOP"}"#,
+            "/api/devices/1/commands",
+            r#"{"deviceId":2,"action":"STOP"}"#,
             Some(&auth)
         )
         .await
@@ -168,7 +168,7 @@ async fn real_http_routes_and_permissions() {
             .iter()
             .any(|v| v["operation"] == "CreateOrder")
     );
-    let input=json!({"endpoint":"SendCommand","path":"/api/devices/mower2/commands","authorization":auth,"body":{"action":"STOP"}}).to_string();
+    let input=json!({"endpoint":"SendCommand","path":"/api/devices/2/commands","authorization":auth,"body":{"action":"STOP"}}).to_string();
     let baseline = runtime.lock().unwrap().audit(0, 200).unwrap();
     assert_eq!(
         request(admin_address, "POST", "/api/call", &input, Some(admin_auth))
@@ -196,6 +196,24 @@ async fn real_http_routes_and_permissions() {
             .await
             .0,
         404
+    );
+    assert_eq!(
+        request(
+            address,
+            "POST",
+            "/api/devices/1/commands",
+            r#"{"action":"STOP","deviceId":"1"}"#,
+            Some(&auth)
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        request(address, "GET", "/api/devices/mower1", "", Some(&auth))
+            .await
+            .0,
+        400
     );
     admin_server.abort();
     server.abort();

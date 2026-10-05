@@ -69,6 +69,38 @@ pub(crate) fn route(pattern: &str, path: &str) -> Result<Option<Map<String, Valu
     }
     Ok(Some(inputs))
 }
+fn parameter(
+    runtime: &Arc<Mutex<Runtime>>,
+    operation: &str,
+    key: &str,
+    value: Value,
+) -> Result<Value> {
+    let guard = runtime
+        .lock()
+        .map_err(|_| Error::new("internal", "Runtime lock failed"))?;
+    let ty = guard
+        .program
+        .operations
+        .iter()
+        .find(|op| op.name == operation)
+        .and_then(|op| op.inputs.get(key))
+        .map(|(ty, _)| ty);
+    if let Some(ty) = ty
+        && matches!(guard.program.resolve(ty)?, crate::program::Type::Id(_))
+    {
+        let text = value
+            .as_str()
+            .ok_or_else(|| Error::new("invalid_input", "Invalid numeric ID"))?;
+        if !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::new("invalid_input", "Invalid numeric ID"));
+        }
+        let number = crate::value::number(text)?;
+        return Ok(json!(crate::program::valid_id(crate::value::Value::Num(
+            number
+        ))?));
+    }
+    Ok(value)
+}
 fn merge(inputs: &mut Map<String, Value>, key: String, value: Value) -> Result<()> {
     if inputs.insert(key, value).is_some() {
         return Err(Error::new("invalid_input", "Input supplied more than once"));
@@ -161,7 +193,11 @@ async fn dispatch_inner(State(runtime): State<Arc<Mutex<Runtime>>>, request: Req
             let bytes = runtime
                 .lock()
                 .map_err(|_| Error::new("internal", "Runtime lock failed"))?
-                .file_bytes(&id, authorization.as_deref())?;
+                .file_bytes(
+                    &id.parse::<i64>()
+                        .map_err(|_| Error::new("invalid_input", "Invalid numeric ID"))?,
+                    authorization.as_deref(),
+                )?;
             return Ok(Response::builder()
                 .status(200)
                 .header("content-type", "image/png")
@@ -186,14 +222,20 @@ async fn dispatch_inner(State(runtime): State<Arc<Mutex<Runtime>>>, request: Req
             };
             matches.pop().unwrap()
         };
+        for (key, value) in &mut inputs {
+            *value = parameter(&runtime, &name, key, value.clone())?;
+        }
         if let Some(query) = parts.uri.query() {
             for pair in query.split('&').filter(|p| !p.is_empty()) {
                 let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                merge(
-                    &mut inputs,
-                    decode(&key.replace('+', " "))?,
+                let key = decode(&key.replace('+', " "))?;
+                let value = parameter(
+                    &runtime,
+                    &name,
+                    &key,
                     Value::String(decode(&value.replace('+', " "))?),
                 )?;
+                merge(&mut inputs, key, value)?;
             }
         }
         let bytes = to_bytes(body, 16 * 1024 * 1024)

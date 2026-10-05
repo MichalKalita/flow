@@ -13,7 +13,7 @@ fn config() -> Config {
     Config {
         jwt_keys: BTreeMap::from([("user".into(), KEY.to_vec())]),
         event_credentials: BTreeMap::from([(
-            "service:device-automation".into(),
+            "service:1".into(),
             "ApiKey automation-key-long-enough-123456789".into(),
         )]),
     }
@@ -41,8 +41,8 @@ fn token_claims(claims: Value, algorithm: &str, key: &[u8]) -> String {
 fn runtime() -> Runtime {
     Runtime::open(APP, ":memory:", config()).unwrap()
 }
-fn order(user: &str, qty: u32) -> Value {
-    json!({"userId":user,"items":[{"productId":"p1","quantity":qty}],"paymentMethod":"CARD"})
+fn order(user: i64, qty: u32) -> Value {
+    json!({"userId":user,"items":[{"productId":1,"quantity":qty}],"paymentMethod":"CARD"})
 }
 #[test]
 fn parser_and_exact_numbers() {
@@ -75,7 +75,7 @@ fn source_compiles_and_public_projection_is_narrow() {
     let mut r = runtime();
     let (products, trace) = r.execute_traced("Products", json!({}), None).unwrap();
     assert_eq!(products.as_array().unwrap().len(), 4);
-    assert_eq!(products[0], json!({"id":"p1","name":"Studio sluchátka"}));
+    assert_eq!(products[0], json!({"id":1,"name":"Studio sluchátka"}));
     assert!(
         trace
             .iter()
@@ -89,7 +89,7 @@ fn credentials_verified_and_roles_not_client_controlled() {
     let auth = token("idp:u1");
     assert_eq!(
         r.execute("Users", json!({}), Some(&auth)).unwrap(),
-        json!([{"id":"u1","name":"Petra Nováková"}])
+        json!([{"id":1,"name":"Petra Nováková"}])
     );
     let invalid = token_claims(
         json!({"iss":"https://identity.example.com","aud":"application","sub":"idp:u1","exp":chrono::Utc::now().timestamp()+3600}),
@@ -115,7 +115,7 @@ fn credentials_verified_and_roles_not_client_controlled() {
         );
     }
     assert_eq!(
-        r.execute("Users", json!({"actor":"u1"}), Some(&auth))
+        r.execute("Users", json!({"actor":1}), Some(&auth))
             .unwrap_err()
             .code,
         "invalid_input"
@@ -125,12 +125,10 @@ fn credentials_verified_and_roles_not_client_controlled() {
 fn order_transaction_and_owned_reads() {
     let mut r = runtime();
     let auth = token("idp:u1");
-    let receipt = r
-        .execute("CreateOrder", order("u1", 2), Some(&auth))
-        .unwrap();
+    let receipt = r.execute("CreateOrder", order(1, 2), Some(&auth)).unwrap();
     assert_eq!(receipt["order"]["total"], 4980);
     assert_eq!(receipt["order"]["items"][0]["quantity"], 2);
-    let id = receipt["order"]["id"].as_str().unwrap();
+    let id = receipt["order"]["id"].as_i64().unwrap();
     assert_eq!(
         r.execute("Order", json!({"orderId":id}), Some(&auth))
             .unwrap(),
@@ -145,7 +143,7 @@ fn order_transaction_and_owned_reads() {
         );
     }
     assert_eq!(
-        r.execute("UserOrders", json!({"userId":"u1"}), Some(&auth))
+        r.execute("UserOrders", json!({"userId":1}), Some(&auth))
             .unwrap()
             .as_array()
             .unwrap()
@@ -158,21 +156,16 @@ fn failed_permissions_and_stock_validation_roll_back() {
     let mut r = runtime();
     let auth = token("idp:u1");
     assert_eq!(
-        r.execute("CreateOrder", order("u2", 2), Some(&auth))
+        r.execute("CreateOrder", order(2, 2), Some(&auth))
             .unwrap_err()
             .code,
         "not_found"
     );
-    let receipt = r
-        .execute("CreateOrder", order("u1", 12), Some(&auth))
-        .unwrap();
+    let receipt = r.execute("CreateOrder", order(1, 12), Some(&auth)).unwrap();
     assert_eq!(receipt["order"]["items"][0]["quantity"], 12);
-    assert!(
-        r.execute("CreateOrder", order("u1", 1), Some(&auth))
-            .is_err()
-    );
+    assert!(r.execute("CreateOrder", order(1, 1), Some(&auth)).is_err());
     assert_eq!(
-        r.execute("UserOrders", json!({"userId":"u1"}), Some(&auth))
+        r.execute("UserOrders", json!({"userId":1}), Some(&auth))
             .unwrap()
             .as_array()
             .unwrap()
@@ -188,10 +181,10 @@ fn duplicate_cart_rows_group_before_stock_update() {
         .execute(
             "CreateOrder",
             json!({
-                "userId": "u1",
+                "userId": 1,
                 "items": [
-                    {"productId": "p1", "quantity": 1},
-                    {"productId": "p1", "quantity": 2}
+                    {"productId": 1, "quantity": 1},
+                    {"productId": 1, "quantity": 2}
                 ],
                 "paymentMethod": "BANK"
             }),
@@ -209,7 +202,7 @@ fn device_permissions_apply_to_writes() {
     assert!(
         r.execute(
             "SendCommand",
-            json!({"deviceId":"mower1","action":"START"}),
+            json!({"deviceId":1,"action":"START"}),
             Some(&auth)
         )
         .is_ok()
@@ -217,7 +210,7 @@ fn device_permissions_apply_to_writes() {
     assert_eq!(
         r.execute(
             "SendCommand",
-            json!({"deviceId":"mower2","action":"STOP"}),
+            json!({"deviceId":2,"action":"STOP"}),
             Some(&auth)
         )
         .unwrap_err()
@@ -225,13 +218,13 @@ fn device_permissions_apply_to_writes() {
         "forbidden"
     );
     assert_eq!(
-        r.execute("Device", json!({"deviceId":"mower2"}), Some(&auth))
+        r.execute("Device", json!({"deviceId":2}), Some(&auth))
             .unwrap_err()
             .code,
         "not_found"
     );
     assert_eq!(
-        r.execute("Device", json!({"deviceId":"mower1"}), Some(&auth))
+        r.execute("Device", json!({"deviceId":1}), Some(&auth))
             .unwrap()["positions"],
         json!([])
     );
@@ -241,10 +234,10 @@ fn strict_inputs_and_prices() {
     let mut r = runtime();
     let auth = token("idp:u1");
     for input in [
-        json!({"userId":"u1","items":[],"paymentMethod":"CARD"}),
-        json!({"userId":"u1","items":[{"productId":"p1","quantity":1,"hidden":true}],"paymentMethod":"CARD"}),
-        json!({"userId":"u1","items":[{"productId":"p1","quantity":0}],"paymentMethod":"CARD"}),
-        json!({"userId":"u1","items":[{"productId":"p1","quantity":1.01}],"paymentMethod":"CARD"}),
+        json!({"userId":1,"items":[],"paymentMethod":"CARD"}),
+        json!({"userId":1,"items":[{"productId":1,"quantity":1,"hidden":true}],"paymentMethod":"CARD"}),
+        json!({"userId":1,"items":[{"productId":1,"quantity":0}],"paymentMethod":"CARD"}),
+        json!({"userId":1,"items":[{"productId":1,"quantity":1.01}],"paymentMethod":"CARD"}),
     ] {
         assert_eq!(
             r.execute("CreateOrder", input, Some(&auth))
@@ -264,10 +257,7 @@ fn sqlite_survives_restart_and_rejects_implicit_schema_change() {
     let id;
     {
         let mut r = Runtime::open(APP, path_str, config()).unwrap();
-        id = r
-            .execute("CreateOrder", order("u1", 1), Some(&auth))
-            .unwrap()["order"]["id"]
-            .clone();
+        id = r.execute("CreateOrder", order(1, 1), Some(&auth)).unwrap()["order"]["id"].clone();
     }
     {
         let mut r = Runtime::open(APP, path_str, config()).unwrap();
@@ -302,7 +292,7 @@ fn photo_plugins_store_real_png_atomically_and_enforce_permissions() {
     let mut runtime = runtime();
     let admin = token("idp:catalog-admin");
     let user = token("idp:u1");
-    let input = json!({"productId":"p1","photo":png(),"width":8,"height":6});
+    let input = json!({"productId":1,"photo":png(),"width":8,"height":6});
     assert_eq!(
         runtime
             .execute("UploadPhoto", input.clone(), Some(&user))
@@ -312,15 +302,15 @@ fn photo_plugins_store_real_png_atomically_and_enforce_permissions() {
     );
     assert_eq!(
         runtime
-            .execute("ProductPhotos", json!({"productId":"p1"}), Some(&user))
+            .execute("ProductPhotos", json!({"productId":1}), Some(&user))
             .unwrap(),
         json!([])
     );
     let receipt = runtime.execute("UploadPhoto", input, Some(&admin)).unwrap();
     assert_eq!(receipt["photo"]["width"], 8);
     assert_eq!(receipt["photo"]["height"], 6);
-    let id = receipt["file"]["id"].as_str().unwrap();
-    let bytes = runtime.file_bytes(id, Some(&user)).unwrap();
+    let id = receipt["file"]["id"].as_i64().unwrap();
+    let bytes = runtime.file_bytes(&id, Some(&user)).unwrap();
     let audit = runtime.audit(0, 200).unwrap();
     let blob = audit
         .as_array()
@@ -329,13 +319,13 @@ fn photo_plugins_store_real_png_atomically_and_enforce_permissions() {
         .find(|v| v["entity"] == "_flow_blobs" && v["entity_id"] == id)
         .unwrap();
     assert_eq!(blob["after"]["bytes"], bytes.len());
-    assert_eq!(blob["actor"]["id"], "catalog-admin");
+    assert_eq!(blob["actor"]["id"], 4);
     let image = image::load_from_memory(&bytes).unwrap();
     assert_eq!((image.width(), image.height()), (8, 6));
-    assert_eq!(runtime.file_bytes(id, None).unwrap_err().code, "not_found");
+    assert_eq!(runtime.file_bytes(&id, None).unwrap_err().code, "not_found");
     assert_eq!(
         runtime
-            .execute("ProductPhotos", json!({"productId":"p1"}), Some(&user))
+            .execute("ProductPhotos", json!({"productId":1}), Some(&user))
             .unwrap()
             .as_array()
             .unwrap()
@@ -346,7 +336,7 @@ fn photo_plugins_store_real_png_atomically_and_enforce_permissions() {
         runtime
             .execute(
                 "UploadPhoto",
-                json!({"productId":"p1","photo":"invalid-base64","width":8,"height":6}),
+                json!({"productId":1,"photo":"invalid-base64","width":8,"height":6}),
                 Some(&admin)
             )
             .unwrap_err()
@@ -393,7 +383,7 @@ fn audit_is_atomic_attributes_actors_and_survives_restart() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|v| v["entity"] == "User" && v["entity_id"] == "u1")
+        .find(|v| v["entity"] == "User" && v["entity_id"] == 1)
         .unwrap();
     assert_eq!(user_seed["after"]["country"], "CZ");
     assert_eq!(user_seed["after"]["name"], "Petra Nováková");
@@ -411,13 +401,9 @@ fn audit_is_atomic_attributes_actors_and_survives_restart() {
         wal
     );
     assert_eq!(r.audit(0, 200).unwrap(), seeds);
-    assert!(
-        r.execute("CreateOrder", order("u2", 1), Some(&auth))
-            .is_err()
-    );
+    assert!(r.execute("CreateOrder", order(2, 1), Some(&auth)).is_err());
     assert_eq!(r.audit(0, 200).unwrap(), seeds);
-    r.execute("CreateOrder", order("u1", 2), Some(&auth))
-        .unwrap();
+    r.execute("CreateOrder", order(1, 2), Some(&auth)).unwrap();
     let audit = r.audit(0, 200).unwrap();
     let changes = audit
         .as_array()
@@ -436,7 +422,7 @@ fn audit_is_atomic_attributes_actors_and_survives_restart() {
         .unwrap();
     assert_ne!(stock["before"]["stock"], stock["after"]["stock"]);
     for v in &changes {
-        assert_eq!(v["actor"]["id"], "u1");
+        assert_eq!(v["actor"]["id"], 1);
         assert_eq!(v["operation"], "CreateOrder");
         assert_eq!(v["transaction_id"], changes[0]["transaction_id"]);
     }
@@ -460,19 +446,15 @@ fn audit_write_failure_rolls_back_application_changes() {
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch("CREATE TRIGGER fail_audit BEFORE INSERT ON _flow_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;").unwrap();
     let auth = token("idp:u1");
-    assert!(
-        r.execute("CreateOrder", order("u1", 1), Some(&auth))
-            .is_err()
-    );
+    assert!(r.execute("CreateOrder", order(1, 1), Some(&auth)).is_err());
     assert_eq!(r.audit(0, 200).unwrap(), baseline);
     assert_eq!(
-        r.execute("UserOrders", json!({"userId":"u1"}), Some(&auth))
+        r.execute("UserOrders", json!({"userId":1}), Some(&auth))
             .unwrap(),
         json!([])
     );
     db.execute_batch("DROP TRIGGER fail_audit;").unwrap();
-    r.execute("CreateOrder", order("u1", 1), Some(&auth))
-        .unwrap();
+    r.execute("CreateOrder", order(1, 1), Some(&auth)).unwrap();
     drop(db);
     drop(r);
     std::fs::remove_file(path).unwrap();
@@ -494,7 +476,7 @@ fn admin_issued_jwt_uses_existing_identity_and_never_logs_credentials() {
         .execute("Users", json!({}), Some(authorization))
         .unwrap();
     assert_eq!(users.as_array().unwrap().len(), 1);
-    assert_eq!(users[0]["id"], "u1");
+    assert_eq!(users[0]["id"], 1);
     assert_eq!(
         issued["claims"]["exp"].as_i64().unwrap() - issued["claims"]["iat"].as_i64().unwrap(),
         300
@@ -506,4 +488,162 @@ fn admin_issued_jwt_uses_existing_identity_and_never_logs_credentials() {
             .to_string()
             .contains(issued["token"].as_str().unwrap())
     );
+}
+
+#[test]
+fn numeric_ids_are_branded_and_reject_text_fractional_and_unsafe_values() {
+    use flow_runtime::{program::Type, value::Value as RuntimeValue};
+    let program = Program::compile(APP).unwrap();
+    let ty = Type::Id("User".into());
+    assert_eq!(
+        program
+            .validate(&ty, RuntimeValue::Id("User".into(), 1), None)
+            .unwrap()
+            .json()
+            .unwrap(),
+        json!(1)
+    );
+    assert!(
+        program
+            .validate(&ty, RuntimeValue::Id("Product".into(), 1), None)
+            .is_err()
+    );
+    for input in [
+        json!("1"),
+        json!("u1"),
+        json!(0),
+        json!(-1),
+        json!(1.5),
+        json!(9007199254740992i64),
+    ] {
+        assert!(
+            program
+                .validate(&ty, RuntimeValue::from_json(&input).unwrap(), None)
+                .is_err(),
+            "{input}"
+        );
+    }
+    let mut runtime = runtime();
+    let auth = token("idp:u1");
+    assert!(
+        runtime
+            .execute("UserOrders", json!({"userId":"1"}), Some(&auth))
+            .is_err()
+    );
+    let users = runtime.execute("Users", json!({}), Some(&auth)).unwrap();
+    assert_eq!(users[0]["id"], 1);
+}
+
+#[test]
+fn denied_mutation_rolls_back_id_allocation() {
+    let mut runtime = runtime();
+    let auth = token("idp:u1");
+    assert!(
+        runtime
+            .execute(
+                "SendCommand",
+                json!({"deviceId":2,"action":"START"}),
+                Some(&auth)
+            )
+            .is_err()
+    );
+    let command = runtime
+        .execute(
+            "SendCommand",
+            json!({"deviceId":1,"action":"START"}),
+            Some(&auth),
+        )
+        .unwrap();
+    assert_eq!(command["id"], 1);
+    let command = runtime
+        .execute(
+            "SendCommand",
+            json!({"deviceId":1,"action":"STOP"}),
+            Some(&auth),
+        )
+        .unwrap();
+    assert_eq!(command["id"], 2);
+}
+
+#[test]
+fn numeric_sequence_survives_delete_restart_and_allocates_before_insert() {
+    let source = r#"
+[type NoteID [id Note]]
+[entity Note [field id NoteID]]
+[seed Note [rows [record [id 10]]]]
+[auth [anonymous Anonymous]] [transport HTTP [auth anonymous]]
+[permissions * [Note [CREATE [when true]] [DELETE [when true]] [READ [when true]]]]
+[type Output [record [field id NoteID]]]
+[mutate Create [output Output] [http POST "/notes"] [atomic]
+ [note [create Note [record [id [new NoteID]]]]] [result note]]
+[mutate Pair [output [list Output [max 2]]] [http POST "/pair"] [atomic]
+ [firstId [new NoteID]] [secondId [new NoteID]]
+ [first [create Note [record [id firstId]]]] [second [create Note [record [id secondId]]]]
+ [result [list first second]]]
+[mutate Delete [input id NoteID] [output Bool] [http DELETE "/notes/{id}"] [atomic]
+ [removed [delete [entity $id]]] [result true]]
+"#;
+    let path = std::env::temp_dir().join(format!("flow-numeric-{}.sqlite", uuid::Uuid::new_v4()));
+    let mut runtime = Runtime::open(source, path.to_str().unwrap(), Config::default()).unwrap();
+    assert_eq!(
+        runtime.execute("Create", json!({}), None).unwrap()["id"],
+        11
+    );
+    runtime.execute("Delete", json!({"id":11}), None).unwrap();
+    drop(runtime);
+    let mut runtime = Runtime::open(source, path.to_str().unwrap(), Config::default()).unwrap();
+    assert_eq!(
+        runtime.execute("Create", json!({}), None).unwrap()["id"],
+        12
+    );
+    let pair = runtime.execute("Pair", json!({}), None).unwrap();
+    assert_eq!(pair, json!([{"id":13},{"id":14}]));
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("SELECT typeof(id) FROM Note WHERE id=12", [], |row| row
+            .get::<_, String>(
+            0
+        ))
+        .unwrap(),
+        "integer"
+    );
+    assert!(
+        runtime
+            .audit(0, 200)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["entity_id"].is_i64())
+    );
+    drop(db);
+    drop(runtime);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn legacy_text_id_database_is_rejected_without_changing_stored_data() {
+    let path = std::env::temp_dir().join(format!("flow-legacy-{}.sqlite", uuid::Uuid::new_v4()));
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE _flow_schema(id INTEGER PRIMARY KEY, hash TEXT); INSERT INTO _flow_schema VALUES(1,'legacy'); CREATE TABLE Legacy(id TEXT PRIMARY KEY); INSERT INTO Legacy VALUES('u1');").unwrap();
+    let error = Runtime::open(APP, path.to_str().unwrap(), config())
+        .err()
+        .unwrap();
+    assert!(error.message.contains("legacy text IDs"));
+    assert_eq!(
+        db.query_row("SELECT id FROM Legacy", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "u1"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='_flow_id_sequences'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    drop(db);
+    std::fs::remove_file(path).unwrap();
 }

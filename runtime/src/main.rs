@@ -48,10 +48,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.jwt_keys.insert("user".into(), secret.into_bytes());
     }
     if let Ok(secret) = std::env::var("FLOW_AUTOMATION_KEY") {
-        config.event_credentials.insert(
-            "service:device-automation".into(),
-            format!("ApiKey {secret}"),
-        );
+        config
+            .event_credentials
+            .insert("service:1".into(), format!("ApiKey {secret}"));
     }
     let admin_token = std::env::var("FLOW_ADMIN_TOKEN")
         .map_err(|_| "Set FLOW_ADMIN_TOKEN (at least 32 bytes) for the internal dashboard")?;
