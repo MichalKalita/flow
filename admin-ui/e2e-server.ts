@@ -1,7 +1,18 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const directory = await mkdtemp(join(tmpdir(), "flow-e2e-"));
+const projects = join(directory, "projects");
+const source = await readFile("../runtime/application.flow", "utf8");
+for (const name of ["demo", "second", "broken"]) {
+  await mkdir(join(projects, name), { recursive: true });
+  await writeFile(
+    join(projects, name, "application.flow"),
+    name === "broken" ? "[invalid" : source,
+  );
+}
+const control = join(tmpdir(), "flow-e2e-19091.json");
+await writeFile(control, JSON.stringify({ projects }));
 const build = Bun.spawn(
   [
     "cargo",
@@ -18,8 +29,8 @@ if (await build.exited) throw Error("Runtime build failed");
 const server = Bun.spawn(
   [
     "../runtime/target/debug/flow-runtime",
-    "../runtime/application.flow",
-    join(directory, "flow.sqlite"),
+    projects,
+    join(directory, "data"),
     "127.0.0.1:18081",
     "127.0.0.1:11884",
   ],
@@ -42,4 +53,5 @@ try {
   await server.exited;
 } finally {
   await rm(directory, { recursive: true, force: true });
+  await rm(control, { force: true });
 }

@@ -7,6 +7,10 @@ export function usePolling<T>(api: Api, path: string, interval = 0) {
     [revision, setRevision] = useState(0);
   const refresh = useCallback(() => setRevision((v) => v + 1), []);
   useEffect(() => {
+    setData(null);
+    setError("");
+  }, [api, path]);
+  useEffect(() => {
     const abort = new AbortController();
     let running = false;
     const load = async () => {

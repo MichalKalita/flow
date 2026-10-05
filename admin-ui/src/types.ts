@@ -49,6 +49,7 @@ export type ServicePoint = {
 };
 export type Overview = {
   version: string;
+  scope?: string;
   endpoints: Endpoint[];
   streams: {
     name: string;
@@ -59,6 +60,7 @@ export type Overview = {
   automations: { name: string; source: string; actor: string }[];
   metrics: {
     endpoints: Record<string, Metric>;
+    system?: Metric;
     work: Record<string, Metric>;
     histogram_bounds_ms: number[];
     dropped_logs: number;
@@ -110,6 +112,8 @@ export type Audit = {
   entity_id: number;
   action: string;
   transaction_id: string;
+  cursor?: string;
+  project?: string;
   before: unknown;
   after: unknown;
 };
@@ -118,7 +122,7 @@ export type Adapter = {
   issuer: string;
   audience: string;
   configured: boolean;
-  subjects: { subject: string; actor_id: string }[];
+  subjects: { subject: string; actor_id: number }[];
 };
 export type IssuedToken = {
   token: string;

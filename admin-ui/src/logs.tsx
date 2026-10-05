@@ -217,7 +217,12 @@ export function LogsPage({
                       {log.level}
                     </Badge>
                   </td>
-                  <td class="muted">{log.kind}</td>
+                  <td class="muted">
+                    {log.kind}
+                    {typeof log.project === "string" && (
+                      <small class="table-subtitle">{log.project}</small>
+                    )}
+                  </td>
                   <td>
                     <span class="mono">
                       {log.endpoint ?? log.name ?? log.error ?? log.kind}
@@ -319,12 +324,14 @@ export function AuditPage({
   data: Overview;
   onCopy: (text: string) => void;
 }) {
-  const [cursors, setCursors] = useState<number[]>([]),
+  const [cursors, setCursors] = useState<string[]>([]),
     [entity, setEntity] = useState(""),
     [action, setAction] = useState(""),
     [transport, setTransport] = useState(""),
     [selected, setSelected] = useState<Audit | null>(null);
-  const entities = [...new Set(data.streams.map((s) => s.name))];
+  const entities = [
+    ...new Set(data.streams.map((s) => s.name.split("/").at(-1)!)),
+  ];
   const query = new URLSearchParams({
     before: String(cursors.at(-1) ?? 0),
     entity,
@@ -334,7 +341,7 @@ export function AuditPage({
   const page = usePolling<Audit[]>(api, `/api/audit?${query}`);
   useEffect(() => setCursors([]), [entity, action, transport]);
   const actor = (v: unknown) => {
-    const a = v as { type?: string; id?: string };
+    const a = v as { type?: string; id?: number };
     return a?.id ? `${a.type} / ${a.id}` : (a?.type ?? "—");
   };
   return (
@@ -383,7 +390,7 @@ export function AuditPage({
             aria-label="Audit transport"
           >
             <option value="">All transports</option>
-            {["HTTP", "MQTT", "event", "startup"].map((t) => (
+            {["HTTP", "MQTT", "event", "startup", "admin"].map((t) => (
               <option key={t}>{t}</option>
             ))}
           </select>
@@ -414,7 +421,7 @@ export function AuditPage({
             <tbody>
               {page.data?.map((row) => (
                 <tr
-                  key={row.id}
+                  key={`${row.project ?? ""}:${row.id}`}
                   class="clickable"
                   onClick={() => setSelected(row)}
                   tabIndex={0}
@@ -423,7 +430,9 @@ export function AuditPage({
                   }}
                 >
                   <td class="tabular">
-                    <strong>#{row.id}</strong>
+                    <strong>
+                      {row.project ? `${row.project} / ` : ""}#{row.id}
+                    </strong>
                     <small class="table-subtitle">
                       {new Date(row.time).toLocaleString()}
                     </small>
@@ -474,7 +483,12 @@ export function AuditPage({
             <button
               class="button-secondary"
               disabled={page.data?.length !== 100 || page.loading}
-              onClick={() => setCursors((c) => [...c, page.data!.at(-1)!.id])}
+              onClick={() =>
+                setCursors((c) => [
+                  ...c,
+                  page.data!.at(-1)!.cursor ?? String(page.data!.at(-1)!.id),
+                ])
+              }
             >
               Older entries <Icon name="arrow" size={14} />
             </button>

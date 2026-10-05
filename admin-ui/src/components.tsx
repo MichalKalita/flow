@@ -103,16 +103,18 @@ export function Stat({
   );
 }
 export function Empty({
+  icon = "traffic",
   title = "No activity yet",
   text = "Data will appear as your application handles traffic.",
 }: {
+  icon?: Parameters<typeof Icon>[0]["name"];
   title?: string;
   text?: string;
 }) {
   return (
     <div class="empty">
       <span class="empty-icon">
-        <Icon name="traffic" size={25} />
+        <Icon name={icon} size={25} />
       </span>
       <strong>{title}</strong>
       <p>{text}</p>

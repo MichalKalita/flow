@@ -6,6 +6,7 @@ import type { Adapter, Api, IssuedToken, Overview } from "./types";
 export function ConsolePage({
   data,
   adminToken,
+  project,
   authorization,
   setAuthorization,
   initialEndpoint,
@@ -14,6 +15,7 @@ export function ConsolePage({
 }: {
   data: Overview;
   adminToken: string;
+  project: string;
   authorization: string;
   setAuthorization: (value: string) => void;
   initialEndpoint: string;
@@ -67,19 +69,22 @@ export function ConsolePage({
     const start = performance.now();
     try {
       const payload = body.trim() ? JSON.parse(body) : null;
-      const response = await fetch("/api/call", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${adminToken}`,
-          "Content-Type": "application/json",
+      const response = await fetch(
+        `/api/call?project=${encodeURIComponent(project)}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            endpoint: name,
+            path,
+            authorization,
+            body: payload,
+          }),
         },
-        body: JSON.stringify({
-          endpoint: name,
-          path,
-          authorization,
-          body: payload,
-        }),
-      });
+      );
       const type = response.headers.get("content-type") ?? "";
       let content = type.startsWith("image/")
         ? `Binary response: ${(await response.arrayBuffer()).byteLength} bytes (${type})`

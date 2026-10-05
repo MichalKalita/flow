@@ -1,3 +1,4 @@
+import { DatabasePage } from "./database";
 import { render } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 import { Badge, Empty, ErrorBanner, Icon } from "./components";
@@ -49,6 +50,13 @@ const pages = [
     title: "Mutation audit",
     description: "A durable record of every committed application change.",
     icon: "audit",
+  },
+  {
+    id: "database",
+    title: "Database",
+    description: "Browse, search and administer application records.",
+    icon: "resources",
+    group: "DATA MANAGEMENT",
   },
   {
     id: "console",
@@ -184,9 +192,14 @@ function App() {
     setToken(value);
     setAuthError("");
   }, []);
+  const [project, setProject] = useState("");
   const api = useCallback<Api>(
     async <T,>(path: string, options: RequestInit = {}) => {
-      const response = await fetch(path, {
+      const projectPath =
+        project && path !== "/api/projects"
+          ? `${path}${path.includes("?") ? "&" : "?"}project=${encodeURIComponent(project)}`
+          : path;
+      const response = await fetch(projectPath, {
         ...options,
         headers: {
           Authorization: `Bearer ${token}`,
@@ -203,13 +216,13 @@ function App() {
         let message = `HTTP ${response.status}`;
         try {
           const body = await response.json();
-          message += `: ${body.error ?? "request failed"}`;
+          message += `: ${body.message ?? body.error ?? "request failed"}`;
         } catch {}
         throw Error(message);
       }
       return response.json() as Promise<T>;
     },
-    [token, rememberToken],
+    [token, rememberToken, project],
   );
   useEffect(() => {
     const handler = () => {
@@ -242,6 +255,14 @@ function App() {
     <Authenticated
       key={token}
       token={token}
+      project={project}
+      initializeProject={(name) => setProject((current) => current || name)}
+      setProject={(name) => {
+        setProject(name);
+        setAuthorization("");
+        setConsoleEndpoint("");
+        setLogEndpoint("");
+      }}
       api={api}
       page={page}
       minutes={minutes}
@@ -269,6 +290,9 @@ function App() {
   );
 }
 type AuthenticatedProps = {
+  project: string;
+  initializeProject: (name: string) => void;
+  setProject: (name: string) => void;
   token: string;
   api: Api;
   page: string;
@@ -311,10 +335,28 @@ function Authenticated(props: AuthenticatedProps) {
     toast,
     logout,
   } = props;
+  const projects = usePolling<{
+    projects: {
+      name: string;
+      active: boolean;
+      status: string;
+      error?: string;
+      generation: number;
+    }[];
+    default_project: string;
+  }>(api, "/api/projects", interval);
+  useEffect(() => {
+    if (projects.data) props.initializeProject(projects.data.default_project);
+  }, [projects.data]);
   const overview = usePolling<Overview>(api, "/api/overview", interval),
     data = overview.data,
     active = pages.find((p) => p.id === page) ?? pages[0];
   const toConsole = (name: string) => {
+    if (props.project === "all" && name.includes("/")) {
+      const [project, ...rest] = name.split("/");
+      props.setProject(project);
+      name = rest.join("/");
+    }
     setConsoleEndpoint(name);
     navigate("console");
   };
@@ -348,9 +390,27 @@ function Authenticated(props: AuthenticatedProps) {
           <i class="status-dot" />
           <div>
             <strong>Application runtime</strong>
-            <small>Single-service deployment</small>
+            <small>
+              {props.project === "all"
+                ? "All projects"
+                : props.project || "Connecting…"}
+            </small>
           </div>
         </div>
+        <select
+          class="project-select"
+          aria-label="Active project"
+          value={props.project}
+          disabled={!props.project || !projects.data}
+          onChange={(e) => props.setProject(e.currentTarget.value)}
+        >
+          <option value="all">Entire system</option>
+          {projects.data?.projects.map((p) => (
+            <option key={p.name} value={p.name} disabled={!p.active}>
+              {p.name} · {p.status}
+            </option>
+          ))}
+        </select>
         <nav aria-label="Main navigation">
           {pages.map((p) => (
             <div key={p.id}>
@@ -438,7 +498,10 @@ function Authenticated(props: AuthenticatedProps) {
               </select>
               <button
                 class="icon-button refresh-button"
-                onClick={overview.refresh}
+                onClick={() => {
+                  overview.refresh();
+                  projects.refresh();
+                }}
                 aria-label="Refresh dashboard"
               >
                 <Icon name="refresh" />
@@ -447,7 +510,33 @@ function Authenticated(props: AuthenticatedProps) {
           </div>
           <ErrorBanner message={overview.error} />
           {data && pageProps ? (
-            <div class="page-content">
+            <div class="page-content" key={props.project}>
+              {projects.data?.projects
+                .filter((p) => p.status !== "running")
+                .map((p) => (
+                  <ErrorBanner
+                    key={p.name}
+                    message={`${p.name}: ${p.error ?? p.status} · ${p.active ? "Last working version remains active" : "Project unavailable"}`}
+                  />
+                ))}
+              {(page === "console" || page === "tokens") &&
+                props.project === "all" && (
+                  <Empty
+                    icon="key"
+                    title="Select a project"
+                    text="Credentials and endpoint calls belong to a specific project."
+                  />
+                )}
+              {page === "database" &&
+                (props.project === "all" ? (
+                  <Empty
+                    icon="resources"
+                    title="Select a project"
+                    text="Choose a project to browse its isolated database."
+                  />
+                ) : (
+                  <DatabasePage api={api} />
+                ))}
               {page === "overview" && <OverviewPage {...pageProps} />}{" "}
               {page === "traffic" && <TrafficPage {...pageProps} />}{" "}
               {page === "streaming" && <StreamingPage {...pageProps} />}{" "}
@@ -465,11 +554,12 @@ function Authenticated(props: AuthenticatedProps) {
               {page === "audit" && (
                 <AuditPage api={api} data={data} onCopy={copy} />
               )}{" "}
-              {page === "console" && (
+              {page === "console" && props.project !== "all" && (
                 <ConsolePage
                   key={consoleEndpoint}
                   data={data}
                   adminToken={token}
+                  project={props.project}
                   initialEndpoint={consoleEndpoint}
                   authorization={authorization}
                   setAuthorization={setAuthorization}
@@ -477,7 +567,7 @@ function Authenticated(props: AuthenticatedProps) {
                   onCopy={copy}
                 />
               )}{" "}
-              {page === "tokens" && (
+              {page === "tokens" && props.project !== "all" && (
                 <TokensPage
                   api={api}
                   onCopy={copy}

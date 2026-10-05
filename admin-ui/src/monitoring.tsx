@@ -37,8 +37,15 @@ const latencyLines = [
 ];
 export function OverviewPage({ data, minutes, onConsole, onLogs }: Props) {
   const metrics = data.metrics.endpoints,
-    stats = windowStats(metrics, minutes, data.metrics.histogram_bounds_ms),
-    points = requestSeries(metrics, minutes),
+    chartMetrics = data.metrics.system
+      ? { system: data.metrics.system }
+      : metrics,
+    stats = windowStats(
+      chartMetrics,
+      minutes,
+      data.metrics.histogram_bounds_ms,
+    ),
+    points = requestSeries(chartMetrics, minutes),
     service = data.metrics.service;
   const total = Object.values(metrics).reduce((n, m) => n + m.count, 0);
   const active =
@@ -285,8 +292,16 @@ export function TrafficPage({ data, minutes, onConsole, onLogs }: Props) {
       : data.metrics.endpoints[filter]
         ? { [filter]: data.metrics.endpoints[filter] }
         : {};
-  const stats = windowStats(metrics, minutes, data.metrics.histogram_bounds_ms),
-    points = requestSeries(metrics, minutes);
+  const chartMetrics =
+    data.metrics.system && filter === "all"
+      ? { system: data.metrics.system }
+      : metrics;
+  const stats = windowStats(
+      chartMetrics,
+      minutes,
+      data.metrics.histogram_bounds_ms,
+    ),
+    points = requestSeries(chartMetrics, minutes);
   return (
     <>
       <div class="page-toolbar">
@@ -294,6 +309,7 @@ export function TrafficPage({ data, minutes, onConsole, onLogs }: Props) {
           <label class="muted">Endpoint</label>
           <select
             value={filter}
+            disabled={!!data.metrics.system}
             onChange={(e) => setFilter(e.currentTarget.value)}
           >
             <option value="all">All endpoints</option>
@@ -306,6 +322,12 @@ export function TrafficPage({ data, minutes, onConsole, onLogs }: Props) {
         </div>
         <Badge tone="blue">Minute aggregates · {minutes}m window</Badge>
       </div>
+      {data.metrics.system && (
+        <p class="muted">
+          System charts combine all projects. Select a project in the sidebar
+          for endpoint-specific history.
+        </p>
+      )}
       <div class="stats-grid">
         <Stat
           label="Requests in window"

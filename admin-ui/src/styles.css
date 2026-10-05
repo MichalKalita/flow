@@ -1288,3 +1288,21 @@ td strong {
     display: block;
   }
 }
+.project-select {
+  margin: 16px 7px 0;
+  background: #1b2935;
+  color: #e3edf4;
+  border-color: #354550;
+  width: calc(100% - 14px);
+}
+.db-cell {
+  display: block;
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.db-editor {
+  min-height: 420px;
+  margin: 8px 0 18px;
+}
