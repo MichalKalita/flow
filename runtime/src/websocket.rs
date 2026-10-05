@@ -17,6 +17,11 @@ pub async fn session(
     credential: Option<String>,
     path: String,
 ) {
+    let observer = runtime.lock().unwrap().observability.clone();
+    let mut connection = observer.gauge_guard("ws_connections");
+    connection.set(1);
+    let mut subscription_gauge = observer.gauge_guard("ws_subscriptions");
+    observer.event("ws_sessions_opened", 1);
     let mut subscriptions: BTreeMap<String, Subscription> = BTreeMap::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     loop {
@@ -27,6 +32,7 @@ pub async fn session(
         match event {
             Some(message) => {
                 let Some(Ok(message)) = message else { return };
+                observer.event("ws_received", 1);
                 match message {
                     Message::Text(text) => {
                         let request: Value = match serde_json::from_str(&text) {
@@ -49,6 +55,7 @@ pub async fn session(
                         };
                         if request["unsubscribe"] == true {
                             subscriptions.remove(&id);
+                            subscription_gauge.set(subscriptions.len());
                             continue;
                         };
                         let Some(operation) = request["query"].as_str().map(str::to_owned) else {
@@ -77,6 +84,7 @@ pub async fn session(
                                 seen: BTreeSet::new(),
                             },
                         );
+                        subscription_gauge.set(subscriptions.len());
                     }
                     Message::Close(_) => return,
                     Message::Ping(data) => {
@@ -121,15 +129,17 @@ pub async fn session(
                                 return;
                             };
                             for (key, row) in keys.iter().zip(rows) {
-                                if subscription.seen.insert(key.clone())
-                                    && socket
+                                if subscription.seen.insert(key.clone()) {
+                                    if socket
                                         .send(Message::Text(
                                             json!({"id":id,"data":row}).to_string().into(),
                                         ))
                                         .await
                                         .is_err()
-                                {
-                                    return;
+                                    {
+                                        return;
+                                    }
+                                    observer.event("ws_delivered", 1);
                                 };
                             }
                             if subscription.seen.len() > 100000 {
@@ -137,6 +147,7 @@ pub async fn session(
                             }
                         }
                         Ok(Err(error)) => {
+                            observer.event("ws_errors", 1);
                             let _ = socket
                                 .send(Message::Text(
                                     json!({"id":id,"error":error.code}).to_string().into(),
@@ -150,6 +161,7 @@ pub async fn session(
                 for id in remove {
                     subscriptions.remove(&id);
                 }
+                subscription_gauge.set(subscriptions.len());
             }
         }
     }

@@ -72,6 +72,18 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
     runtime.observability = observer.clone();
     let runtime = Arc::new(Mutex::new(runtime));
+    let sampler_observer = observer.clone();
+    let sampler = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tick.tick().await;
+            if let Ok(process) =
+                tokio::task::spawn_blocking(flow_runtime::resources::process_memory).await
+            {
+                sampler_observer.sample(process);
+            }
+        }
+    });
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let mqtt_bind = args.get(3).map(String::as_str).unwrap_or("127.0.0.1:1883");
     let mqtt_listener = tokio::net::TcpListener::bind(mqtt_bind).await?;
@@ -94,6 +106,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    sampler.abort();
     mqtt_task.abort();
     admin_task.abort();
     tokio::task::spawn_blocking(move || observer.flush()).await??;

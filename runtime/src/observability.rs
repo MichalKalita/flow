@@ -28,6 +28,9 @@ struct Data {
     queued_bytes: usize,
     queued_events: usize,
     directory: Option<PathBuf>,
+    service: crate::telemetry::Service,
+    work: BTreeMap<String, Metric>,
+    log_sequence: u64,
 }
 #[derive(Default)]
 struct Metric {
@@ -40,23 +43,61 @@ struct Metric {
     minute_count: u64,
     minute_errors: u64,
     minute_sum: f64,
+    minute_buckets: [u64; 16],
+    statuses: [u64; 6],
+}
+fn percentile(buckets: &[u64; 16], count: u64, p: f64) -> Value {
+    let rank = (count as f64 * p).ceil() as u64;
+    if rank == 0 {
+        return Value::Null;
+    }
+    let mut sum = 0;
+    for (i, n) in buckets.iter().enumerate() {
+        sum += n;
+        if sum >= rank {
+            return BOUNDS.get(i).map(|v| json!(v)).unwrap_or(json!(">60000"));
+        }
+    }
+    Value::Null
 }
 impl Metric {
+    fn minute_point(&self) -> Value {
+        json!({
+            "buckets": self.minute_buckets,
+            "minute": self.minute, "count": self.minute_count, "errors": self.minute_errors,
+            "mean_ms": if self.minute_count==0 {0.} else {self.minute_sum/self.minute_count as f64},
+            "p50_ms": percentile(&self.minute_buckets, self.minute_count, 0.5),
+            "p95_ms": percentile(&self.minute_buckets, self.minute_count, 0.95),
+            "p99_ms": percentile(&self.minute_buckets, self.minute_count, 0.99)
+        })
+    }
+    fn observe(&mut self, ms: f64, failed: bool, status: u16) {
+        let minute = chrono::Utc::now().timestamp() / 60;
+        if self.minute != minute && self.minute_count > 0 {
+            if self.history.len() >= HISTORY - 1 {
+                self.history.pop_front();
+            }
+            self.history.push_back(self.minute_point());
+            self.minute_count = 0;
+            self.minute_errors = 0;
+            self.minute_sum = 0.;
+            self.minute_buckets = [0; 16];
+        }
+        self.minute = minute;
+        self.count += 1;
+        self.minute_count += 1;
+        self.sum += ms;
+        self.minute_sum += ms;
+        if failed {
+            self.errors += 1;
+            self.minute_errors += 1;
+        }
+        let bucket = BOUNDS.iter().position(|b| ms <= *b).unwrap_or(15);
+        self.buckets[bucket] += 1;
+        self.minute_buckets[bucket] += 1;
+        self.statuses[(status / 100).min(5) as usize] += 1;
+    }
     fn json(&self) -> Value {
-        let percentile = |p: f64| {
-            let rank = (self.count as f64 * p).ceil() as u64;
-            let mut n = 0;
-            if rank == 0 {
-                return Value::Null;
-            }
-            for (i, count) in self.buckets.iter().enumerate() {
-                n += count;
-                if n >= rank {
-                    return BOUNDS.get(i).map(|v| json!(v)).unwrap_or(json!(">60000"));
-                }
-            }
-            Value::Null
-        };
         let cutoff = chrono::Utc::now().timestamp() / 60 - HISTORY as i64;
         let mut history = self
             .history
@@ -65,22 +106,18 @@ impl Metric {
             .cloned()
             .collect::<VecDeque<_>>();
         if self.minute_count > 0 && self.minute > cutoff {
-            history.push_back(json!({
-                "minute": self.minute,
-                "count": self.minute_count,
-                "errors": self.minute_errors,
-                "mean_ms": self.minute_sum / self.minute_count as f64
-            }));
+            history.push_back(self.minute_point());
         }
         json!({
             "count": self.count,
             "errors": self.errors,
             "sum_ms": self.sum,
             "mean_ms": if self.count == 0 { 0. } else { self.sum / self.count as f64 },
-            "p50_ms": percentile(0.5),
-            "p95_ms": percentile(0.95),
-            "p99_ms": percentile(0.99),
+            "p50_ms": percentile(&self.buckets, self.count, 0.5),
+            "p95_ms": percentile(&self.buckets, self.count, 0.95),
+            "p99_ms": percentile(&self.buckets, self.count, 0.99),
             "buckets": self.buckets,
+            "statuses": self.statuses,
             "history": history
         })
     }
@@ -98,35 +135,53 @@ impl Observability {
         match fs::read(path.join("metrics.json")) {
             Ok(bytes) => {
                 let v: Value = serde_json::from_slice(&bytes)?;
-                if let Some(metrics) = v["endpoints"].as_object() {
-                    for (key, v) in metrics {
-                        let mut m = Metric {
-                            count: v["count"].as_u64().unwrap_or(0),
-                            errors: v["errors"].as_u64().unwrap_or(0),
-                            sum: v["sum_ms"].as_f64().unwrap_or(0.),
-                            ..Default::default()
-                        };
-                        for (i, n) in v["buckets"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .take(16)
-                            .enumerate()
-                        {
-                            m.buckets[i] = n.as_u64().unwrap_or(0);
+                this.0.lock().unwrap().service.restore(&v["service"]);
+                this.0.lock().unwrap().log_sequence = v["log_sequence"].as_u64().unwrap_or(0);
+                for section in ["endpoints", "work"] {
+                    if let Some(metrics) = v[section].as_object() {
+                        for (key, v) in metrics {
+                            let mut m = Metric {
+                                count: v["count"].as_u64().unwrap_or(0),
+                                errors: v["errors"].as_u64().unwrap_or(0),
+                                sum: v["sum_ms"].as_f64().unwrap_or(0.),
+                                ..Default::default()
+                            };
+                            for (i, n) in v["buckets"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .take(16)
+                                .enumerate()
+                            {
+                                m.buckets[i] = n.as_u64().unwrap_or(0);
+                            }
+                            for (i, n) in v["statuses"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .take(6)
+                                .enumerate()
+                            {
+                                m.statuses[i] = n.as_u64().unwrap_or(0);
+                            }
+                            m.history = v["history"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .rev()
+                                .take(HISTORY)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            let mut data = this.0.lock().unwrap();
+                            if section == "work" {
+                                data.work.insert(key.clone(), m);
+                            } else {
+                                data.metrics.insert(key.clone(), m);
+                            }
                         }
-                        m.history = v["history"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .rev()
-                            .take(HISTORY)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        this.0.lock().unwrap().metrics.insert(key.clone(), m);
                     }
                 }
             }
@@ -234,6 +289,20 @@ impl Observability {
     pub fn log(&self, mut event: Value) {
         event["time"] = json!(chrono::Utc::now().to_rfc3339());
         let mut data = self.0.lock().unwrap();
+        data.log_sequence =
+            (data.log_sequence + 1).max(chrono::Utc::now().timestamp_micros().max(0) as u64);
+        event["sequence"] = json!(data.log_sequence);
+        if event.get("level").is_none() {
+            event["level"] = json!(if event["status"].as_u64().is_some_and(|s| s >= 500)
+                || event["success"] == false
+            {
+                "error"
+            } else if event["status"].as_u64().is_some_and(|s| s >= 400) {
+                "warn"
+            } else {
+                "info"
+            });
+        }
         if let Some(tx) = &data.writer {
             if tx.try_send(Command::Log(event.clone())).is_err() {
                 data.dropped += 1;
@@ -252,33 +321,14 @@ impl Observability {
         let ms = elapsed.as_secs_f64() * 1000.;
         {
             let mut data = self.0.lock().unwrap();
-            let m = data.metrics.entry(endpoint.into()).or_default();
-            let minute = chrono::Utc::now().timestamp() / 60;
-            if m.minute != minute && m.minute_count > 0 {
-                if m.history.len() >= HISTORY - 1 {
-                    m.history.pop_front();
-                }
-                m.history.push_back(json!({
-                    "minute": m.minute,
-                    "count": m.minute_count,
-                    "errors": m.minute_errors,
-                    "mean_ms": m.minute_sum / m.minute_count as f64
-                }));
-                m.minute_count = 0;
-                m.minute_errors = 0;
-                m.minute_sum = 0.;
-            }
-            m.minute = minute;
-            m.count += 1;
-            m.minute_count += 1;
-            m.sum += ms;
-            m.minute_sum += ms;
+            data.metrics
+                .entry(endpoint.into())
+                .or_default()
+                .observe(ms, status >= 400, status);
+            data.service.event("http_requests", 1);
             if status >= 400 {
-                m.errors += 1;
-                m.minute_errors += 1;
+                data.service.event("http_errors", 1);
             }
-            let bucket = BOUNDS.iter().position(|b| ms <= *b).unwrap_or(15);
-            m.buckets[bucket] += 1;
         }
         self.log(json!({
             "kind": "request",
@@ -289,8 +339,12 @@ impl Observability {
         }));
     }
     pub fn snapshot(&self) -> Value {
-        let d = self.0.lock().unwrap();
+        let mut d = self.0.lock().unwrap();
+        let service = d.service.snapshot();
         json!({
+            "service": service,
+            "work": d.work.iter().map(|(k,m)|(k.clone(),m.json())).collect::<BTreeMap<_,_>>(),
+            "log_sequence": d.log_sequence,
             "endpoints": d.metrics.iter().map(|(k, m)| (k.clone(), m.json())).collect::<BTreeMap<_, _>>(),
             "histogram_bounds_ms": BOUNDS,
             "percentiles": "histogram bucket upper bounds; cumulative since first start",
@@ -304,6 +358,7 @@ impl Observability {
         let metrics = d
             .metrics
             .iter()
+            .chain(d.work.iter())
             .map(|(key, m)| {
                 key.capacity()
                     + std::mem::size_of::<Metric>()
@@ -334,7 +389,7 @@ impl Observability {
                 .map(|sizes| sizes.iter().sum::<u64>())
         });
         json!({
-            "estimated_metrics_bytes": metrics,
+            "estimated_metrics_bytes": metrics + d.service.estimated_bytes(),
             "estimated_log_buffer_bytes": logs,
             "estimated_log_queue_bytes": d.queued_bytes,
             "log_writer_buffer_bytes": if d.writer.is_some() { 65536 } else { 0 },
@@ -345,6 +400,51 @@ impl Observability {
             "history_minutes": HISTORY,
             "estimate_note": "Estimates include collection capacity and payloads; exclude allocator overhead, fragmentation, active requests, thread stacks and shared runtime allocations."
         })
+    }
+    pub fn event(&self, name: &str, count: u64) {
+        self.0.lock().unwrap().service.event(name, count);
+    }
+    pub fn gauge(&self, name: &str, delta: i64) {
+        self.0.lock().unwrap().service.gauge(name, delta);
+    }
+    pub fn gauge_guard(&self, name: &str) -> Gauge {
+        Gauge {
+            observer: self.clone(),
+            name: name.into(),
+            value: 0,
+        }
+    }
+    pub fn sample(&self, resources: Value) {
+        self.0.lock().unwrap().service.sample(resources);
+    }
+    pub fn log_source(&self) -> (Vec<Value>, Option<PathBuf>) {
+        let data = self.0.lock().unwrap();
+        (
+            data.logs.iter().rev().cloned().collect(),
+            data.directory.clone(),
+        )
+    }
+    fn work(&self, kind: &str, name: &str, elapsed: Duration, success: bool) {
+        let mut data = self.0.lock().unwrap();
+        let key = format!("{kind}:{name}");
+        if data.work.len() < 128 || data.work.contains_key(&key) {
+            data.work.entry(key).or_default().observe(
+                elapsed.as_secs_f64() * 1000.,
+                !success,
+                if success { 200 } else { 500 },
+            );
+        }
+        data.service.event(
+            if kind == "plugin" {
+                "plugin_calls"
+            } else {
+                "io_calls"
+            },
+            1,
+        );
+        if !success {
+            data.service.event("work_errors", 1);
+        }
     }
     pub fn logs(&self) -> Value {
         json!(self.0.lock().unwrap().logs)
@@ -373,11 +473,31 @@ impl Span {
 }
 impl Drop for Span {
     fn drop(&mut self) {
+        self.observer
+            .work(&self.kind, &self.name, self.start.elapsed(), self.success);
         self.observer.log(json!({
             "kind": self.kind,
             "name": self.name,
             "success": self.success,
             "duration_ms": self.start.elapsed().as_secs_f64() * 1000.
         }));
+    }
+}
+
+pub struct Gauge {
+    observer: Observability,
+    name: String,
+    value: i64,
+}
+impl Gauge {
+    pub fn set(&mut self, value: usize) {
+        let value = value.min(i64::MAX as usize) as i64;
+        self.observer.gauge(&self.name, value - self.value);
+        self.value = value;
+    }
+}
+impl Drop for Gauge {
+    fn drop(&mut self) {
+        self.observer.gauge(&self.name, -self.value);
     }
 }

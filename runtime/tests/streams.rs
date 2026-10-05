@@ -197,6 +197,15 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
     let length = u16::from_be_bytes([body[0], body[1]]) as usize;
     let payload: Value = serde_json::from_slice(&body[2 + length..]).unwrap();
     assert_eq!(payload["battery"], 12);
+    let metrics = runtime.lock().unwrap().observability.snapshot();
+    assert_eq!(metrics["service"]["gauges"]["mqtt_connections"], 2);
+    assert_eq!(metrics["service"]["gauges"]["mqtt_sessions"], 2);
+    assert_eq!(metrics["service"]["gauges"]["mqtt_subscriptions"], 1);
+    assert_eq!(metrics["service"]["gauges"]["ws_connections"], 1);
+    assert_eq!(metrics["service"]["gauges"]["ws_subscriptions"], 1);
+    assert_eq!(metrics["service"]["counters"]["mqtt_received"], 1);
+    assert_eq!(metrics["service"]["counters"]["mqtt_delivered"], 1);
+    assert_eq!(metrics["service"]["counters"]["ws_delivered"], 1);
     runtime
         .lock()
         .unwrap()
@@ -293,6 +302,19 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
         "forbidden"
     );
     assert_eq!(runtime.audit(0, 200).unwrap(), baseline);
+    let counters = runtime.observability.snapshot();
+    assert_eq!(
+        counters["service"]["counters"]["stream_events"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        counters["service"]["counters"]["automation_runs"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
     assert_eq!(
         runtime
             .execute("Latest", json!({"id":"d1"}), Some(&auth(USER_KEY)))

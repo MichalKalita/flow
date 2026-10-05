@@ -42,3 +42,6 @@ impl From<serde_json::Error> for Error {
         Self::new("invalid_input", e.to_string())
     }
 }
+
+pub mod log_store;
+pub(crate) mod telemetry;

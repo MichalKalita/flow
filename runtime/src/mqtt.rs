@@ -186,6 +186,15 @@ async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<
         write(&mut socket, 0x20, &[0, 5]).await?;
         return Err(error("unauthenticated"));
     };
+    let observer = runtime
+        .lock()
+        .map_err(|_| error("internal"))?
+        .observability
+        .clone();
+    let mut authenticated = observer.gauge_guard("mqtt_sessions");
+    authenticated.set(1);
+    let mut subscription_gauge = observer.gauge_guard("mqtt_subscriptions");
+    observer.event("mqtt_sessions_opened", 1);
     write(&mut socket, 0x20, &[0, 0]).await?;
     let (mut reader, mut socket) = socket.into_split();
     let (sender, mut incoming) = tokio::sync::mpsc::channel(32);
@@ -239,6 +248,7 @@ async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<
                         })
                         .await
                         .map_err(|_| error("internal"))??;
+                        observer.event("mqtt_received", 1);
                         if let Some(id) = id {
                             if id == 0 {
                                 return Err(error("invalid_input"));
@@ -271,6 +281,7 @@ async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<
                         };
                         let mut body = id.to_be_bytes().to_vec();
                         body.extend(codes);
+                        subscription_gauge.set(filters.len());
                         write(&mut socket, 0x90, &body).await?;
                     }
                     10 => {
@@ -282,6 +293,7 @@ async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<
                         while cursor.offset < p.body.len() {
                             filters.remove(&cursor.string()?);
                         }
+                        subscription_gauge.set(filters.len());
                         write(&mut socket, 0xb0, &id.to_be_bytes()).await?;
                     }
                     12 => {
@@ -322,6 +334,7 @@ async fn session(mut socket: TcpStream, runtime: Arc<Mutex<Runtime>>) -> Result<
                         body.extend(topic.as_bytes());
                         body.extend(payload.to_string().as_bytes());
                         write(&mut socket, 0x30, &body).await?;
+                        observer.event("mqtt_delivered", 1);
                     }
                 }
                 if seen.len() > 100000 {
@@ -335,11 +348,16 @@ pub async fn serve(listener: TcpListener, runtime: Arc<Mutex<Runtime>>) -> std::
     loop {
         let (socket, _) = listener.accept().await?;
         let runtime = runtime.clone();
+        let observer = runtime.lock().unwrap().observability.clone();
+        let mut connection = observer.gauge_guard("mqtt_connections");
+        connection.set(1);
         tokio::spawn(async move {
+            let _connection = connection;
             if let Err(e) = session(socket, runtime).await
                 && e.code != "disconnected"
             {
-                eprintln!("MQTT: {}", e.code)
+                observer.event("mqtt_errors", 1);
+                observer.log(serde_json::json!({"kind":"transport","name":"mqtt.session","level":"error","error":e.code}));
             }
         });
     }

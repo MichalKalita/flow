@@ -94,3 +94,115 @@ fn resource_report_measures_sqlite_files_and_separates_estimates() {
     drop(runtime);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn live_gauges_release_and_work_counters_restore() {
+    let path = std::env::temp_dir().join(format!("flow-service-{}", uuid::Uuid::new_v4()));
+    let observer = Observability::disk(&path).unwrap();
+    {
+        let mut first = observer.gauge_guard("ws_connections");
+        first.set(2);
+        let mut second = observer.gauge_guard("ws_connections");
+        second.set(1);
+        assert_eq!(
+            observer.snapshot()["service"]["gauges"]["ws_connections"],
+            3
+        );
+        first.set(1);
+    }
+    assert_eq!(
+        observer.snapshot()["service"]["gauges"]["ws_connections"],
+        0
+    );
+    observer.event("stream_events", 7);
+    let mut span = observer.span("io", "sqlite.test");
+    span.success();
+    drop(span);
+    observer.flush().unwrap();
+    drop(observer);
+    let restored = Observability::disk(&path).unwrap();
+    let metrics = restored.snapshot();
+    assert_eq!(metrics["service"]["counters"]["stream_events"], 7);
+    assert_eq!(metrics["service"]["counters"]["io_calls"], 1);
+    assert!(metrics["service"]["gauges"].as_object().unwrap().is_empty());
+    assert_eq!(metrics["work"]["io:sqlite.test"]["count"], 1);
+    drop(restored);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn archive_log_filters_and_pagination_extend_beyond_memory() {
+    use std::collections::BTreeMap;
+    let path = std::env::temp_dir().join(format!("flow-log-pages-{}", uuid::Uuid::new_v4()));
+    let observer = Observability::disk(&path).unwrap();
+    for i in 0..350 {
+        observer.request(
+            "GET /health",
+            200,
+            Duration::from_millis(1),
+            &format!("request-{i}"),
+        );
+    }
+    observer.flush().unwrap();
+    let mut filters = BTreeMap::from([
+        ("limit".into(), "100".into()),
+        ("kind".into(), "request".into()),
+    ]);
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        let page = flow_runtime::log_store::query(&observer, &filters).unwrap();
+        for row in page["entries"].as_array().unwrap() {
+            assert!(seen.insert(row["sequence"].as_u64().unwrap()));
+        }
+        let Some(cursor) = page["next_cursor"].as_str() else {
+            break;
+        };
+        filters.insert("before".into(), cursor.into());
+    }
+    assert_eq!(seen.len(), 350);
+    filters.remove("before");
+    filters.insert("search".into(), "request-0".into());
+    let page = flow_runtime::log_store::query(&observer, &filters).unwrap();
+    assert_eq!(page["entries"][0]["request_id"], "request-0");
+    drop(observer);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bounded_archive_scan_resumes_to_find_older_matches() {
+    use std::{collections::BTreeMap, io::Write};
+    let path = std::env::temp_dir().join(format!("flow-log-scan-{}", uuid::Uuid::new_v4()));
+    let observer = Observability::disk(&path).unwrap();
+    let archive = path.join("application.1.jsonl");
+    let mut file = std::fs::File::create(&archive).unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"sequence":1,"kind":"request","name":"needle"})
+    )
+    .unwrap();
+    for sequence in 2..202 {
+        writeln!(
+            file,
+            "{}",
+            json!({"sequence":sequence,"kind":"request","padding":"x".repeat(32768)})
+        )
+        .unwrap();
+    }
+    drop(file);
+    let mut filters = BTreeMap::from([("search".into(), "needle".into())]);
+    let first = flow_runtime::log_store::query(&observer, &filters).unwrap();
+    assert_eq!(first["scan_limited"], true);
+    assert_eq!(first["entries"], json!([]));
+    let cursor = first["next_cursor"].as_str().unwrap();
+    std::fs::rename(&archive, path.join("application.2.jsonl")).unwrap();
+    filters.insert("before".into(), cursor.into());
+    let resumed = flow_runtime::log_store::query(&observer, &filters).unwrap();
+    assert_eq!(resumed["entries"][0]["name"], "needle");
+    assert_eq!(resumed["next_cursor"], Value::Null);
+    std::fs::remove_file(path.join("application.2.jsonl")).unwrap();
+    let expired = flow_runtime::log_store::query(&observer, &filters).unwrap();
+    assert_eq!(expired["cursor_expired"], true);
+    drop(observer);
+    std::fs::remove_dir_all(path).unwrap();
+}

@@ -389,6 +389,15 @@ fn audit_is_atomic_attributes_actors_and_survives_restart() {
             .iter()
             .all(|v| v["operation"] == "seed")
     );
+    let user_seed = seeds
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["entity"] == "User" && v["entity_id"] == "u1")
+        .unwrap();
+    assert_eq!(user_seed["after"]["country"], "CZ");
+    assert_eq!(user_seed["after"]["name"], "Petra Nováková");
+    assert_eq!(user_seed["after"]["roles"], json!([]));
     let seed_max = seeds[0]["id"].as_i64().unwrap();
     let auth = token("idp:u1");
     let wal = std::fs::metadata(format!("{}-wal", path.display()))
@@ -467,4 +476,34 @@ fn audit_write_failure_rolls_back_application_changes() {
     drop(db);
     drop(r);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn admin_issued_jwt_uses_existing_identity_and_never_logs_credentials() {
+    let mut runtime = Runtime::open(APP, ":memory:", config()).unwrap();
+    let adapters = runtime.jwt_adapters().unwrap();
+    assert!(adapters.to_string().contains("idp:u1"));
+    assert!(!adapters.to_string().contains("development-key"));
+    assert!(runtime.issue_admin_jwt("user", "idp:unknown", 300).is_err());
+    assert!(runtime.issue_admin_jwt("user", "idp:u1", 0).is_err());
+    assert!(runtime.issue_admin_jwt("user", "idp:u1", 86401).is_err());
+    assert!(runtime.issue_admin_jwt("service", "idp:u1", 300).is_err());
+    let issued = runtime.issue_admin_jwt("user", "idp:u1", 300).unwrap();
+    let authorization = issued["authorization"].as_str().unwrap();
+    let users = runtime
+        .execute("Users", json!({}), Some(authorization))
+        .unwrap();
+    assert_eq!(users.as_array().unwrap().len(), 1);
+    assert_eq!(users[0]["id"], "u1");
+    assert_eq!(
+        issued["claims"]["exp"].as_i64().unwrap() - issued["claims"]["iat"].as_i64().unwrap(),
+        300
+    );
+    assert!(
+        !runtime
+            .observability
+            .logs()
+            .to_string()
+            .contains(issued["token"].as_str().unwrap())
+    );
 }

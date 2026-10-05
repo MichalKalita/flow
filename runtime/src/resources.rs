@@ -42,7 +42,26 @@ pub fn process_memory() -> Value {
                     .map(|n| n * 1024)
             })
         };
+        static TICKS: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+        let ticks = TICKS.get_or_init(|| {
+            std::process::Command::new("getconf")
+                .arg("CLK_TCK")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .filter(|n| *n > 0.)
+        });
+        let cpu = fs::read_to_string("/proc/self/stat").ok().and_then(|s| {
+            let (_, fields) = s.rsplit_once(')')?;
+            let fields = fields.split_whitespace().collect::<Vec<_>>();
+            let total =
+                fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
+            Some(total / (*ticks)?)
+        });
         json!({
+            "cpu_seconds":cpu,
             "rss_bytes": read("VmRSS:"),
             "peak_rss_bytes": read("VmHWM:"),
             "virtual_bytes": read("VmSize:"),
@@ -51,15 +70,24 @@ pub fn process_memory() -> Value {
     }
     #[cfg(target_os = "macos")]
     {
-        let rss = std::process::Command::new("/bin/ps")
-            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-o", "rss=,time=", "-p", &std::process::id().to_string()])
             .output()
             .ok()
             .filter(|o| o.status.success())
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or_default();
+        let mut fields = output.split_whitespace();
+        let rss = fields
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
             .map(|n| n * 1024);
+        let cpu = fields.next().and_then(|s| {
+            s.split(':')
+                .try_fold(0., |n, v| Some(n * 60. + v.parse::<f64>().ok()?))
+        });
         json!({
+            "cpu_seconds": cpu,
             "rss_bytes": rss,
             "peak_rss_bytes": null,
             "virtual_bytes": null,

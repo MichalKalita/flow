@@ -100,6 +100,8 @@ pub(crate) async fn dispatch(
         };
         (guard.observability.clone(), endpoint)
     };
+    let mut active = observer.gauge_guard("http_inflight");
+    active.set(1);
     let mut response = dispatch_inner(State(runtime), request).await;
     observer.request(&endpoint, response.status().as_u16(), start.elapsed(), &id);
     response

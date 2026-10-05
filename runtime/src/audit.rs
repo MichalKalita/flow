@@ -1,4 +1,8 @@
-use crate::{Result, engine::Runtime, program::Program};
+use crate::{
+    Result,
+    engine::Runtime,
+    program::{Program, Type},
+};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
@@ -114,18 +118,62 @@ pub(crate) fn context(
     Ok(())
 }
 
+// Entity columns contain one JSON-encoded value; audit triggers preserve that
+// storage representation. Decode each field once at the API boundary, including
+// historical records, without interpreting ordinary strings recursively.
+fn decode_snapshot(mut snapshot: Value, program: &Program, entity: &str) -> Value {
+    if let Some(fields) = snapshot.as_object_mut() {
+        for (name, value) in fields {
+            let stored_json = program
+                .entities
+                .get(entity)
+                .and_then(|e| e.fields.get(name))
+                .and_then(|f| program.resolve(&f.ty).ok())
+                .and_then(|t| {
+                    if let Type::Optional(inner) = t {
+                        program.resolve(inner).ok()
+                    } else {
+                        Some(t)
+                    }
+                })
+                .is_some_and(|t| !matches!(t, Type::Id(_) | Type::Named(_)));
+            if stored_json
+                && let Some(encoded) = value.as_str()
+                && let Ok(decoded) = serde_json::from_str::<Value>(encoded)
+            {
+                *value = decoded;
+            }
+        }
+    }
+    snapshot
+}
+
 impl Runtime {
     pub fn audit(&self, before: i64, limit: usize) -> Result<Value> {
+        self.audit_filtered(before, limit, &std::collections::BTreeMap::new())
+    }
+    pub fn audit_filtered(
+        &self,
+        before: i64,
+        limit: usize,
+        filters: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Value> {
         let mut query = self.db.prepare(
             "SELECT id, time, transaction_id, operation, transport, actor, entity,
                 entity_id, action, before_json, after_json
-            FROM _flow_audit WHERE id < ?1 ORDER BY id DESC LIMIT ?2",
+            FROM _flow_audit WHERE id < ?1
+                AND (?3='' OR entity=?3) AND (?4='' OR action=?4)
+                AND (?5='' OR transport=?5)
+            ORDER BY id DESC LIMIT ?2",
         )?;
         let rows = query
             .query_map(
                 rusqlite::params![
                     if before <= 0 { i64::MAX } else { before },
-                    limit.min(200) as i64
+                    limit.min(200) as i64,
+                    filters.get("entity").map(String::as_str).unwrap_or(""),
+                    filters.get("action").map(String::as_str).unwrap_or(""),
+                    filters.get("transport").map(String::as_str).unwrap_or("")
                 ],
                 |r| {
                     let parse = |i| -> rusqlite::Result<Value> {
@@ -143,8 +191,8 @@ impl Runtime {
                         "entity": r.get::<_, String>(6)?,
                         "entity_id": r.get::<_, String>(7)?,
                         "action": r.get::<_, String>(8)?,
-                        "before": parse(9)?,
-                        "after": parse(10)?
+                        "before": decode_snapshot(parse(9)?, &self.program, &r.get::<_, String>(6)?),
+                        "after": decode_snapshot(parse(10)?, &self.program, &r.get::<_, String>(6)?)
                     }))
                 },
             )?

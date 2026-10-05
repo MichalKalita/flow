@@ -222,7 +222,62 @@ impl Runtime {
             observability: Default::default(),
         })
     }
-    fn run_events(&self, events: Vec<Value>) -> Result<()> {
+    pub fn jwt_adapters(&self) -> Result<serde_json::Value> {
+        let mut adapters = vec![];
+        for auth in self.program.auth.iter().filter(|a| a.mode == "jwt") {
+            let mut statement = self.db.prepare(&format!(
+                "SELECT id,{} FROM {} ORDER BY id LIMIT 100",
+                q(&auth.field),
+                q(&auth.entity)
+            ))?;
+            let subjects=statement.query_map([],|row| {
+                let subject:String=row.get(1)?;
+                Ok(serde_json::json!({"actor_id":row.get::<_,String>(0)?,"subject":serde_json::from_str::<serde_json::Value>(&subject).unwrap_or(serde_json::Value::Null)}))
+            })?.collect::<std::result::Result<Vec<_>,_>>()?;
+            adapters.push(serde_json::json!({"alias":auth.alias,"issuer":auth.issuer,"audience":auth.audience,"configured":self.config.jwt_keys.contains_key(&auth.alias),"subjects":subjects}));
+        }
+        Ok(serde_json::json!(adapters))
+    }
+    pub fn issue_admin_jwt(
+        &self,
+        alias: &str,
+        subject: &str,
+        ttl: u64,
+    ) -> Result<serde_json::Value> {
+        if !(60..=86400).contains(&ttl) || subject.is_empty() || subject.len() > 512 {
+            return Err(err("invalid_input"));
+        }
+        let auth = self
+            .program
+            .auth
+            .iter()
+            .find(|a| a.alias == alias && a.mode == "jwt")
+            .ok_or_else(|| err("invalid_input"))?;
+        let key = self
+            .config
+            .jwt_keys
+            .get(alias)
+            .ok_or_else(|| err("configuration"))?;
+        if lookup(&self.db, auth, subject)?.is_none() {
+            return Err(err("not_found"));
+        }
+        let now = Utc::now().timestamp();
+        let claims = serde_json::json!({"iss":auth.issuer,"aud":auth.audience,"sub":subject,"iat":now,"nbf":now,"exp":now+ttl as i64,"jti":uuid::Uuid::new_v4().to_string()});
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+        let unsigned = format!("{header}.{payload}");
+        let signature = ring::hmac::sign(
+            &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key),
+            unsigned.as_bytes(),
+        );
+        let token = format!("{unsigned}.{}", URL_SAFE_NO_PAD.encode(signature.as_ref()));
+        self.observability.log(serde_json::json!({"kind":"admin","name":"jwt.issued","adapter":alias,"subject":subject,"ttl_seconds":ttl}));
+        Ok(
+            serde_json::json!({"token":token,"authorization":format!("Bearer {token}"),"claims":claims}),
+        )
+    }
+    fn run_events(&self, events: Vec<Value>) -> Result<(u64, u64)> {
+        let mut handlers = 0;
         let mut queue = std::collections::VecDeque::from(events);
         let mut count = 0;
         while let Some(reference) = queue.pop_front() {
@@ -307,6 +362,7 @@ impl Runtime {
                     )?;
                 }
                 session.apply()?;
+                handlers += 1;
                 queue.extend(
                     session
                         .changes
@@ -318,7 +374,7 @@ impl Runtime {
                 );
             }
         }
-        Ok(())
+        Ok((count as u64, handlers))
     }
     pub fn file_bytes(&self, id: &str, credential: Option<&str>) -> Result<Vec<u8>> {
         let mut span = self.observability.span("io", "sqlite.file_bytes");
@@ -439,15 +495,17 @@ impl Runtime {
             let reference = session.create(stream, fields)?;
             session.authorize()?;
             session.apply()?;
-            self.run_events(vec![reference.clone()])?;
-            reference.text()
+            let processed = self.run_events(vec![reference.clone()])?;
+            Ok((reference.text()?, processed))
         })();
         match result {
-            Ok(id) => {
+            Ok((id, (events, handlers))) => {
                 if let Err(e) = self.db.execute_batch("COMMIT;") {
                     let _ = self.db.execute_batch("ROLLBACK;");
                     return Err(e.into());
                 };
+                self.observability.event("stream_events", events);
+                self.observability.event("automation_runs", handlers);
                 Ok(id)
             }
             Err(e) => {
@@ -602,6 +660,7 @@ impl Runtime {
             return Err(err("not_found"));
         };
         self.db.execute_batch("BEGIN IMMEDIATE;")?;
+        let mut processed = (0, 0);
         let result = (|| -> Result<_> {
             let (actor_type, actor) = authenticate(
                 &self.program,
@@ -688,7 +747,7 @@ impl Runtime {
                 })
                 .map(|(_, change)| change.reference.clone())
                 .collect();
-            self.run_events(events)?;
+            processed = self.run_events(events)?;
             Ok((output, session.sql, keys))
         })();
         match result {
@@ -697,6 +756,8 @@ impl Runtime {
                     let _ = self.db.execute_batch("ROLLBACK;");
                     return Err(e.into());
                 }
+                self.observability.event("stream_events", processed.0);
+                self.observability.event("automation_runs", processed.1);
                 Ok(v)
             }
             Err(e) => {
