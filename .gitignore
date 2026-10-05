@@ -9,3 +9,5 @@ prototype/e2e/test-results/
 prototype/e2e/playwright-report/
 *.beam
 erl_crash.dump
+runtime/target/
+runtime/data/

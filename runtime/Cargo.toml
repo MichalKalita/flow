@@ -1,0 +1,19 @@
+[package]
+name = "flow-runtime"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+ring = "0.17"
+base64 = "0.22"
+sha2 = "0.10"
+percent-encoding = "2"
