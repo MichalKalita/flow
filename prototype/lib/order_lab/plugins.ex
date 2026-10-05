@@ -1,5 +1,5 @@
 defmodule OrderLab.Plugins.Payment do
-  @moduledoc "Local payment adapter. Generates a demo URL; contacts no payment provider."
+  @moduledoc "Payment adapter with a local demo and optional idempotent HTTP provider."
   def call(input, context) do
     case call(input) do
       {:error, _} = error ->
@@ -17,7 +17,9 @@ defmodule OrderLab.Plugins.Payment do
               :httpc.request(
                 :post,
                 {String.to_charlist(url), headers, ~c"application/json", Jason.encode!(input)},
-                [timeout: 5000, connect_timeout: 2000, autoredirect: false], body_format: :binary)
+                [timeout: 5000, connect_timeout: 2000, autoredirect: false],
+                body_format: :binary
+              )
 
             case result do
               {:ok, {{_, status, _}, _, body}} when status in 200..299 ->

@@ -42,6 +42,13 @@ defmodule OrderLab.Router do
     end
   end
 
+  post "/api/jobs/:id/retry" do
+    case OrderLab.Store.retry_email(id) do
+      :ok -> send_json(conn, 202, %{"state" => "queued"})
+      :not_found -> send_json(conn, 404, %{"error" => "failed_job_not_found"})
+    end
+  end
+
   get "/pay/:id" do
     case OrderLab.Store.order(id) do
       nil ->

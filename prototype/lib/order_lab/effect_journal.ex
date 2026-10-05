@@ -67,11 +67,12 @@ defmodule OrderLab.EffectJournal do
 
   def invoke!(db, request, position, site, operation, input, perform) do
     signature = hash({site, operation, input})
-    id = "effect_" <> hash({request["id"], position})
+    scope = Map.get(request, "journal_scope", request["id"])
+    id = "effect_" <> hash({scope, position})
 
     row =
       case query!(db, "SELECT * FROM effects WHERE request_id=? AND position=?", [
-             request["id"],
+             scope,
              position
            ]) do
         [row] ->
@@ -82,7 +83,7 @@ defmodule OrderLab.EffectJournal do
           query!(
             db,
             "INSERT INTO effects(request_id,position,id,signature,operation,input_json,state,updated_at) VALUES (?,?,?,?,?,?,'pending',?)",
-            [request["id"], position, id, signature, operation, Jason.encode!(input), now()]
+            [scope, position, id, signature, operation, Jason.encode!(input), now()]
           )
 
           %{"state" => "pending", "id" => id}
@@ -116,7 +117,15 @@ defmodule OrderLab.EffectJournal do
       "SELECT id,request_id,operation,input_json,state,attempts,updated_at FROM effects ORDER BY rowid DESC LIMIT 100"
     )
     |> Enum.map(fn row ->
-      row |> Map.put("input", Jason.decode!(row["input_json"])) |> Map.delete("input_json")
+      row = row |> Map.put("input", Jason.decode!(row["input_json"])) |> Map.delete("input_json")
+
+      case String.split(row["request_id"], ":", parts: 3) do
+        ["queue", request_id, job_id] ->
+          row |> Map.put("request_id", request_id) |> Map.put("job_id", job_id)
+
+        _ ->
+          row
+      end
     end)
   end
 

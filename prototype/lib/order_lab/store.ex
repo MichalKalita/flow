@@ -593,16 +593,7 @@ defmodule OrderLab.Store do
         attempt = job["attempts"] + 1
         input = Jason.decode!(job["input_json"])
 
-        {result, call} =
-          invoke(
-            Map.fetch!(OrderLab.Language.Native.operations(), job["operation"]).module,
-            List.first(String.split(job["operation"], ".")),
-            List.last(String.split(job["operation"], ".")),
-            input,
-            job["request_id"],
-            job["order_id"],
-            attempt
-          )
+        {result, call} = deliver_plugin_job(state, job, input, attempt)
 
         exec!(db, "BEGIN IMMEDIATE")
         save_call!(db, call)
@@ -631,8 +622,14 @@ defmodule OrderLab.Store do
             )
         end
 
+        unknown =
+          case result do
+            {:error, %{"code" => code}} -> code in ["outcome_unknown", "plugin_contract_error"]
+            _ -> false
+          end
+
         if job["final_disposition"] == "delete" and attempt >= job["max_attempts"] and
-             match?({:error, _}, result) do
+             match?({:error, _}, result) and not unknown do
           write!(db, "DELETE FROM flow_jobs WHERE id=?", [job["id"]])
         end
 
@@ -649,7 +646,12 @@ defmodule OrderLab.Store do
     result =
       case query!(db, "SELECT * FROM flow_jobs WHERE id=? AND state='failed'", [id]) do
         [job] ->
-          input = Jason.decode!(job["input_json"]) |> Map.put("simulate_failure", false)
+          input = Jason.decode!(job["input_json"])
+
+          input =
+            if job["operation"] == "Email.send_confirmation",
+              do: Map.put(input, "simulate_failure", false),
+              else: input
 
           write!(
             db,
@@ -664,6 +666,83 @@ defmodule OrderLab.Store do
       end
 
     {:reply, result, state}
+  end
+
+  defp deliver_plugin_job(state, job, input, attempt) do
+    [plugin, method] = String.split(job["operation"], ".", parts: 2)
+
+    try do
+      contract = Map.fetch!(OrderLab.Language.Native.operations(), job["operation"])
+      if Map.get(contract, :queueable, true) == false, do: raise("Operation is not queueable")
+      input = OrderLab.Language.Types.validate!(input, contract.input)
+
+      perform = fn implementation ->
+        invoke(implementation, plugin, method, input, job["request_id"], job["order_id"], attempt)
+      end
+
+      if Map.get(contract, :retry) == :idempotent do
+        [parent] =
+          query!(state.db, "SELECT id,path,created_at FROM requests WHERE id=?", [
+            job["request_id"]
+          ])
+
+        request = %{
+          "id" => parent["id"],
+          "path" => parent["path"],
+          "time" => parent["created_at"],
+          "journal_scope" => "queue:" <> parent["id"] <> ":" <> job["id"]
+        }
+
+        site = {contract, OrderLab.Language.Native.configuration()}
+
+        {result, call} =
+          OrderLab.EffectJournal.invoke!(
+            state.effects,
+            request,
+            0,
+            site,
+            job["operation"],
+            input,
+            fn key ->
+              perform.(fn value ->
+                apply(contract.module, :call, [value, %{"idempotency_key" => key}])
+                |> validate_plugin_result!(contract)
+              end)
+            end
+          )
+
+        {result, %{call | id: id("call"), attempt: attempt}}
+      else
+        perform.(fn value ->
+          apply(contract.module, :call, [value]) |> validate_plugin_result!(contract)
+        end)
+      end
+    rescue
+      exception in OrderLab.ExternalUnknown ->
+        invoke(
+          fn _ -> {:error, %{"code" => "outcome_unknown", "message" => exception.message}} end,
+          plugin,
+          method,
+          input,
+          job["request_id"],
+          job["order_id"],
+          attempt
+        )
+
+      exception ->
+        invoke(
+          fn _ ->
+            {:error,
+             %{"code" => "plugin_contract_error", "message" => Exception.message(exception)}}
+          end,
+          plugin,
+          method,
+          input,
+          job["request_id"],
+          job["order_id"],
+          attempt
+        )
+    end
   end
 
   defp recover_request(state, id) do
@@ -902,7 +981,10 @@ defmodule OrderLab.Store do
             input,
             fn id ->
               invoke(
-                fn value -> module.call(value, %{"idempotency_key" => id}) end,
+                fn value ->
+                  module.call(value, %{"idempotency_key" => id})
+                  |> validate_plugin_result!(contract)
+                end,
                 plugin,
                 method,
                 input,
@@ -996,6 +1078,28 @@ defmodule OrderLab.Store do
       Process.delete(key)
       Process.delete(cursor)
     end
+  end
+
+  defp validate_plugin_result!(result, contract) do
+    case result do
+      {:ok, output} ->
+        {:ok, OrderLab.Language.Types.validate!(output, contract.output)}
+
+      {:error, %{"code" => code, "message" => message}}
+      when is_binary(code) and is_binary(message) ->
+        result
+
+      _ ->
+        raise "Plugin returned an invalid result"
+    end
+  rescue
+    exception ->
+      if Map.get(contract, :retry) == :idempotent,
+        do:
+          raise(OrderLab.ExternalUnknown,
+            message: "Provider response does not match its contract"
+          ),
+        else: reraise(exception, __STACKTRACE__)
   end
 
   defp invoke(module, plugin, operation, input, request_id, order_id, attempt) do

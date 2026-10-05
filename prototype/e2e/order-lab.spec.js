@@ -55,7 +55,7 @@ async function crashRequest(route,body,key,phase='after_commit',probeRoute=route
 function sql(query) {return execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),query],{encoding:'utf8'}).trim();}
 
 async function paymentProvider() {
-  const receipts=new Map();const calls=[];let dropResponse=false;
+  const receipts=new Map();const calls=[];let dropResponse=false;let invalidResponse=false;
   const provider=http.createServer(async(req,res)=>{
     let bytes='';for await(const chunk of req)bytes+=chunk;
     const input=JSON.parse(bytes);const key=req.headers['idempotency-key'];calls.push({key,input});
@@ -64,10 +64,10 @@ async function paymentProvider() {
     const receipt=receipts.get(key);
     if(JSON.stringify(receipt.input)!==JSON.stringify(input)){res.writeHead(409);return res.end();}
     if(dropResponse){req.socket.destroy();return;}
-    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(receipt.result));
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(invalidResponse?{url:7}:receipt.result));
   });
   await new Promise(resolve=>provider.listen(0,'127.0.0.1',resolve));
-  return {url:'http://127.0.0.1:'+provider.address().port+'/',receipts,calls,drop(value){dropResponse=value;},async close(){provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));}};
+  return {url:'http://127.0.0.1:'+provider.address().port+'/',receipts,calls,drop(value){dropResponse=value;},invalid(value){invalidResponse=value;},async close(){provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));}};
 }
 
 const payload = (overrides = {}) => ({user_id:'u1',items:[{product_id:'p1',quantity:1}],payment_method:'card',...overrides});
@@ -133,6 +133,16 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/queue-payment
+INPUT names List<String>
+INPUT country String = "CZ"
+TRANSACTION
+    jobs = FOR EACH name IN :names
+        job = QUEUE Payment.create_url WITH {order_id: name, amount_cents: 1, currency: "CZK", country: :country, method: "card"} POLICY 1 ATTEMPTS DELAY 0 ms DELETE
+        RETURN job
+    COMMIT
+RESPONSE 202 WITH {jobs: jobs}
+
 HTTP POST /api/test-seed-mutations
 TRANSACTION
     DELETE FROM Products AS p WHERE p.id = "p4"
@@ -1119,6 +1129,78 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const ws=await wsClient();
     try {ws.send({action:'subscribe',source:'DevicePosition',params:{device_id:'corrupt'},latest:true});expect((await ws.next()).type).toBe('error');expect((await snapshot(request)).websocket.subscriptions).toBe(0);} finally {ws.close();}
     expect((await request.get('/health')).status()).toBe(200);
+  });
+
+  test('QUEUE payment uses the real provider for each job and preserves its parent request and typed result', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/queue-payment',{data:{names:['queued-a','queued-b']}});expect(response.status()).toBe(202);const body=await response.json();
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.filter(job=>body.jobs.some(item=>item.id===job.id)).map(job=>job.state)).toEqual(['sent','sent']);
+      expect(provider.receipts.size).toBe(2);expect(new Set(provider.calls.map(call=>call.key)).size).toBe(2);
+      const state=await snapshot(request);const effects=state.external_operations.filter(effect=>effect.request_id===body.request_id);expect(effects).toHaveLength(2);expect(effects.map(effect=>effect.job_id).sort()).toEqual(body.jobs.map(job=>job.id).sort());
+      for(const job of state.email_jobs.filter(job=>body.jobs.some(item=>item.id===job.id))){expect(job.result.provider).toBe('e2e-provider');expect(job.result.url).toContain(job.input.order_id);}
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  for(const phase of ['after_external_effect','after_external_record']) test('QUEUE resumes after SIGKILL '+phase+' using one provider receipt and the same job identity', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();const marker=path.join(directory,'queue-crash-'+phase+'.json');
+      await startServer({PAYMENT_PROVIDER_URL:provider.url,FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:phase,FLOW_E2E_CRASH_ROUTE:'/api/queue-payment'});
+      const response=await request.post('/api/queue-payment',{data:{names:['queued-crash-'+phase]}});expect(response.status()).toBe(202);const body=await response.json();
+      await expect.poll(()=>fs.existsSync(marker)).toBe(true);expect(provider.receipts.size).toBe(1);await crashServer();
+      await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===body.jobs[0].id).state).toBe('sent');
+      expect(provider.calls).toHaveLength(phase==='after_external_effect'?2:1);expect(provider.receipts.size).toBe(1);expect(new Set(provider.calls.map(call=>call.key)).size).toBe(1);
+      const state=await snapshot(request);expect(state.plugin_calls.filter(call=>call.request_id===body.request_id)).toHaveLength(1);expect(state.external_operations.find(effect=>effect.job_id===body.jobs[0].id).state).toBe('completed');
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('uncertain QUEUE payment survives DELETE policy and an admin browser retries the same external operation', async ({request,page}) => {
+    const provider=await paymentProvider();provider.drop(true);
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/queue-payment',{data:{names:['queued-response-lost']}});const body=await response.json();const jobId=body.jobs[0].id;
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId)?.state).toBe('failed');
+      const state=await snapshot(request);expect(state.email_jobs.find(job=>job.id===jobId).error.code).toBe('outcome_unknown');expect(state.external_operations.find(effect=>effect.job_id===jobId).state).toBe('pending');expect(provider.receipts.size).toBe(1);
+      provider.drop(false);await page.goto('/admin');await page.getByRole('button',{name:'⇄ Pluginy'}).click();await page.locator('[data-retry-job="'+jobId+'"]').click();
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId).state).toBe('sent');
+      expect(provider.receipts.size).toBe(1);expect(provider.calls).toHaveLength(2);expect(provider.calls[0]).toEqual(provider.calls[1]);
+      expect((await request.get('/api/requests/'+body.request_id)).status()).toBe(200);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('QUEUE rejects a provider change for a pending effect and resumes when the original provider is restored', async ({request}) => {
+    const original=await paymentProvider();const replacement=await paymentProvider();original.drop(true);
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:original.url});
+      const response=await request.post('/api/queue-payment',{data:{names:['queue-provider-change']}});const body=await response.json();const jobId=body.jobs[0].id;
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId).state).toBe('failed');
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:replacement.url});expect((await request.post('/api/jobs/'+jobId+'/retry')).status()).toBe(202);
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId).state).toBe('failed');
+      expect(replacement.calls).toHaveLength(0);expect((await snapshot(request)).email_jobs.find(job=>job.id===jobId).error.code).toBe('plugin_contract_error');
+      original.drop(false);await stopServer();await startServer({PAYMENT_PROVIDER_URL:original.url});await request.post('/api/jobs/'+jobId+'/retry');
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId).state).toBe('sent');expect(original.receipts.size).toBe(1);expect(original.calls).toHaveLength(2);expect(original.calls[0]).toEqual(original.calls[1]);
+    } finally {await stopServer();await original.close();await replacement.close();await startServer();}
+  });
+
+  test('QUEUE preserves a malformed successful provider response as pending until the typed response is repaired', async ({request}) => {
+    const provider=await paymentProvider();provider.invalid(true);
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/queue-payment',{data:{names:['queue-invalid-result']}});const body=await response.json();const jobId=body.jobs[0].id;
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId).state).toBe('failed');
+      const state=await snapshot(request);expect(state.email_jobs.find(job=>job.id===jobId).error.code).toBe('outcome_unknown');expect(state.external_operations.find(effect=>effect.job_id===jobId).state).toBe('pending');
+      provider.invalid(false);await request.post('/api/jobs/'+jobId+'/retry');
+      await expect.poll(async()=> (await snapshot(request)).email_jobs.find(job=>job.id===jobId).state).toBe('sent');expect(provider.receipts.size).toBe(1);expect(provider.calls[0]).toEqual(provider.calls[1]);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('definitive queued payment business errors honor DELETE while preserving plugin and ledger diagnostics', async ({request}) => {
+    const response=await request.post('/api/queue-payment',{data:{names:['queued-rejected-country'],country:'BR'}});const body=await response.json();
+    await expect.poll(async()=> (await snapshot(request)).plugin_calls.some(call=>call.request_id===body.request_id && call.output.code==='payment_country_unsupported')).toBe(true);
+    const state=await snapshot(request);expect(state.email_jobs.some(job=>job.id===body.jobs[0].id)).toBe(false);expect(state.external_operations.find(effect=>effect.job_id===body.jobs[0].id).state).toBe('completed');expect((await request.get('/health')).status()).toBe(200);
   });
 
   test('Products and Users SEED preserves edited legacy rows and never resurrects deleted data or users', async ({request}) => {
