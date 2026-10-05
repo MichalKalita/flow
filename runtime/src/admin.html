@@ -1,21 +1,492 @@
-<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Flow · System administration</title>
-<style>
-:root{color-scheme:dark;font:15px system-ui;background:#101823;color:#e4edf6}body{max-width:1250px;margin:32px auto;padding:0 20px}h1{font-size:28px}h2{font-size:20px;margin-top:30px}small,.muted{color:#99aec3}input,select,textarea,button{background:#1b2a3b;color:inherit;border:1px solid #425775;border-radius:5px;padding:9px;max-width:100%;box-sizing:border-box}button{cursor:pointer;background:#234a64}input{width:100%}textarea{width:100%;height:105px;font:13px monospace}label{display:block;margin:12px 0 5px}table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;padding:10px;border-bottom:1px solid #2a3a4e}th{color:#99aec3}.scroll{overflow:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#182333;padding:15px;border-radius:6px;max-height:380px;overflow:auto}svg{width:100%;height:140px;background:#182333;border-radius:6px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:24px}@media(max-width:750px){.grid{grid-template-columns:1fr}}#error{color:#ffb5a6}details{margin:8px 0}
-</style>
-<h1>Flow <small>System administration</small></h1><p class="muted">Built-in logs, audit and metrics · refreshes every 5 seconds</p>
-<form id="login"><label>Admin token</label><input id="token" type="password" autocomplete="off" placeholder="FLOW_ADMIN_TOKEN"><p><button>Connect</button> <button type="button" id="logout">Disconnect</button> <span id="state"></span></p></form><p id="error"></p>
-<main hidden id="main"><h2>HTTP endpoints and metrics</h2><p class="muted">Counters and histograms since the first start. p50/p95/p99 approximate the upper histogram bucket boundary. History: last 6 hours, minute aggregates. Errors = HTTP 4xx/5xx. WS latency measures the handshake.</p><div class="scroll"><table><thead><tr><th>Endpoint</th><th>Calls</th><th>Errors</th><th>Mean ms</th><th>p50 ms</th><th>p95 ms</th><th>p99 ms</th></tr></thead><tbody id="metrics"></tbody></table></div><p id="health"></p>
-<label>Endpoint chart</label><select id="chartEndpoint"></select><p class="muted">Calls per minute (green) and mean latency in ms (blue), each series has its own scale.</p><svg id="chart" viewBox="0 0 1000 140" role="img" aria-label="Call count and mean latency history"></svg><p id="chartScale" class="muted"></p>
-<div class="grid"><section><h2>HTTP console</h2><p class="muted">Calls prochází autentizací, permissions, logy a auditem aplikace. Mutující endpoint skutečně mění data.</p><label>Operation</label><select id="endpoint"></select><label>Path (replace parameters; query strings are supported)</label><input id="path"><label>Application authorization (Bearer / ApiKey)</label><input id="authorization" type="password" autocomplete="off"><label>JSON body</label><textarea id="body" placeholder="{}"></textarea><p><button id="call">Call endpoint</button></p><pre id="response">Response</pre></section><section><h2>Application log</h2><p class="muted">Last 200 entries of the current process. Rotating JSONL archives are stored on disk.</p><pre id="logs"></pre></section></div>
-<h2>Mutation audit</h2><p class="muted">Committed SQLite changes including seeds, automations and retention. Before/after values preserve the SQL storage representation; binary files show their size.</p><button id="latest">Latest</button> <button id="older">Older page</button><div id="audit"></div></main>
-<script>
-let token='',overview={},ops=[],cursor=0,timer,busy=false;const $=id=>document.getElementById(id);const fmt=v=>typeof v==='number'?v.toFixed(2):v??'—';
-async function api(path,options={}){const r=await fetch(path,{...options,headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'}});if(!r.ok)throw Error('Admin API: HTTP '+r.status);return r.json()}
-function textCell(row,value){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}
-async function refresh(){if(busy||!token)return;busy=true;try{overview=await api('/api/overview');$('error').textContent='';$('main').hidden=false;$('state').textContent='Connected';ops=overview.endpoints;const metrics=overview.metrics.endpoints;const rows=new Map(ops.map(o=>[o.method+' '+o.path,null]));for(const key of Object.keys(metrics))rows.set(key,metrics[key]);$('metrics').replaceChildren();for(const [key,m] of rows){const row=document.createElement('tr');textCell(row,key);for(const val of [m?.count??0,m?.errors??0,fmt(m?.mean_ms),fmt(m?.p50_ms),fmt(m?.p95_ms),fmt(m?.p99_ms)])textCell(row,val);$('metrics').append(row)}$('health').textContent=`Dropped disk logs: ${overview.metrics.dropped_logs}; storage errors: ${overview.metrics.storage_errors}`;$('logs').textContent=overview.logs.slice().reverse().map(v=>JSON.stringify(v)).join('\n');if(!$('endpoint').options.length){for(const o of ops.filter(o=>o.method!=='WS')){const el=new Option(o.method+' '+o.path+' · '+o.name,o.name);$('endpoint').add(el)}choose()}const selected=$('chartEndpoint').value;$('chartEndpoint').replaceChildren();for(const key of rows.keys())$('chartEndpoint').add(new Option(key,key));if(rows.has(selected))$('chartEndpoint').value=selected;chart()}catch(e){$('error').textContent=e.message}finally{busy=false}}
-function choose(){const op=ops.find(o=>o.name===$('endpoint').value);$('path').value=op?.path??'';$('body').placeholder=JSON.stringify(Object.fromEntries((op?.inputs??[]).map(i=>[i.name,i.type])),null,2)}
-function chart(){const m=overview.metrics?.endpoints[$('chartEndpoint').value];const history=m?.history??[];$('chart').replaceChildren();const now=Math.floor(Date.now()/60000);let maxima=[];for(const [field,color] of [['count','#55d6a7'],['mean_ms','#79b8ff']]){const max=Math.max(1,...history.map(p=>p[field]));maxima.push(max);const line=document.createElementNS('http://www.w3.org/2000/svg','polyline');line.setAttribute('points',history.map(p=>`${Math.max(0,Math.min(1000,(p.minute-(now-359))/359*1000))},${130-p[field]/max*115}`).join(' '));line.setAttribute('fill','none');line.setAttribute('stroke',color);line.setAttribute('stroke-width','2');$('chart').append(line)}$('chartScale').textContent=`Maximum: ${maxima[0]} calls/min, ${fmt(maxima[1])} ms; 6 hours → now`}
-async function loadAudit(before=0){try{const rows=await api('/api/audit?before='+before);$('audit').replaceChildren();for(const row of rows){const d=document.createElement('details'),s=document.createElement('summary'),p=document.createElement('pre');s.textContent=`#${row.id} ${row.time} ${row.action} ${row.entity}/${row.entity_id} · ${row.operation} · ${row.transport}`;p.textContent=JSON.stringify(row,null,2);d.append(s,p);$('audit').append(d)}cursor=rows.at(-1)?.id??before;$('older').disabled=rows.length<100}catch(e){$('error').textContent=e.message}}
-$('login').onsubmit=async e=>{e.preventDefault();token=$('token').value;$('token').value='';clearInterval(timer);await refresh();if(!$('main').hidden){await loadAudit();timer=setInterval(refresh,5000)}};$('logout').onclick=()=>{token='';clearInterval(timer);$('main').hidden=true;$('state').textContent='Disconnected';$('authorization').value='';$('logs').textContent='';$('audit').replaceChildren();overview={};ops=[];$('endpoint').replaceChildren()};$('endpoint').onchange=choose;$('chartEndpoint').onchange=chart;$('latest').onclick=()=>loadAudit();$('older').onclick=()=>loadAudit(cursor);
-$('call').onclick=async()=>{try{const body=$('body').value.trim();const response=await fetch('/api/call',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({endpoint:$('endpoint').value,path:$('path').value,authorization:$('authorization').value,body:body?JSON.parse(body):null})});$('response').textContent=`HTTP ${response.status}\nRequest ID: ${response.headers.get('x-request-id')??'—'}\n${(await response.text()).slice(0,65536)}`;await refresh();await loadAudit()}catch(e){$('response').textContent=e.message}};
-</script></html>
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Flow · System administration</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font: 15px system-ui;
+      background: #101823;
+      color: #e4edf6;
+    }
+    body {
+      max-width: 1250px;
+      margin: 32px auto;
+      padding: 0 20px;
+    }
+    h1 {
+      font-size: 28px;
+    }
+    h2 {
+      font-size: 20px;
+      margin-top: 30px;
+    }
+    small,
+    .muted {
+      color: #99aec3;
+    }
+    input,
+    select,
+    textarea,
+    button {
+      background: #1b2a3b;
+      color: inherit;
+      border: 1px solid #425775;
+      border-radius: 5px;
+      padding: 9px;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    button {
+      cursor: pointer;
+      background: #234a64;
+    }
+    input {
+      width: 100%;
+    }
+    textarea {
+      width: 100%;
+      height: 105px;
+      font: 13px monospace;
+    }
+    label {
+      display: block;
+      margin: 12px 0 5px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+    }
+    td,
+    th {
+      text-align: left;
+      padding: 10px;
+      border-bottom: 1px solid #2a3a4e;
+    }
+    th {
+      color: #99aec3;
+    }
+    .scroll {
+      overflow: auto;
+    }
+    pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: #182333;
+      padding: 15px;
+      border-radius: 6px;
+      max-height: 380px;
+      overflow: auto;
+    }
+    svg {
+      width: 100%;
+      height: 140px;
+      background: #182333;
+      border-radius: 6px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 750px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    #error {
+      color: #ffb5a6;
+    }
+    details {
+      margin: 8px 0;
+    }
+  </style>
+  <h1>Flow <small>System administration</small></h1>
+  <p class="muted">
+    Built-in logs, audit and metrics · refreshes every 5 seconds
+  </p>
+  <form id="login">
+    <label>Admin token</label
+    ><input
+      id="token"
+      type="password"
+      autocomplete="off"
+      placeholder="FLOW_ADMIN_TOKEN"
+    />
+    <p>
+      <button>Connect</button>
+      <button type="button" id="logout">Disconnect</button>
+      <span id="state"></span>
+    </p>
+  </form>
+  <p id="error"></p>
+  <main hidden id="main">
+    <h2>Memory and storage</h2>
+    <p class="muted">
+      Production target: 1 shared CPU and 2 GiB RAM. RSS measures the entire
+      process. SQLite reports its own allocations. Component estimates exclude
+      allocator overhead, fragmentation, active requests, thread stacks and
+      other shared runtime allocations; they do not add up to RSS.
+    </p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Component</th>
+            <th>Usage</th>
+            <th>Measurement</th>
+          </tr>
+        </thead>
+        <tbody id="resources"></tbody>
+      </table>
+    </div>
+    <h2>HTTP endpoints and metrics</h2>
+    <p class="muted">
+      Counters and histograms since the first start. p50/p95/p99 approximate the
+      upper histogram bucket boundary. History: last 6 hours, minute aggregates.
+      Errors = HTTP 4xx/5xx. WS latency measures the handshake.
+    </p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Endpoint</th>
+            <th>Calls</th>
+            <th>Errors</th>
+            <th>Mean ms</th>
+            <th>p50 ms</th>
+            <th>p95 ms</th>
+            <th>p99 ms</th>
+          </tr>
+        </thead>
+        <tbody id="metrics"></tbody>
+      </table>
+    </div>
+    <p id="health"></p>
+    <label>Endpoint chart</label
+    ><select id="chartEndpoint"></select>
+    <p class="muted">
+      Calls per minute (green) and mean latency in ms (blue), each series has
+      its own scale.
+    </p>
+    <svg
+      id="chart"
+      viewBox="0 0 1000 140"
+      role="img"
+      aria-label="Call count and mean latency history"
+    ></svg>
+    <p id="chartScale" class="muted"></p>
+    <div class="grid">
+      <section>
+        <h2>HTTP console</h2>
+        <p class="muted">
+          Calls prochází autentizací, permissions, logy a auditem aplikace.
+          Mutující endpoint skutečně mění data.
+        </p>
+        <label>Operation</label
+        ><select id="endpoint"></select
+        ><label>Path (replace parameters; query strings are supported)</label
+        ><input id="path" /><label
+          >Application authorization (Bearer / ApiKey)</label
+        ><input id="authorization" type="password" autocomplete="off" /><label
+          >JSON body</label
+        ><textarea id="body" placeholder="{}"></textarea>
+        <p><button id="call">Call endpoint</button></p>
+        <pre id="response">Response</pre>
+      </section>
+      <section>
+        <h2>Application log</h2>
+        <p class="muted">
+          Last 200 entries of the current process. Rotating JSONL archives are
+          stored on disk.
+        </p>
+        <pre id="logs"></pre>
+      </section>
+    </div>
+    <h2>Mutation audit</h2>
+    <p class="muted">
+      Committed SQLite changes including seeds, automations and retention.
+      Before/after values preserve the SQL storage representation; binary files
+      show their size.
+    </p>
+    <button id="latest">Latest</button> <button id="older">Older page</button>
+    <div id="audit"></div>
+  </main>
+  <script>
+    let token = "",
+      overview = {},
+      ops = [],
+      cursor = 0,
+      timer,
+      busy = false;
+    const $ = (id) => document.getElementById(id);
+    const fmt = (v) => (typeof v === "number" ? v.toFixed(2) : (v ?? "—"));
+    async function api(path, options = {}) {
+      const r = await fetch(path, {
+        ...options,
+        headers: {
+          Authorization: "Bearer " + token,
+          "Content-Type": "application/json",
+        },
+      });
+      if (!r.ok) throw Error("Admin API: HTTP " + r.status);
+      return r.json();
+    }
+    function textCell(row, value) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    function renderResources() {
+      const r = overview.resources;
+      const entries = [
+        [
+          "Process resident memory (RSS)",
+          r.process.rss_bytes,
+          r.process.source,
+        ],
+        ["Peak process RSS", r.process.peak_rss_bytes, r.process.source],
+        [
+          "SQLite page cache",
+          r.sqlite.page_cache_bytes,
+          "SQLite allocation counter",
+        ],
+        ["SQLite schema", r.sqlite.schema_bytes, "SQLite allocation counter"],
+        [
+          "SQLite prepared statements",
+          r.sqlite.prepared_statements_bytes,
+          "SQLite allocation counter",
+        ],
+        [
+          "Metrics and bounded history",
+          r.observability.estimated_metrics_bytes,
+          "Estimated heap capacity",
+        ],
+        [
+          "In-memory log buffer",
+          r.observability.estimated_log_buffer_bytes,
+          "Estimated heap capacity; max 200 entries",
+        ],
+        [
+          "Log writer buffer",
+          r.observability.log_writer_buffer_bytes,
+          "Fixed write buffer",
+        ],
+        [
+          "Log writer queue",
+          r.observability.estimated_log_queue_bytes,
+          `Estimated payload; ${r.observability.queued_log_events}/512 entries`,
+        ],
+        [
+          "SQLite total on disk",
+          r.sqlite.total_disk_bytes,
+          r.sqlite.in_memory
+            ? "In-memory database"
+            : "Database + WAL + SHM file sizes",
+        ],
+        ["SQLite database file", r.sqlite.main_bytes, "File size"],
+        ["SQLite WAL", r.sqlite.wal_bytes, "File size"],
+        ["SQLite SHM", r.sqlite.shm_bytes, "File size"],
+        [
+          "SQLite logical pages",
+          r.sqlite.logical_bytes,
+          "Page count × page size",
+        ],
+        [
+          "Telemetry and log files",
+          r.observability.disk_bytes,
+          "Snapshot + rotating log files",
+        ],
+      ];
+      $("resources").replaceChildren();
+      for (const [name, bytes, source] of entries) {
+        const row = document.createElement("tr");
+        textCell(row, name);
+        textCell(
+          row,
+          typeof bytes === "number"
+            ? `${(bytes / 1048576).toFixed(2)} MiB (${bytes.toLocaleString()} bytes)`
+            : "Unavailable",
+        );
+        textCell(row, source);
+        $("resources").append(row);
+      }
+    }
+    async function refresh() {
+      if (busy || !token) return;
+      busy = true;
+      try {
+        overview = await api("/api/overview");
+        $("error").textContent = "";
+        $("main").hidden = false;
+        $("state").textContent = "Connected";
+        ops = overview.endpoints;
+        renderResources();
+        const metrics = overview.metrics.endpoints;
+        const rows = new Map(ops.map((o) => [o.method + " " + o.path, null]));
+        for (const key of Object.keys(metrics)) rows.set(key, metrics[key]);
+        $("metrics").replaceChildren();
+        for (const [key, m] of rows) {
+          const row = document.createElement("tr");
+          textCell(row, key);
+          for (const val of [
+            m?.count ?? 0,
+            m?.errors ?? 0,
+            fmt(m?.mean_ms),
+            fmt(m?.p50_ms),
+            fmt(m?.p95_ms),
+            fmt(m?.p99_ms),
+          ])
+            textCell(row, val);
+          $("metrics").append(row);
+        }
+        $("health").textContent =
+          `Dropped disk logs: ${overview.metrics.dropped_logs}; storage errors: ${overview.metrics.storage_errors}`;
+        $("logs").textContent = overview.logs
+          .slice()
+          .reverse()
+          .map((v) => JSON.stringify(v))
+          .join("\n");
+        if (!$("endpoint").options.length) {
+          for (const o of ops.filter((o) => o.method !== "WS")) {
+            const el = new Option(
+              o.method + " " + o.path + " · " + o.name,
+              o.name,
+            );
+            $("endpoint").add(el);
+          }
+          choose();
+        }
+        const selected = $("chartEndpoint").value;
+        $("chartEndpoint").replaceChildren();
+        for (const key of rows.keys())
+          $("chartEndpoint").add(new Option(key, key));
+        if (rows.has(selected)) $("chartEndpoint").value = selected;
+        chart();
+      } catch (e) {
+        $("error").textContent = e.message;
+      } finally {
+        busy = false;
+      }
+    }
+    function choose() {
+      const op = ops.find((o) => o.name === $("endpoint").value);
+      $("path").value = op?.path ?? "";
+      $("body").placeholder = JSON.stringify(
+        Object.fromEntries((op?.inputs ?? []).map((i) => [i.name, i.type])),
+        null,
+        2,
+      );
+    }
+    function chart() {
+      const m = overview.metrics?.endpoints[$("chartEndpoint").value];
+      const history = m?.history ?? [];
+      $("chart").replaceChildren();
+      const now = Math.floor(Date.now() / 60000);
+      let maxima = [];
+      for (const [field, color] of [
+        ["count", "#55d6a7"],
+        ["mean_ms", "#79b8ff"],
+      ]) {
+        const max = Math.max(1, ...history.map((p) => p[field]));
+        maxima.push(max);
+        const line = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "polyline",
+        );
+        line.setAttribute(
+          "points",
+          history
+            .map(
+              (p) =>
+                `${Math.max(0, Math.min(1000, ((p.minute - (now - 359)) / 359) * 1000))},${130 - (p[field] / max) * 115}`,
+            )
+            .join(" "),
+        );
+        line.setAttribute("fill", "none");
+        line.setAttribute("stroke", color);
+        line.setAttribute("stroke-width", "2");
+        $("chart").append(line);
+      }
+      $("chartScale").textContent =
+        `Maximum: ${maxima[0]} calls/min, ${fmt(maxima[1])} ms; 6 hours → now`;
+    }
+    async function loadAudit(before = 0) {
+      try {
+        const rows = await api("/api/audit?before=" + before);
+        $("audit").replaceChildren();
+        for (const row of rows) {
+          const d = document.createElement("details"),
+            s = document.createElement("summary"),
+            p = document.createElement("pre");
+          s.textContent = `#${row.id} ${row.time} ${row.action} ${row.entity}/${row.entity_id} · ${row.operation} · ${row.transport}`;
+          p.textContent = JSON.stringify(row, null, 2);
+          d.append(s, p);
+          $("audit").append(d);
+        }
+        cursor = rows.at(-1)?.id ?? before;
+        $("older").disabled = rows.length < 100;
+      } catch (e) {
+        $("error").textContent = e.message;
+      }
+    }
+    $("login").onsubmit = async (e) => {
+      e.preventDefault();
+      token = $("token").value;
+      $("token").value = "";
+      clearInterval(timer);
+      await refresh();
+      if (!$("main").hidden) {
+        await loadAudit();
+        timer = setInterval(refresh, 5000);
+      }
+    };
+    $("logout").onclick = () => {
+      token = "";
+      clearInterval(timer);
+      $("main").hidden = true;
+      $("state").textContent = "Disconnected";
+      $("authorization").value = "";
+      $("logs").textContent = "";
+      $("audit").replaceChildren();
+      overview = {};
+      ops = [];
+      $("endpoint").replaceChildren();
+    };
+    $("endpoint").onchange = choose;
+    $("chartEndpoint").onchange = chart;
+    $("latest").onclick = () => loadAudit();
+    $("older").onclick = () => loadAudit(cursor);
+    $("call").onclick = async () => {
+      try {
+        const body = $("body").value.trim();
+        const response = await fetch("/api/call", {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + token,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            endpoint: $("endpoint").value,
+            path: $("path").value,
+            authorization: $("authorization").value,
+            body: body ? JSON.parse(body) : null,
+          }),
+        });
+        const contentType = response.headers.get("content-type") ?? "";
+        const output = contentType.startsWith("image/")
+          ? `Binary response: ${(await response.arrayBuffer()).byteLength} bytes (${contentType})`
+          : (await response.text()).slice(0, 65536);
+        $("response").textContent =
+          `HTTP ${response.status}\nRequest ID: ${response.headers.get("x-request-id") ?? "—"}\n${output}`;
+        await refresh();
+        await loadAudit();
+      } catch (e) {
+        $("response").textContent = e.message;
+      }
+    };
+  </script>
+</html>

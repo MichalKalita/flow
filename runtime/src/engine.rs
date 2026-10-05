@@ -297,7 +297,15 @@ impl Runtime {
                 let value = session.eval(&operation.result, &mut scope, false)?;
                 session.authorize()?;
                 session.project(&operation.output, value)?;
-                self.db.execute("UPDATE _flow_audit_context SET operation=?1,transport='event',actor=?2 WHERE id=1", rusqlite::params![operation.name, serde_json::json!({"type":session.actor_type,"id":session.actor.text().ok()}).to_string()])?;
+                if !session.changes.is_empty() {
+                    self.db.execute(
+                        "UPDATE _flow_audit_context SET operation=?1, transport='event', actor=?2 WHERE id=1",
+                        rusqlite::params![
+                            operation.name,
+                            serde_json::json!({"type": session.actor_type, "id": session.actor.text().ok()}).to_string()
+                        ],
+                    )?;
+                }
                 session.apply()?;
                 queue.extend(
                     session
@@ -379,6 +387,20 @@ impl Runtime {
         }
     }
     pub fn publish(
+        &mut self,
+        stream: &str,
+        input: serde_json::Value,
+        credential: Option<&str>,
+        transport: &str,
+    ) -> Result<String> {
+        let mut span = self.observability.span("io", "sqlite.publish");
+        let result = self.publish_inner(stream, input, credential, transport);
+        if result.is_ok() {
+            span.success();
+        }
+        result
+    }
+    fn publish_inner(
         &mut self,
         stream: &str,
         input: serde_json::Value,
@@ -492,10 +514,12 @@ impl Runtime {
             let mut messages = vec![];
             for (name, stream) in &self.program.streams {
                 let sql = format!("SELECT id FROM {} ORDER BY rowid", q(name));
+                let mut span = self.observability.span("io", "sqlite.scan_entities");
                 let mut statement = self.db.prepare(&sql)?;
                 let ids = statement
                     .query_map([], |r| r.get::<_, String>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
+                span.success();
                 for id in ids {
                     let reference = Value::reference(name, &id);
                     if !session.allowed("READ", &reference, None)? {
@@ -553,6 +577,20 @@ impl Runtime {
         authorization: Option<&str>,
         transport: &str,
     ) -> Result<(serde_json::Value, Vec<String>, Vec<String>)> {
+        let mut span = self.observability.span("io", "sqlite.operation");
+        let result = self.execute_transport_inner(name, input, authorization, transport);
+        if result.is_ok() {
+            span.success();
+        }
+        result
+    }
+    fn execute_transport_inner(
+        &mut self,
+        name: &str,
+        input: serde_json::Value,
+        authorization: Option<&str>,
+        transport: &str,
+    ) -> Result<(serde_json::Value, Vec<String>, Vec<String>)> {
         let op = self
             .program
             .operations
@@ -588,12 +626,6 @@ impl Runtime {
                 invocations: vec![],
                 blobs: BTreeMap::new(),
             };
-            crate::audit::context(
-                &self.db,
-                name,
-                transport,
-                &serde_json::json!({"type":session.actor_type,"id":session.actor.text().ok()}),
-            )?;
             let input = Value::from_json(&input)?;
             let inputs = input.fields()?;
             if inputs.keys().any(|k| !op.inputs.contains_key(k)) {
@@ -639,6 +671,14 @@ impl Runtime {
                 vec![]
             };
             let output = session.project(&op.output, value)?.json()?;
+            if !session.changes.is_empty() {
+                crate::audit::context(
+                    &self.db,
+                    name,
+                    transport,
+                    &serde_json::json!({"type": session.actor_type, "id": session.actor.text().ok()}),
+                )?;
+            }
             session.apply()?;
             let events = session
                 .changes
@@ -1296,10 +1336,12 @@ impl Session<'_> {
                 };
                 let sql = format!("SELECT id FROM {} ORDER BY id", q(entity));
                 self.sql.push(sql.clone());
+                let mut span = self.observer.span("io", "sqlite.scan_entities");
                 let mut statement = self.db.prepare(&sql)?;
                 let ids = statement
                     .query_map([], |r| r.get::<_, String>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
+                span.success();
                 let mut values = ids
                     .iter()
                     .map(|id| Value::reference(entity, id))
@@ -1892,6 +1934,9 @@ impl Session<'_> {
         }
     }
     fn apply(&self) -> Result<()> {
+        if self.changes.is_empty() && self.blobs.is_empty() {
+            return Ok(());
+        }
         let mut span = self.observer.span("io", "sqlite.apply");
         let result = self.apply_inner();
         if result.is_ok() {

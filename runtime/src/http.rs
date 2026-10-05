@@ -4,6 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{FromRequestParts, Request, State, WebSocketUpgrade},
     http::StatusCode,
+    middleware::{self, Next},
     response::{IntoResponse, Response},
 };
 use percent_encoding::percent_decode_str;
@@ -14,7 +15,31 @@ pub fn router(runtime: Runtime) -> Router {
     router_shared(Arc::new(Mutex::new(runtime)))
 }
 pub fn router_shared(runtime: Arc<Mutex<Runtime>>) -> Router {
-    Router::new().fallback(dispatch).with_state(runtime)
+    let observer = runtime.lock().unwrap().observability.clone();
+    let admission = (Arc::new(tokio::sync::Semaphore::new(16)), observer);
+    Router::new()
+        .fallback(dispatch)
+        .layer(middleware::from_fn_with_state(admission, admit))
+        .with_state(runtime)
+}
+async fn admit(
+    State((semaphore, observer)): State<(
+        Arc<tokio::sync::Semaphore>,
+        crate::observability::Observability,
+    )>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = semaphore.try_acquire() else {
+        observer.request(
+            "overloaded",
+            503,
+            std::time::Duration::ZERO,
+            &uuid::Uuid::new_v4().to_string(),
+        );
+        return json_response(503, json!({"error":"overloaded"}));
+    };
+    next.run(request).await
 }
 fn decode(s: &str) -> Result<String> {
     percent_decode_str(s)

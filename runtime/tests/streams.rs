@@ -280,6 +280,7 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
         "[CREATE [when false]] [READ [when true]]",
     );
     let mut runtime = Runtime::open(&denied, ":memory:", config).unwrap();
+    let baseline = runtime.audit(0, 200).unwrap();
     assert_eq!(
         runtime
             .publish_topic(
@@ -291,10 +292,64 @@ fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
             .code,
         "forbidden"
     );
+    assert_eq!(runtime.audit(0, 200).unwrap(), baseline);
     assert_eq!(
         runtime
             .execute("Latest", json!({"id":"d1"}), Some(&auth(USER_KEY)))
             .unwrap()["status"],
         Value::Null
     );
+}
+
+#[test]
+fn audit_includes_stream_retention_and_automation_actor() {
+    let mut r = runtime();
+    let key = auth(DEVICE_KEY);
+    for battery in [30, 20, 10] {
+        r.publish_topic(
+            "devices/d1/status",
+            json!({"battery":battery,"online":true}),
+            Some(&key),
+        )
+        .unwrap();
+    }
+    let audit = r.audit(0, 200).unwrap();
+    let changes = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["entity"] == "Status")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        changes.iter().filter(|v| v["action"] == "INSERT").count(),
+        3
+    );
+    let deletion = changes.iter().find(|v| v["action"] == "DELETE").unwrap();
+    assert_eq!(deletion["actor"]["id"], "d1");
+    assert_eq!(deletion["transport"], "MQTT");
+    assert_eq!(deletion["transaction_id"], changes[0]["transaction_id"]);
+    assert!(deletion["before"].is_object());
+    assert!(deletion["after"].is_null());
+
+    let app = include_str!("../application.flow");
+    let mut config = Config::default();
+    config.event_credentials.insert(
+        "service:device-automation".into(),
+        "ApiKey automation-key-long-enough-123456789".into(),
+    );
+    let mut r = Runtime::open(app, ":memory:", config).unwrap();
+    r.publish_topic(
+        "devices/mower1/status",
+        json!({"online":true,"battery":12}),
+        Some("ApiKey device-key-32-bytes-minimum-123456789"),
+    )
+    .unwrap();
+    let audit = r.audit(0, 200).unwrap();
+    let rows = audit.as_array().unwrap();
+    let alert = rows.iter().find(|v| v["entity"] == "DeviceAlert").unwrap();
+    let status = rows.iter().find(|v| v["entity"] == "DeviceStatus").unwrap();
+    assert_eq!(alert["actor"]["id"], "device-automation");
+    assert_eq!(alert["transport"], "event");
+    assert_eq!(alert["operation"], "LowBattery");
+    assert_eq!(alert["transaction_id"], status["transaction_id"]);
 }

@@ -7,6 +7,7 @@ Jeden proces načte Flow soubor, zkontroluje deklarace, otevře SQLite a automat
 ```sh
 cd runtime
 cargo run -- --check application.flow
+export FLOW_ADMIN_TOKEN="$(openssl rand -hex 32)"
 FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' FLOW_AUTOMATION_KEY='automation-key-long-enough-123456789' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
 ```
 
@@ -75,3 +76,106 @@ cargo test
 ```
 
 Integrační testy pokrývají objednávky, rollback, vlastnictví, autentizaci, práva zařízení, přesná čísla, úzkou projekci a restart SQLite, streamovou retenci, přenos MQTT → WebSocket a odebrání práv u aktivních odběrů. Formát syntaxe popisuje [LANGUAGE.md](LANGUAGE.md).
+
+## Built-in observability and administration
+
+The production target is a VPS with one shared CPU and 2 GB RAM. HTTP, MQTT,
+SQLite, the log writer, telemetry and the dashboard run in one process. No
+Prometheus server, exporter, external dashboard or monitoring database is required.
+
+Set `FLOW_ADMIN_TOKEN` to a secret of at least 32 bytes before starting the server.
+The admin dashboard listens on `127.0.0.1:9090`; `FLOW_ADMIN_BIND` changes its
+address, but the CLI requires a loopback IP. For a remote VPS, forward that port:
+
+```sh
+ssh -L 9090:127.0.0.1:9090 user@server
+```
+
+Open `http://127.0.0.1:9090` and enter the token. The token is kept only in the
+page's memory. The public application listener does not expose admin APIs.
+The dashboard lists HTTP endpoints and WebSocket subscriptions, call counts,
+error counts, mean latency, approximate p50/p95/p99, minute history, recent logs,
+and paginated audit records. The HTTP console calls local declared endpoints
+using the application's own credentials and permissions. Mutations from the
+console change production data and are audited. WebSocket latency measures the
+HTTP upgrade, not the lifetime of a subscription. Unmatched routes and overload
+rejections use fixed metric labels to avoid unbounded cardinality.
+
+### Application logs
+
+`FLOW_OBSERVABILITY_DIR` defaults to `data/observability`. `application.jsonl`
+contains structured request logs (request ID, endpoint template, status and
+elapsed time) and timed SQLite I/O and plugin spans with success/failure.
+SQLite operation spans cover the entire operation, including authentication,
+transaction execution and commit/rollback; nested read/apply spans give more
+specific timings. Request IDs are returned in `X-Request-ID`. Logs exclude
+request bodies, credentials and plugin arguments. The dashboard retains the
+last 200 events in memory; older entries remain in rotating disk files.
+
+A single background writer uses a bounded 512-event queue and a 64 KiB write
+buffer, flushed every second. At 8 MiB, the log rotates through three archives
+(approximately 32 MiB total, plus at most one event). A full queue drops disk log
+entries instead of blocking request execution; the dashboard reports dropped
+logs and storage errors. Logging failures do not undo successful business data.
+
+### Metrics and resource usage
+
+Telemetry stores counters, sums and fixed latency histograms in memory. It does
+not keep individual request samples. p50/p95/p99 are upper bucket boundaries,
+not exact percentiles; a percentile above 60 seconds is shown as `>60000`.
+Counts and histograms are cumulative across restarts. The chart retains up to
+360 one-minute aggregates per endpoint (six hours), with count, errors and mean
+latency. HTTP 4xx and 5xx responses count as errors.
+
+The writer atomically replaces `metrics.json` every 30 seconds and flushes it
+on normal Ctrl-C shutdown. An abrupt termination can lose up to 30 seconds of
+metrics and one second of buffered logs. Audit records remain transactional in
+SQLite. A malformed metrics snapshot fails startup; back up or remove the
+snapshot explicitly if resetting telemetry is intended. Do not share a telemetry
+directory between multiple runtime processes.
+
+The dashboard reports process RSS (and peak RSS on Linux), SQLite page-cache,
+schema and statement allocations, and estimated memory used by metrics,
+history, the log buffer and writer queue. Linux reads `/proc/self/status`; macOS
+uses `ps` for development. Component estimates include collection capacity and
+payloads, but exclude allocator bookkeeping, fragmentation, thread stacks,
+active requests and other shared allocations; they do not sum to RSS.
+SQLite disk usage includes the main database, WAL and SHM files. Logical page
+size and telemetry/log disk usage are displayed separately.
+
+The CLI caps Tokio at two async workers and two blocking workers, plus one log
+writer. The public router admits at most 16 simultaneous requests and the admin
+API at most four, rejecting additional requests with HTTP 503. Database work is
+serialized. These limits bound concurrent request buffering, but large uploads
+and application queries can still dominate memory. Validate the actual workload
+on the target VPS; local tests are not a capacity guarantee.
+
+### Transactional audit
+
+`_flow_audit` stores every committed INSERT, UPDATE and DELETE on application
+entity/stream tables and binary file records. SQLite triggers include seeds,
+automations, stream retention and file cascades. Each entry contains timestamp,
+transaction ID, operation, transport, authenticated actor, entity/ID, action and
+before/after state. File contents are represented by their byte count. Entity
+snapshots preserve raw SQL column representations, including exact decimals.
+Automation entries identify their service actor and share the initiating
+transaction ID. Queries and rolled-back writes create no committed-change audit
+entries. Audit write failure aborts the application transaction.
+
+Existing databases gain audit tables and triggers on their next successful open;
+previous mutations cannot be reconstructed. The audit has no automatic deletion:
+its retained history grows with mutation volume and is included in SQLite disk
+usage. Operational logs and metrics never write to SQLite.
+
+### Formatting and validation
+
+```sh
+cargo fmt
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+npx prettier@3.6.2 --write src/admin.html
+npx prettier@3.6.2 --check src/admin.html
+```
+
+The HTML includes its CSS and JavaScript and has no third-party browser assets.

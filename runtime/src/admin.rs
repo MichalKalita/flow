@@ -29,10 +29,24 @@ pub fn router(runtime: Arc<Mutex<Runtime>>, token: String) -> Router {
         .route("/api/overview", get(overview))
         .route("/api/audit", get(audit))
         .route("/api/call", post(call))
+        .layer(middleware::from_fn_with_state(
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            admit,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .route("/", get(|| async { Html(include_str!("admin.html")) }))
         .layer(middleware::from_fn(headers))
         .with_state(state)
+}
+async fn admit(
+    State(semaphore): State<Arc<tokio::sync::Semaphore>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = semaphore.try_acquire() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    next.run(request).await
 }
 async fn headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
@@ -66,12 +80,29 @@ async fn authorize(State(state): State<Admin>, request: Request, next: Next) -> 
     }
     next.run(request).await
 }
-async fn overview(State(state): State<Admin>) -> Json<Value> {
-    let runtime = state.runtime.lock().unwrap();
-    let endpoints=runtime.program.operations.iter().filter(|op|op.event.is_none()).map(|op|json!({"name":op.name,"method":op.method,"path":op.path,"inputs":op.inputs.iter().map(|(name,(ty,_))|json!({"name":name,"type":format!("{ty:?}")})).collect::<Vec<_>>()})).collect::<Vec<_>>();
-    Json(
-        json!({"endpoints":endpoints,"metrics":runtime.observability.snapshot(),"logs":runtime.observability.logs()}),
-    )
+async fn overview(State(state): State<Admin>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        let process=crate::resources::process_memory();
+        let runtime=state.runtime.lock().unwrap();
+        let mut endpoints=runtime.program.operations.iter()
+            .filter(|op|op.event.is_none())
+            .map(|op| {
+                let inputs=op.inputs.iter().map(|(name,(ty,_))| {
+                    json!({"name":name,"type":format!("{ty:?}")})
+                }).collect::<Vec<_>>();
+                json!({"name":op.name,"method":op.method,"path":op.path,"inputs":inputs})
+            }).collect::<Vec<_>>();
+        if runtime.program.plugins.contains_key("Files.put") {
+            endpoints.push(json!({"name":"FileDownload","method":"GET","path":"/api/files/{id}","inputs":[{"name":"id","type":"File ID"}]}));
+        }
+        let mut resources=runtime.storage_resources();
+        resources["process"]=process;
+        resources["observability"]=runtime.observability.resources();
+        Json(json!({"endpoints":endpoints,"metrics":runtime.observability.snapshot(),"logs":runtime.observability.logs(),"resources":resources}))
+    }).await {
+        Ok(response)=>response.into_response(),
+        Err(_)=>StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 async fn audit(
     State(state): State<Admin>,
@@ -89,28 +120,32 @@ async fn audit(
 }
 async fn call(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
     let name = input["endpoint"].as_str().unwrap_or("");
-    let op = state
-        .runtime
-        .lock()
-        .unwrap()
-        .program
-        .operations
-        .iter()
-        .find(|op| op.name == name && op.event.is_none() && op.method != "WS")
-        .cloned();
-    let Some(op) = op else {
+    let declared = {
+        let runtime = state.runtime.lock().unwrap();
+        runtime
+            .program
+            .operations
+            .iter()
+            .find(|op| op.name == name && op.event.is_none() && op.method != "WS")
+            .map(|op| (op.method.clone(), op.path.clone()))
+            .or_else(|| {
+                (name == "FileDownload" && runtime.program.plugins.contains_key("Files.put"))
+                    .then(|| ("GET".into(), "/api/files/{id}".into()))
+            })
+    };
+    let Some((method, pattern)) = declared else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let path = input["path"].as_str().unwrap_or(&op.path);
+    let path = input["path"].as_str().unwrap_or(&pattern);
     // Only local declared endpoints. No network proxy, arbitrary host or admin endpoint.
     let uri = match path.parse::<axum::http::Uri>() {
         Ok(uri) if uri.scheme().is_none() && uri.authority().is_none() => uri,
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
-    if !http::route(&op.path, uri.path()).ok().flatten().is_some() {
+    if !http::route(&pattern, uri.path()).ok().flatten().is_some() {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    let method = match op.method.parse::<Method>() {
+    let method = match method.parse::<Method>() {
         Ok(m) => m,
         Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };

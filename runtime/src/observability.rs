@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{BufWriter, Write},
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
@@ -25,6 +25,9 @@ struct Data {
     writer: Option<mpsc::SyncSender<Command>>,
     dropped: u64,
     storage_errors: u64,
+    queued_bytes: usize,
+    queued_events: usize,
+    directory: Option<PathBuf>,
 }
 #[derive(Default)]
 struct Metric {
@@ -61,10 +64,25 @@ impl Metric {
             .filter(|v| v["minute"].as_i64().unwrap_or(0) > cutoff)
             .cloned()
             .collect::<VecDeque<_>>();
-        if self.minute_count > 0 {
-            history.push_back(json!({"minute":self.minute,"count":self.minute_count,"errors":self.minute_errors,"mean_ms":self.minute_sum/self.minute_count as f64}));
+        if self.minute_count > 0 && self.minute > cutoff {
+            history.push_back(json!({
+                "minute": self.minute,
+                "count": self.minute_count,
+                "errors": self.minute_errors,
+                "mean_ms": self.minute_sum/self.minute_count as f64
+            }));
         }
-        json!({"count":self.count,"errors":self.errors,"sum_ms":self.sum,"mean_ms":if self.count==0{0.}else{self.sum/self.count as f64},"p50_ms":percentile(0.5),"p95_ms":percentile(0.95),"p99_ms":percentile(0.99),"buckets":self.buckets,"history":history})
+        json!({
+            "count": self.count,
+            "errors": self.errors,
+            "sum_ms": self.sum,
+            "mean_ms": if self.count==0{0.}else{self.sum/self.count as f64},
+            "p50_ms": percentile(0.5),
+            "p95_ms": percentile(0.95),
+            "p99_ms": percentile(0.99),
+            "buckets": self.buckets,
+            "history": history
+        })
     }
 }
 impl Observability {
@@ -115,12 +133,14 @@ impl Observability {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(e),
         }
+        this.0.lock().unwrap().directory = Some(path.clone());
         let (tx, rx) = mpsc::sync_channel::<Command>(512);
         this.0.lock().unwrap().writer = Some(tx);
         let worker = Arc::downgrade(&this.0);
         std::thread::spawn(move || {
-            let mut log = log;
-            let mut size = log.metadata().map(|m| m.len()).unwrap_or(0);
+            let mut log = BufWriter::with_capacity(64 * 1024, log);
+            let mut last_log_flush = Instant::now();
+            let mut size = log.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
             let mut last = Instant::now();
             loop {
                 let event = rx.recv_timeout(Duration::from_secs(1));
@@ -129,8 +149,16 @@ impl Observability {
                 };
                 let mut failed = false;
                 if let Ok(Command::Log(ref event)) = event {
+                    {
+                        let mut data = shared.lock().unwrap();
+                        data.queued_bytes = data.queued_bytes.saturating_sub(
+                            std::mem::size_of::<Value>() + crate::resources::heap_bytes(event),
+                        );
+                        data.queued_events = data.queued_events.saturating_sub(1);
+                    }
                     let result = (|| -> std::io::Result<()> {
                         if size >= 8 * 1024 * 1024 {
+                            log.flush()?;
                             for i in (1..=3).rev() {
                                 let from = if i == 1 {
                                     path.join("application.jsonl")
@@ -144,10 +172,13 @@ impl Observability {
                                     Err(e) => return Err(e),
                                 }
                             }
-                            log = OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(path.join("application.jsonl"))?;
+                            log = BufWriter::with_capacity(
+                                64 * 1024,
+                                OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(path.join("application.jsonl"))?,
+                            );
                             size = 0;
                         }
                         let line = event.to_string();
@@ -156,6 +187,10 @@ impl Observability {
                         Ok(())
                     })();
                     failed = result.is_err();
+                }
+                if last_log_flush.elapsed() >= Duration::from_secs(1) {
+                    failed |= log.flush().is_err();
+                    last_log_flush = Instant::now();
                 }
                 let disconnected = matches!(event, Err(mpsc::RecvTimeoutError::Disconnected));
                 if last.elapsed() >= Duration::from_secs(30)
@@ -199,10 +234,14 @@ impl Observability {
     pub fn log(&self, mut event: Value) {
         event["time"] = json!(chrono::Utc::now().to_rfc3339());
         let mut data = self.0.lock().unwrap();
-        if let Some(tx) = &data.writer
-            && tx.try_send(Command::Log(event.clone())).is_err()
-        {
-            data.dropped += 1;
+        if let Some(tx) = &data.writer {
+            if tx.try_send(Command::Log(event.clone())).is_err() {
+                data.dropped += 1;
+            } else {
+                data.queued_bytes +=
+                    std::mem::size_of::<Value>() + crate::resources::heap_bytes(&event);
+                data.queued_events += 1;
+            }
         }
         if data.logs.len() == 200 {
             data.logs.pop_front();
@@ -219,7 +258,12 @@ impl Observability {
                 if m.history.len() >= HISTORY - 1 {
                     m.history.pop_front();
                 }
-                m.history.push_back(json!({"minute":m.minute,"count":m.minute_count,"errors":m.minute_errors,"mean_ms":m.minute_sum/m.minute_count as f64}));
+                m.history.push_back(json!({
+                    "minute": m.minute,
+                    "count": m.minute_count,
+                    "errors": m.minute_errors,
+                    "mean_ms": m.minute_sum/m.minute_count as f64
+                }));
                 m.minute_count = 0;
                 m.minute_errors = 0;
                 m.minute_sum = 0.;
@@ -236,11 +280,71 @@ impl Observability {
             let bucket = BOUNDS.iter().position(|b| ms <= *b).unwrap_or(15);
             m.buckets[bucket] += 1;
         }
-        self.log(json!({"kind":"request","request_id":id,"endpoint":endpoint,"status":status,"duration_ms":ms}));
+        self.log(json!({
+            "kind": "request",
+            "request_id": id,
+            "endpoint": endpoint,
+            "status": status,
+            "duration_ms": ms
+        }));
     }
     pub fn snapshot(&self) -> Value {
         let d = self.0.lock().unwrap();
-        json!({"endpoints":d.metrics.iter().map(|(k,m)|(k.clone(),m.json())).collect::<BTreeMap<_,_>>(),"histogram_bounds_ms":BOUNDS,"percentiles":"histogram bucket upper bounds; cumulative since first start","history_minutes":HISTORY,"dropped_logs":d.dropped,"storage_errors":d.storage_errors})
+        json!({
+            "endpoints": d.metrics.iter().map(|(k,m)|(k.clone(),m.json())).collect::<BTreeMap<_,_>>(),
+            "histogram_bounds_ms": BOUNDS,
+            "percentiles": "histogram bucket upper bounds; cumulative since first start",
+            "history_minutes": HISTORY,
+            "dropped_logs": d.dropped,
+            "storage_errors": d.storage_errors
+        })
+    }
+    pub fn resources(&self) -> Value {
+        let d = self.0.lock().unwrap();
+        let metrics = d
+            .metrics
+            .iter()
+            .map(|(key, m)| {
+                key.capacity()
+                    + std::mem::size_of::<Metric>()
+                    + 3 * std::mem::size_of::<usize>()
+                    + m.history.capacity() * std::mem::size_of::<Value>()
+                    + m.history
+                        .iter()
+                        .map(crate::resources::heap_bytes)
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        let logs = d.logs.capacity() * std::mem::size_of::<Value>()
+            + d.logs
+                .iter()
+                .map(crate::resources::heap_bytes)
+                .sum::<usize>();
+        let disk = d.directory.as_ref().and_then(|path| {
+            let mut files = vec![
+                path.join("application.jsonl"),
+                path.join("metrics.json"),
+                path.join("metrics.tmp"),
+            ];
+            files.extend((1..=3).map(|i| path.join(format!("application.{i}.jsonl"))));
+            files
+                .iter()
+                .map(crate::resources::file_bytes)
+                .collect::<Option<Vec<_>>>()
+                .map(|sizes| sizes.iter().sum::<u64>())
+        });
+        json!({
+            "estimated_metrics_bytes": metrics,
+            "estimated_log_buffer_bytes": logs,
+            "estimated_log_queue_bytes": d.queued_bytes,
+            "log_writer_buffer_bytes": if d.writer.is_some(){65536}else{0},
+            "queued_log_events": d.queued_events,
+            "disk_bytes": disk,
+            "log_buffer_limit": 200,
+            "log_queue_limit": 512,
+            "history_minutes": HISTORY,
+            "estimate_note": "Estimates include collection capacity and payloads; exclude allocator overhead, fragmentation, active requests, thread stacks and shared runtime allocations."
+        })
     }
     pub fn logs(&self) -> Value {
         json!(self.0.lock().unwrap().logs)
@@ -269,6 +373,11 @@ impl Span {
 }
 impl Drop for Span {
     fn drop(&mut self) {
-        self.observer.log(json!({"kind":self.kind,"name":self.name,"success":self.success,"duration_ms":self.start.elapsed().as_secs_f64()*1000.}));
+        self.observer.log(json!({
+            "kind": self.kind,
+            "name": self.name,
+            "success": self.success,
+            "duration_ms": self.start.elapsed().as_secs_f64()*1000.
+        }));
     }
 }

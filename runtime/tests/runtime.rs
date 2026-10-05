@@ -308,6 +308,15 @@ fn photo_plugins_store_real_png_atomically_and_enforce_permissions() {
     assert_eq!(receipt["photo"]["height"], 6);
     let id = receipt["file"]["id"].as_str().unwrap();
     let bytes = runtime.file_bytes(id, Some(&user)).unwrap();
+    let audit = runtime.audit(0, 200).unwrap();
+    let blob = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["entity"] == "_flow_blobs" && v["entity_id"] == id)
+        .unwrap();
+    assert_eq!(blob["after"]["bytes"], bytes.len());
+    assert_eq!(blob["actor"]["id"], "catalog-admin");
     let image = image::load_from_memory(&bytes).unwrap();
     assert_eq!((image.width(), image.height()), (8, 6));
     assert_eq!(runtime.file_bytes(id, None).unwrap_err().code, "not_found");
@@ -353,4 +362,96 @@ fn numeric_brands_require_explicit_conversion() {
             .unwrap(),
         json!(1.25)
     );
+}
+
+#[test]
+fn audit_is_atomic_attributes_actors_and_survives_restart() {
+    let path = std::env::temp_dir().join(format!("flow-audit-{}.sqlite", uuid::Uuid::new_v4()));
+    let mut r = Runtime::open(APP, path.to_str().unwrap(), config()).unwrap();
+    let seeds = r.audit(0, 200).unwrap();
+    assert!(
+        seeds
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["operation"] == "seed")
+    );
+    let seed_max = seeds[0]["id"].as_i64().unwrap();
+    let auth = token("idp:u1");
+    let wal = std::fs::metadata(format!("{}-wal", path.display()))
+        .unwrap()
+        .len();
+    r.execute("Products", json!({}), None).unwrap();
+    assert_eq!(
+        std::fs::metadata(format!("{}-wal", path.display()))
+            .unwrap()
+            .len(),
+        wal
+    );
+    assert_eq!(r.audit(0, 200).unwrap(), seeds);
+    assert!(
+        r.execute("CreateOrder", order("u2", 1), Some(&auth))
+            .is_err()
+    );
+    assert_eq!(r.audit(0, 200).unwrap(), seeds);
+    r.execute("CreateOrder", order("u1", 2), Some(&auth))
+        .unwrap();
+    let audit = r.audit(0, 200).unwrap();
+    let changes = audit
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["id"].as_i64().unwrap() > seed_max)
+        .collect::<Vec<_>>();
+    assert!(
+        changes
+            .iter()
+            .any(|v| v["entity"] == "Order" && v["action"] == "INSERT")
+    );
+    let stock = changes
+        .iter()
+        .find(|v| v["entity"] == "Product" && v["action"] == "UPDATE")
+        .unwrap();
+    assert_ne!(stock["before"]["stock"], stock["after"]["stock"]);
+    for v in &changes {
+        assert_eq!(v["actor"]["id"], "u1");
+        assert_eq!(v["operation"], "CreateOrder");
+        assert_eq!(v["transaction_id"], changes[0]["transaction_id"]);
+    }
+    let page = r.audit(audit[1]["id"].as_i64().unwrap(), 1).unwrap();
+    assert_eq!(page[0], audit[2]);
+    drop(r);
+    let restarted = Runtime::open(APP, path.to_str().unwrap(), config()).unwrap();
+    assert_eq!(restarted.audit(0, 200).unwrap(), audit);
+    drop(restarted);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn audit_write_failure_rolls_back_application_changes() {
+    let path = std::env::temp_dir().join(format!(
+        "flow-audit-failure-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let mut r = Runtime::open(APP, path.to_str().unwrap(), config()).unwrap();
+    let baseline = r.audit(0, 200).unwrap();
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_audit BEFORE INSERT ON _flow_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;").unwrap();
+    let auth = token("idp:u1");
+    assert!(
+        r.execute("CreateOrder", order("u1", 1), Some(&auth))
+            .is_err()
+    );
+    assert_eq!(r.audit(0, 200).unwrap(), baseline);
+    assert_eq!(
+        r.execute("UserOrders", json!({"userId":"u1"}), Some(&auth))
+            .unwrap(),
+        json!([])
+    );
+    db.execute_batch("DROP TRIGGER fail_audit;").unwrap();
+    r.execute("CreateOrder", order("u1", 1), Some(&auth))
+        .unwrap();
+    drop(db);
+    drop(r);
+    std::fs::remove_file(path).unwrap();
 }

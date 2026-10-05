@@ -6,6 +6,7 @@ pub mod media;
 pub mod mqtt;
 pub mod observability;
 pub mod program;
+pub mod resources;
 pub mod syntax;
 pub mod value;
 pub mod websocket;

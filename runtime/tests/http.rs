@@ -1,5 +1,6 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use flow_runtime::{
+    admin,
     engine::{Config, Runtime},
     http,
 };
@@ -33,7 +34,20 @@ async fn request(
     let path = path.to_owned();
     let body = body.to_owned();
     let auth = auth.map(str::to_owned);
-    tokio::task::spawn_blocking(move||{let mut socket=TcpStream::connect(address).unwrap();socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();let authorization=auth.map(|s|format!("Authorization: {s}\r\n")).unwrap_or_default();write!(socket,"{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\n{authorization}Content-Length: {}\r\n\r\n{body}",body.len()).unwrap();let mut response=String::new();socket.read_to_string(&mut response).unwrap();let (headers,body)=response.split_once("\r\n\r\n").unwrap();let status=headers.split_whitespace().nth(1).unwrap().parse().unwrap();(status,serde_json::from_str(body).unwrap())}).await.unwrap()
+    tokio::task::spawn_blocking(move || {
+        let mut socket = TcpStream::connect(address).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let authorization = auth.map(|s| format!("Authorization: {s}\r\n")).unwrap_or_default();
+        write!(socket,
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\n{authorization}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        ).unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, serde_json::from_str(body).unwrap_or_else(|_| json!(body)))
+    }).await.unwrap()
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_http_routes_and_permissions() {
@@ -46,11 +60,22 @@ async fn real_http_routes_and_permissions() {
         "service:device-automation".into(),
         "ApiKey automation-key-long-enough-123456789".into(),
     );
-    let runtime = Runtime::open(APP, ":memory:", config).unwrap();
+    let runtime = std::sync::Arc::new(std::sync::Mutex::new(
+        Runtime::open(APP, ":memory:", config).unwrap(),
+    ));
+    let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let admin_address = admin_listener.local_addr().unwrap();
+    let admin_router = admin::router(
+        runtime.clone(),
+        "admin-key-long-enough-1234567890123456".into(),
+    );
+    let admin_server =
+        tokio::spawn(async move { axum::serve(admin_listener, admin_router).await.unwrap() });
+    let application_router = http::router_shared(runtime.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server =
-        tokio::spawn(async move { axum::serve(listener, http::router(runtime)).await.unwrap() });
+        tokio::spawn(async move { axum::serve(listener, application_router).await.unwrap() });
     let (status, products) = request(address, "GET", "/api/products", "", None).await;
     assert_eq!(status, 200);
     assert_eq!(products.as_array().unwrap().len(), 4);
@@ -120,5 +145,58 @@ async fn real_http_routes_and_permissions() {
         400
     );
     assert_eq!(request(address, "GET", "/missing", "", None).await.0, 404);
+    assert_eq!(
+        request(admin_address, "GET", "/api/overview", "", None)
+            .await
+            .0,
+        401
+    );
+    let admin_auth = "Bearer admin-key-long-enough-1234567890123456";
+    let (status, overview) =
+        request(admin_address, "GET", "/api/overview", "", Some(admin_auth)).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        overview["metrics"]["endpoints"]["POST /api/orders"]["count"],
+        1
+    );
+    assert!(overview["metrics"]["endpoints"].get(&path).is_none());
+    let (_, audit) = request(admin_address, "GET", "/api/audit", "", Some(admin_auth)).await;
+    assert!(
+        audit
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["operation"] == "CreateOrder")
+    );
+    let input=json!({"endpoint":"SendCommand","path":"/api/devices/mower2/commands","authorization":auth,"body":{"action":"STOP"}}).to_string();
+    let baseline = runtime.lock().unwrap().audit(0, 200).unwrap();
+    assert_eq!(
+        request(admin_address, "POST", "/api/call", &input, Some(admin_auth))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(runtime.lock().unwrap().audit(0, 200).unwrap(), baseline);
+    let input = json!({"endpoint":"Products","path":"/api/products"}).to_string();
+    assert_eq!(
+        request(admin_address, "POST", "/api/call", &input, Some(admin_auth))
+            .await
+            .0,
+        200
+    );
+    let input = json!({"endpoint":"Products","path":"http://example.com/api/products"}).to_string();
+    assert_eq!(
+        request(admin_address, "POST", "/api/call", &input, Some(admin_auth))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        request(address, "GET", "/api/overview", "", Some(admin_auth))
+            .await
+            .0,
+        404
+    );
+    admin_server.abort();
     server.abort();
 }
