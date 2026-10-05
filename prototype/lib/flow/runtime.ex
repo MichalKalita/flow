@@ -212,13 +212,15 @@ defmodule Flow.Runtime do
   end
 
   defp authenticate!(state, db, transport, credential) do
+    lookup = fn entity, field, value -> Store.lookup(db, entity, field, value) end
+
     case Auth.authenticate(
            state.program.auth,
            transport,
            credential,
-           fn entity, field, value ->
-             Store.lookup(db, entity, field, value)
-           end, now: DateTime.to_unix(state.clock.())) do
+           lookup,
+           now: DateTime.to_unix(state.clock.())
+         ) do
       {:ok, principal} ->
         principal
 
