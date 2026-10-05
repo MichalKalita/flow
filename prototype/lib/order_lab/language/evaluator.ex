@@ -192,9 +192,16 @@ defmodule OrderLab.Language.Evaluator do
   end
 
   defp call(name, args, env, sources) do
-    if name in Map.get(env, "$source_names", []),
-      do: sources.({name, args}),
-      else: builtin(name, args)
+    cond do
+      name in Map.get(env, "$source_names", []) ->
+        sources.({name, args})
+
+      name in ["uuid", "now", "ago"] and Map.get(env, "$durable", false) ->
+        sources.({:nondeterministic, name, args})
+
+      true ->
+        builtin(name, args)
+    end
   end
 
   # Closed registry: no apply/Code.eval, atoms or native functions from user source.

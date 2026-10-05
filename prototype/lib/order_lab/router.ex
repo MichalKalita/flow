@@ -80,6 +80,14 @@ defmodule OrderLab.Router do
     end
   end
 
+  post "/api/requests/:id/resume" do
+    case OrderLab.Store.resume_request(id) do
+      {:ok, status, response} -> send_json(conn, status, response)
+      :not_found -> send_json(conn, 404, %{"error" => "request_not_found"})
+      _ -> send_json(conn, 409, %{"error" => "outcome_unknown"})
+    end
+  end
+
   post "/api/mqtt-outbox/:id/retry" do
     case OrderLab.Store.retry_mqtt(id) do
       {:ok, state} -> send_json(conn, 202, %{"id" => id, "state" => state})

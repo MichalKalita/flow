@@ -43,6 +43,7 @@ function render() {
   renderRequests();
   renderOrders();
   renderPlugins();
+  $('#external-operations').innerHTML = (data.external_operations || []).map(operation => `<article class="panel"><div class="panel-title"><h2>${esc(operation.operation)}</h2><span class="tag">${esc(operation.state)} · ${operation.attempts} pokusů</span></div><p>${esc(operation.id)}</p><pre>${pretty(operation.input)}</pre>${operation.state === 'pending' ? `<button class="button" data-resume="${esc(operation.request_id)}">Obnovit požadavek</button>` : ''}<button class="button" data-request="${esc(operation.request_id)}">Původní požadavek →</button></article>`).join('') || '<p class="muted">Zatím žádné externí operace.</p>';
   $('#mqtt-outbox').innerHTML = (data.mqtt_outbox || []).map(job => `<article class="panel"><div class="panel-title"><h2>${esc(job.source)}</h2><span class="tag">${esc(job.state)}</span></div><p>${esc(job.topic)}</p><pre>${pretty(job.payload)}</pre>${job.error ? `<p>${esc(job.error)}</p>` : ''}${job.state === 'failed' ? `<button class="button" data-retry-mqtt="${esc(job.id)}">Zopakovat po opravě kontraktu</button>` : ''}<button class="button" data-request="${esc(job.request_id)}">Původní požadavek →</button></article>`).join('') || '<p class="muted">Zatím žádné odchozí zprávy.</p>';
   $('#workflow-source').textContent = data.workflow;
   if (!initialized) {
@@ -123,6 +124,12 @@ document.addEventListener('click', async event => {
   if (nav) page(nav.dataset.page);
   const request = event.target.closest('[data-request]');
   if (request) await detail(request.dataset.request);
+  const resume = event.target.closest('[data-resume]');
+  if (resume) {
+    resume.disabled = true;
+    try {await api(`/api/requests/${encodeURIComponent(resume.dataset.resume)}/resume`, {method:'POST'});await refresh();}
+    finally {resume.disabled = false;}
+  }
   const mqttRetry = event.target.closest('[data-retry-mqtt]');
   if (mqttRetry) {
     mqttRetry.disabled = true;

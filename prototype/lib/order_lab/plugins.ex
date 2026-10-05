@@ -1,5 +1,43 @@
 defmodule OrderLab.Plugins.Payment do
   @moduledoc "Local payment adapter. Generates a demo URL; contacts no payment provider."
+  def call(input, context) do
+    case call(input) do
+      {:error, _} = error ->
+        error
+
+      {:ok, _} = demo ->
+        case System.get_env("PAYMENT_PROVIDER_URL") do
+          nil ->
+            demo
+
+          url ->
+            headers = [{~c"idempotency-key", String.to_charlist(context["idempotency_key"])}]
+
+            result =
+              :httpc.request(
+                :post,
+                {String.to_charlist(url), headers, ~c"application/json", Jason.encode!(input)},
+                [timeout: 5000, connect_timeout: 2000, autoredirect: false], body_format: :binary)
+
+            case result do
+              {:ok, {{_, status, _}, _, body}} when status in 200..299 ->
+                case Jason.decode(body) do
+                  {:ok, value} when is_map(value) ->
+                    {:ok, value}
+
+                  _ ->
+                    raise OrderLab.ExternalUnknown,
+                      message: "Payment provider returned an invalid response"
+                end
+
+              _ ->
+                raise OrderLab.ExternalUnknown,
+                  message: "Payment provider outcome is not confirmed"
+            end
+        end
+    end
+  end
+
   def call(input) do
     cond do
       input["country"] not in ["CZ", "SK", "DE", "US", "GB"] ->

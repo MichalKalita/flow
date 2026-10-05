@@ -66,6 +66,7 @@ defmodule OrderLab.Language.Native do
       },
       "Payment.create_url" => %{
         module: OrderLab.Plugins.Payment,
+        retry: :idempotent,
         input:
           {:record,
            %{
@@ -95,7 +96,11 @@ defmodule OrderLab.Language.Native do
     }
   end
 
-  def host(db, program, request, invoke) do
+  def configuration, do: %{payment_provider_url: System.get_env("PAYMENT_PROVIDER_URL", "demo")}
+
+  def host(db, program, request, invoke, uuid \\ nil) do
+    uuid = uuid || fn prefix -> Evaluator.builtin("uuid", [prefix]) end
+
     fn action, args ->
       case action do
         :source ->
@@ -131,7 +136,7 @@ defmodule OrderLab.Language.Native do
               do: fn input -> apply(op.module, op.native, [db, input, request]) end,
               else: op.module
 
-          case invoke.(args.operation, implementation, input) do
+          case invoke.(args.operation, implementation, input, Map.get(args, :site)) do
             {:ok, result} ->
               Types.validate!(result, op.output)
 
@@ -152,7 +157,7 @@ defmodule OrderLab.Language.Native do
                 message: "MQTT message exceeds 64 kB"
               )
 
-          id = Evaluator.builtin("uuid", ["publish"])
+          id = uuid.("publish")
 
           query!(
             db,
@@ -174,7 +179,7 @@ defmodule OrderLab.Language.Native do
         :queue ->
           op = Map.fetch!(operations(), args.operation)
           input = Types.validate!(args.input, op.input)
-          job = Evaluator.builtin("uuid", ["job"])
+          job = uuid.("job")
 
           query!(
             db,

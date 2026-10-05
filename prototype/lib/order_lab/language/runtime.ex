@@ -24,7 +24,11 @@ defmodule OrderLab.Language.Runtime do
     env =
       Enum.reduce(
         endpoint.inputs,
-        %{"request" => request, "$source_names" => Map.get(endpoint, :source_names, [])},
+        %{
+          "request" => request,
+          "$source_names" => Map.get(endpoint, :source_names, []),
+          "$durable" => true
+        },
         fn declaration, env ->
           value =
             case Map.fetch(input, declaration.name) do
@@ -34,7 +38,7 @@ defmodule OrderLab.Language.Runtime do
               :error ->
                 cond do
                   declaration.default != :missing ->
-                    Evaluator.eval(declaration.default, env)
+                    eval_with_host(declaration.default, env, host)
 
                   match?({:optional, _}, declaration.type) ->
                     nil
@@ -272,7 +276,14 @@ defmodule OrderLab.Language.Runtime do
     effects_allowed!(ctx)
     operation = Map.fetch!(OrderLab.Language.Native.operations(), node.operation)
     if Map.get(operation, :effect) == :write, do: writes_allowed!(ctx)
-    output = ctx.host.(:call, %{operation: node.operation, input: evaluate(node.input, ctx)})
+
+    output =
+      ctx.host.(:call, %{
+        operation: node.operation,
+        input: evaluate(node.input, ctx),
+        site: {node.file, node.line}
+      })
+
     continue(bind(ctx, node.binding, output))
   end
 
@@ -342,8 +353,14 @@ defmodule OrderLab.Language.Runtime do
     continue(bind(ctx, node.binding, output))
   end
 
-  defp evaluate(expr, ctx),
-    do: Evaluator.eval(expr, ctx.env, fn name -> ctx.host.(:source, %{name: name}) end)
+  defp evaluate(expr, ctx), do: eval_with_host(expr, ctx.env, ctx.host)
+
+  defp eval_with_host(expr, env, host) do
+    Evaluator.eval(expr, env, fn
+      {:nondeterministic, name, args} -> host.(:nondeterministic, %{name: name, args: args})
+      name -> host.(:source, %{name: name})
+    end)
+  end
 
   defp bind(ctx, nil, _), do: ctx
   defp bind(ctx, name, value), do: %{ctx | env: Map.put(ctx.env, name, value)}

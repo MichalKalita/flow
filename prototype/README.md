@@ -25,7 +25,7 @@ Na macOS při problému s CA nastavte `MIX_CACERTS_PATH=/etc/ssl/cert.pem` a `HE
 - David / US + bankovní převod: nepodporovaná platební metoda.
 - Simulovaná chyba emailu: objednávka zůstane potvrzená; tři pokusy s odstupem jedné sekundy, pak ponechání neúspěšné úlohy. V adminu ji lze opravit a zopakovat.
 
-V přehledu otevřete detail požadavku: obsahuje vstupní JSON, HTTP výsledek a všechny vstupy/výstupy pluginů. Sekce Pluginy ukazuje i chyby a jednotlivé emailové pokusy. Nejde o skutečná externí HTTP volání: oba pluginy jsou lokální Elixir moduly. Žádný email ani platba se reálně neodesílá.
+V přehledu otevřete detail požadavku: obsahuje vstupní JSON, HTTP výsledek a všechny vstupy/výstupy pluginů. Sekce Pluginy ukazuje i chyby a jednotlivé emailové pokusy. Výchozí režim je lokální simulace emailu a platby. Volitelné PAYMENT_PROVIDER_URL zapne skutečné HTTP volání pro synchronní Payment.create_url; poskytovatel musí podporovat stabilní Idempotency-Key a vracet typovaný výsledek. E2E používají samostatný lokální HTTP provider.
 
 `./bin/demo` odešle čtyři skutečné demo požadavky (úspěch, sklad, platba, email). Díky pevným idempotency klíčům při opakování nevytvoří další objednávky. Neplatný JSON, nesprávný content type i příliš velké tělo se také zaznamenají; u velkého těla se uchová jen přijatý fragment s označením `truncated`.
 
@@ -58,7 +58,7 @@ Příkaz sekačce pošlete přes `POST /api/devices/mower1/commands` s JSON `{"t
 
 `POST /api/language/check` validuje Flow zaslaný jako text bez spuštění.
 
-`GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `GET /health`.
+`GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `POST /api/requests/:id/resume`, `GET /health`.
 
 ## Pouze E2E testy
 
@@ -77,3 +77,6 @@ Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, 
 Neobsahuje HA, skutečné platby, přihlášení do HTTP adminu ani hot updates. WebSocket používá deklarativně ověřené lokální bearer tokeny. Interpreter má trvalé checkpointy a po restartu obnoví bezpečné pokračování za posledním COMMIT. Po pádu mezi commitem objednávky a uložením odpovědi se tak neopakuje objednávka, sklad ani platba; klient se stejným klíčem získá obnovený výsledek.
 
 Externí CALL bez bezpečného retry kontraktu nelze slepě zopakovat. Pokud takový CALL zůstává v pokračování, požadavek se automaticky neobnoví a stejný klíč vrátí `outcome_unknown`. Změněný zdroj rovněž nesmí převzít checkpoint původního programu. Diagnostiky nepotvrzeného externího pokusu mohou při tvrdém pádu zůstat neuložené. Simulovaný email může po pádu mezi provedením a potvrzením úlohy běžet znovu; skutečný poskytovatel by potřeboval idempotenci nebo jiný explicitní kontrakt. Podrobnosti popisuje [dokumentace obnovy](docs/LANGUAGE.md#obnova-vykonávání-po-pádu).
+
+
+Payment CALL má trvalou evidenci `<DATABASE_PATH>.effects`, která přežije rollback objednávky. Dokončený výsledek se znovu použije; nejasný pokus se opakuje se stejným klíčem a vstupem. Bez podpory poskytovatele nejde o garanci právě jednoho externího účinku. Admin → Pluginy ukazuje tento deník a umožňuje obnovit pending požadavek. Obnova hlídá změny zdrojových dat a případný konflikt, aby nepřepsala novější sklad. Hlavní databáze i deník musí zůstat pohromadě pro obnovu; asynchronní email a kompenzace mají nadále popsaná omezení.

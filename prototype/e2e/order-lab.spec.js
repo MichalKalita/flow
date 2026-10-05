@@ -42,10 +42,10 @@ async function crashServer() {
   const exited=new Promise(resolve=>server.once('exit',resolve));
   process.kill(-server.pid,'SIGKILL');await exited;
 }
-async function crashRequest(route,body,key,phase='after_commit',probeRoute=route) {
+async function crashRequest(route,body,key,phase='after_commit',probeRoute=route,extraEnv={}) {
   await stopServer();
   const marker=path.join(directory,'crash-'+key+'.json');
-  await startServer({FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:phase,FLOW_E2E_CRASH_ROUTE:probeRoute});
+  await startServer({FLOW_E2E_CRASH_MARKER:marker,FLOW_E2E_CRASH_PHASE:phase,FLOW_E2E_CRASH_ROUTE:probeRoute,...extraEnv});
   const pending=fetch('http://127.0.0.1:4100'+route,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':key},body:JSON.stringify(body)}).catch(()=>null);
   await expect.poll(()=>fs.existsSync(marker)).toBe(true);
   const probe=JSON.parse(fs.readFileSync(marker,'utf8'));
@@ -53,6 +53,22 @@ async function crashRequest(route,body,key,phase='after_commit',probeRoute=route
   return probe;
 }
 function sql(query) {return execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),query],{encoding:'utf8'}).trim();}
+
+async function paymentProvider() {
+  const receipts=new Map();const calls=[];let dropResponse=false;
+  const provider=http.createServer(async(req,res)=>{
+    let bytes='';for await(const chunk of req)bytes+=chunk;
+    const input=JSON.parse(bytes);const key=req.headers['idempotency-key'];calls.push({key,input});
+    if(!key){res.writeHead(400);return res.end();}
+    if(!receipts.has(key))receipts.set(key,{input,result:{url:'https://payments.example.invalid/'+input.order_id,provider:'e2e-provider',method:input.method}});
+    const receipt=receipts.get(key);
+    if(JSON.stringify(receipt.input)!==JSON.stringify(input)){res.writeHead(409);return res.end();}
+    if(dropResponse){req.socket.destroy();return;}
+    res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify(receipt.result));
+  });
+  await new Promise(resolve=>provider.listen(0,'127.0.0.1',resolve));
+  return {url:'http://127.0.0.1:'+provider.address().port+'/',receipts,calls,drop(value){dropResponse=value;},async close(){provider.closeAllConnections();await new Promise(resolve=>provider.close(resolve));}};
+}
 
 const payload = (overrides = {}) => ({user_id:'u1',items:[{product_id:'p1',quantity:1}],payment_method:'card',...overrides});
 async function snapshot(request) { const r=await request.get('/api/admin'); expect(r.status()).toBe(200); return r.json(); }
@@ -63,6 +79,7 @@ async function post(request, body, key) {
 
 
 const net = require('node:net');
+const http = require('node:http');
 const mqttString = value => {const b=Buffer.from(value); const h=Buffer.alloc(2); h.writeUInt16BE(b.length); return Buffer.concat([h,b]);};
 function mqttPacket(header, body=Buffer.alloc(0)) {
   let n=body.length; const size=[];
@@ -116,6 +133,34 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/payment-catch
+TRANSACTION
+    TRY
+        CALL Payment.create_url WITH {order_id: uuid("rejected"), amount_cents: 1, currency: "CZK", country: "BR", method: "card"}
+    CATCH failure
+        REQUIRE failure.code = "payment_country_unsupported" ELSE 409 unexpected_error "Wrong plugin error"
+    payment = CALL Payment.create_url WITH {order_id: uuid("accepted"), amount_cents: 1, currency: "CZK", country: "CZ", method: "card"}
+    COMMIT
+RETURN payment
+
+HTTP POST /api/payment-effects
+INPUT names List<String>
+TRANSACTION
+    results = FOR EACH name IN :names
+        outgoing = PUBLISH DeviceStatus("mower1") WITH {online: true, battery: 48}
+        payment = CALL Payment.create_url WITH {order_id: outgoing.id, amount_cents: 1, currency: "CZK", country: "CZ", method: "card"}
+        RETURN {name: name, id: outgoing.id, payment: payment}
+    COMMIT
+RETURN {results: results}
+
+HTTP POST /api/unsafe-effect
+INPUT name String
+TRANSACTION
+    note = INSERT Notes WITH {id: uuid("unsafe"), text: :name, rating: 4, tags: []}
+    CALL Email.send_confirmation WITH {order_id: "unsafe", to: "test@example.invalid", subject: :name, payment_url: "/", total_cents: 1, items: [], simulate_failure: false}
+    COMMIT
+RETURN note
+
 HTTP POST /api/test-publish
 INPUT device_id DeviceID
 INPUT battery Battery
@@ -839,16 +884,12 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect(sql(`SELECT count(*) FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text') IN ('${name}','${name}-second')`)).toBe('2');
   });
 
-  test('a crash before order COMMIT never blindly repeats an external operation with an unknown outcome', async ({request}) => {
-    const before=await snapshot(request);const input=payload({items:[{product_id:'p2',quantity:1}]});
-    const probe=await crashRequest('/api/orders',input,'crash-external','before_commit');
-    expect(sql(`SELECT count(*) FROM orders WHERE request_id='${probe.request_id}'`)).toBe('0');
+  test('a crash before COMMIT still blocks an external plugin without an idempotency contract', async ({request}) => {
+    const probe=await crashRequest('/api/unsafe-effect',{name:'unsafe-effect'},'crash-unsafe','before_commit');
+    expect(sql(`SELECT count(*) FROM flow_records WHERE table_name='Notes' AND json_extract(value_json,'$.text')='unsafe-effect'`)).toBe('0');
     await startServer();
-    const replay=await post(request,input,'crash-external');expect(replay.status).toBe(409);expect(replay.body.error.code).toBe('outcome_unknown');
-    const after=await snapshot(request);expect(after.orders).toEqual(before.orders);expect(after.products).toEqual(before.products);
-    expect(after.plugin_calls.filter(c=>c.request_id===probe.request_id && c.plugin==='Payment')).toHaveLength(0);
+    const response=await request.post('/api/unsafe-effect',{data:{name:'unsafe-effect'},headers:{'Idempotency-Key':'crash-unsafe'}});expect(response.status()).toBe(409);expect((await response.json()).error.code).toBe('outcome_unknown');
     expect(sql(`SELECT status FROM requests WHERE id='${probe.request_id}'`)).toBe('running');
-    expect(sql(`SELECT count(*) FROM flow_checkpoints WHERE request_id='${probe.request_id}'`)).toBe('1');
   });
 
   test('typed PUBLISH delivers a committed command to a real MQTT subscriber and exposes the outbox request', async ({request}) => {
@@ -940,8 +981,94 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect((await request.post(`/api/mqtt-outbox/${id}/retry`)).status()).toBe(404);
   });
 
+  test('recorded external payment is reused after SIGKILL before native COMMIT without a second provider request', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      const input=payload({items:[{product_id:'p2',quantity:1}]});const probe=await crashRequest('/api/orders',input,'external-recorded','after_external_record','/api/orders',{PAYMENT_PROVIDER_URL:provider.url});
+      expect(provider.calls).toHaveLength(1);expect(provider.receipts.size).toBe(1);const original=provider.calls[0];
+      await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await post(request,input,'external-recorded');expect(response.status).toBe(201);expect(response.body.replayed).toBe(true);expect(response.body.order.id).toBe(original.input.order_id);expect(response.body.payment.provider).toBe('e2e-provider');
+      expect(provider.calls).toHaveLength(1);expect(provider.receipts.size).toBe(1);
+      const operations=(await snapshot(request)).external_operations.filter(op=>op.request_id===probe.request_id);expect(operations).toHaveLength(1);expect(operations[0].state).toBe('completed');expect(operations[0].attempts).toBe(1);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('unknown provider result is retried with the identical key and input after SIGKILL and creates one external effect', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      const input=payload({items:[{product_id:'p2',quantity:1}]});const probe=await crashRequest('/api/orders',input,'external-pending','after_external_effect','/api/orders',{PAYMENT_PROVIDER_URL:provider.url});
+      expect(provider.calls).toHaveLength(1);expect(provider.receipts.size).toBe(1);const original=provider.calls[0];
+      await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await post(request,input,'external-pending');expect(response.status).toBe(201);expect(response.body.order.id).toBe(original.input.order_id);
+      expect(provider.calls).toHaveLength(2);expect(provider.calls[1]).toEqual(original);expect(provider.receipts.size).toBe(1);
+      const op=(await snapshot(request)).external_operations.find(op=>op.request_id===probe.request_id);expect(op.state).toBe('completed');expect(op.attempts).toBe(2);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('a dropped provider response stays pending and retrying the same HTTP key resumes safely without a process restart', async ({request,page}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});provider.drop(true);
+      const input=payload({items:[{product_id:'p2',quantity:1}]});const first=await post(request,input,'external-dropped');expect(first.status).toBe(503);expect(first.body.error.code).toBe('outcome_unknown');
+      expect(provider.receipts.size).toBe(1);const original=provider.calls[0];
+      const op=(await snapshot(request)).external_operations.find(op=>op.request_id===first.body.request_id);expect(op.state).toBe('pending');
+      await page.goto('/admin');await page.getByRole('button',{name:'Pluginy'}).click();await expect(page.locator('#external-operations')).toContainText(op.id);await expect(page.locator(`[data-resume="${first.body.request_id}"]`)).toBeVisible();
+      provider.drop(false);
+      const second=await post(request,input,'external-dropped');expect(second.status).toBe(201);expect(second.body.order.id).toBe(original.input.order_id);expect(provider.receipts.size).toBe(1);expect(provider.calls.at(-1)).toEqual(original);
+      expect((await request.post(`/api/requests/${first.body.request_id}/resume`)).status()).toBe(201);
+      expect((await snapshot(request)).external_operations.find(operation=>operation.id===op.id).state).toBe('completed');
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('stable call positions and transactional PUBLISH identifiers survive a crash inside a bound iteration', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      const input={names:['first','second']};const probe=await crashRequest('/api/payment-effects',input,'effect-loop','after_external_record','/api/payment-effects',{PAYMENT_PROVIDER_URL:provider.url});
+      const first=provider.calls[0];expect(provider.calls).toHaveLength(1);
+      await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/payment-effects',{data:input,headers:{'Idempotency-Key':'effect-loop'}});expect(response.status()).toBe(200);const body=await response.json();expect(body.results[0].id).toBe(first.input.order_id);expect(body.results.map(result=>result.name)).toEqual(input.names);
+      expect(provider.calls).toHaveLength(2);expect(provider.receipts.size).toBe(2);expect(provider.calls[0].key).not.toBe(provider.calls[1].key);
+      expect((await snapshot(request)).mqtt_outbox.filter(job=>job.request_id===probe.request_id)).toHaveLength(2);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('changed source data blocks journal replay instead of overwriting new inventory or repeating an external payment', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();sql("UPDATE products SET stock=stock+1 WHERE id='p2'");
+      const input=payload({items:[{product_id:'p2',quantity:1}]});await crashRequest('/api/orders',input,'effect-source-conflict','after_external_effect','/api/orders',{PAYMENT_PROVIDER_URL:provider.url});
+      const stock=Number(sql("SELECT stock FROM products WHERE id='p2'"));sql("UPDATE products SET stock=stock+1 WHERE id='p2'");
+      await startServer({PAYMENT_PROVIDER_URL:provider.url});const response=await post(request,input,'effect-source-conflict');expect(response.status).toBe(409);expect(response.body.error.code).toBe('journal_source_conflict');expect(provider.calls).toHaveLength(1);expect(provider.receipts.size).toBe(1);expect(Number(sql("SELECT stock FROM products WHERE id='p2'"))).toBe(stock+1);
+      await stopServer();sql("UPDATE products SET stock=stock-2 WHERE id='p2'");
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('an admin browser resumes a pending external operation using the same durable identity', async ({request,page}) => {
+    const provider=await paymentProvider();
+    try {
+      await stopServer();await startServer({PAYMENT_PROVIDER_URL:provider.url});provider.drop(true);
+      const response=await request.post('/api/payment-effects',{data:{names:['manual']}});expect(response.status()).toBe(503);const body=await response.json();
+      const original=provider.calls[0];provider.drop(false);
+      await page.goto('/admin');await page.getByRole('button',{name:'Pluginy'}).click();await page.locator(`[data-resume="${body.request_id}"]`).click();
+      await expect.poll(async()=> (await snapshot(request)).requests.find(row=>row.id===body.request_id)?.status).toBe('committed');
+      expect(provider.receipts.size).toBe(1);expect(provider.calls.at(-1)).toEqual(original);
+      await expect(page.locator(`[data-resume="${body.request_id}"]`)).toHaveCount(0);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
+  test('cached plugin business errors still enter TRY CATCH when the interrupted transaction is replayed', async ({request}) => {
+    const provider=await paymentProvider();
+    try {
+      const probe=await crashRequest('/api/payment-catch',{},'payment-catch','after_external_record','/api/payment-catch',{PAYMENT_PROVIDER_URL:provider.url});expect(provider.calls).toHaveLength(0);
+      await startServer({PAYMENT_PROVIDER_URL:provider.url});
+      const response=await request.post('/api/payment-catch',{data:{},headers:{'Idempotency-Key':'payment-catch'}});expect(response.status()).toBe(200);expect((await response.json()).provider).toBe('e2e-provider');
+      expect(provider.calls).toHaveLength(1);const operations=(await snapshot(request)).external_operations.filter(operation=>operation.request_id===probe.request_id);expect(operations).toHaveLength(2);expect(operations.every(operation=>operation.state==='completed')).toBe(true);
+    } finally {await stopServer();await provider.close();await startServer();}
+  });
+
   test('process restart preserves SQL state, request history, plugin calls and completed idempotency keys', async ({request}) => {
     await expect.poll(async()=> (await snapshot(request)).email_jobs.every(j=>['sent','failed'].includes(j.state))).toBe(true);
+    await expect.poll(async()=> (await snapshot(request)).mqtt_outbox.every(job=>['sent','failed'].includes(job.state))).toBe(true);
     const before=await snapshot(request);
     await stopServer(); await startServer();
     const after=await snapshot(request);
@@ -951,6 +1078,14 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const replay=await post(request,payload(),'e2e-replay'); expect(replay.status).toBe(201); expect(replay.body.replayed).toBe(true);
     expect((await snapshot(request)).orders).toEqual(before.orders);
   });
+  test('a missing external journal cannot be silently replaced while the main database still references it', async ({request}) => {
+    await stopServer();
+    const journal=path.join(directory,'e2e.sqlite3.effects');const files=[journal,journal+'-wal',journal+'-shm'];const saved=files.filter(file=>fs.existsSync(file));for(const file of saved)fs.renameSync(file,file+'.saved');
+    try {await expect(startServer()).rejects.toThrow('External operation journal does not match the main database');}
+    finally {await stopServer();for(const file of files)if(fs.existsSync(file))fs.rmSync(file);for(const file of saved)fs.renameSync(file+'.saved',file);await startServer();}
+    expect((await request.get('/health')).status()).toBe(200);
+  });
+
   test('five-minute position window excludes backdated messages while last status remains available', async ({request}) => {
     // A historical database fixture avoids waiting five real minutes in an E2E suite.
     await stopServer();

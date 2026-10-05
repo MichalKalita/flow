@@ -3,9 +3,13 @@ defmodule OrderLab.Checkpoint do
   def fingerprint(program) do
     :crypto.hash(
       :sha256,
-      :erlang.term_to_binary({1, program.source, OrderLab.Language.Native.operations()}, [
-        :deterministic
-      ])
+      :erlang.term_to_binary(
+        {3, program.source, OrderLab.Language.Native.operations(),
+         OrderLab.Language.Native.configuration()},
+        [
+          :deterministic
+        ]
+      )
     )
     |> Base.encode16(case: :lower)
   end
@@ -22,7 +26,8 @@ defmodule OrderLab.Checkpoint do
   defp safe_term?(%{kind: :call, operation: name}) do
     case Map.fetch(OrderLab.Language.Native.operations(), name) do
       {:ok, operation} ->
-        Map.has_key?(operation, :native) or Map.get(operation, :effect) in [:pure, :read]
+        Map.has_key?(operation, :native) or Map.get(operation, :effect) in [:pure, :read] or
+          Map.get(operation, :retry) == :idempotent
 
       :error ->
         false

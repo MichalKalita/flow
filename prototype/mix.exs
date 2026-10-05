@@ -6,7 +6,7 @@ defmodule OrderLab.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger, :crypto], mod: {OrderLab.Application, []}]
+    [extra_applications: [:logger, :crypto, :inets, :ssl], mod: {OrderLab.Application, []}]
   end
 
   defp deps do
