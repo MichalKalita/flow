@@ -1,6 +1,6 @@
 defmodule Flow.Value do
   @moduledoc "Validates external data without coercing brands, rounding numbers or dropping fields."
-  alias Flow.{ID, Ref, Schema, ValidationError}
+  alias Flow.{ID, Ref, Schema, ValidationError, Embedded}
 
   def validate(schema, type, value) do
     try do
@@ -18,6 +18,12 @@ defmodule Flow.Value do
   end
 
   defp cast(schema, {:named, name}, value, path, seen) do
+    value =
+      case value do
+        %Embedded{type: ^name, value: record} -> record
+        value -> value
+      end
+
     if name in seen, do: fail(path, "Cyclic value type #{name}")
 
     case name do

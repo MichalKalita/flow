@@ -243,6 +243,7 @@ defmodule Flow.Store do
 
   def encode(%ID{value: value}), do: value
   def encode(%Ref{id: id}), do: encode(id)
+  def encode(%Flow.Image{bytes: bytes}), do: {:blob, bytes}
   def encode(%Decimal{} = value), do: Decimal.to_string(value, :normal)
   def encode(%DateTime{} = value), do: DateTime.to_iso8601(value)
   def encode(true), do: 1
@@ -258,6 +259,9 @@ defmodule Flow.Store do
 
   defp json(%ID{value: value}), do: value
   defp json(%Ref{id: id}), do: json(id)
+  defp json(%Flow.Version{reference: reference}), do: json(reference)
+  defp json(%Flow.Embedded{value: value}), do: json(value)
+  defp json(%Flow.Image{bytes: bytes}), do: %{"$image" => Base.encode64(bytes)}
   defp json(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp json(%Decimal{} = value), do: value
   defp json(value) when is_list(value), do: Enum.map(value, &json/1)

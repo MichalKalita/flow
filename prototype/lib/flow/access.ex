@@ -115,6 +115,8 @@ defmodule Flow.Access do
     do: version_field(session, reference, field, state)
 
   def raw_field(_session, %Embedded{value: value}, field), do: Map.fetch!(value, field)
+  def raw_field(_session, %Flow.Image{} = image, "width"), do: image.width
+  def raw_field(_session, %Flow.Image{} = image, "height"), do: image.height
 
   def raw_field(session, values, field) when is_list(values),
     do: Enum.map(values, &raw_field(session, &1, field))

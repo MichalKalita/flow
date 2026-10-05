@@ -1,6 +1,6 @@
 # Flow — deklarativní aplikace
 
-Elixir parser a rozpracovaný validátor/runtime. Parser zůstává nezávislý na doméně. Runtime už provádí deklarativní operace nad SQLite, ověřuje credentials a autorizuje celou navrženou transakci před zápisem. Objednávky, sklad, příkazy zařízení a resize/uložení fotografií mají integrační testy. Zpracování fronty, eventové automaty a HTTP/MQTT/WebSocket server jsou ještě rozpracované; aplikaci zatím nelze spustit jako hotový síťový server.
+Elixir parser a rozpracovaný validátor/runtime. Parser zůstává nezávislý na doméně. Runtime provádí deklarativní operace nad SQLite, ověřuje credentials a autorizuje celou navrženou transakci před zápisem. Objednávky, sklad, příkazy zařízení, resize/uložení fotografií a šifrovaná fronta s opakovaným ověřováním práv mají integrační testy. Eventové automaty a HTTP/MQTT/WebSocket server jsou ještě rozpracované; aplikaci zatím nelze spustit jako hotový síťový server.
 
 Formát používá jedinou strukturu `[ ... ]`. Parser rozpoznává seznamy, symboly, přesná číselná znění a JSON řetězce. Nezná doménové keywords a nic nevykonává. Podrobnou gramatiku a AST popisuje [LANGUAGE.md](docs/LANGUAGE.md).
 
@@ -22,7 +22,7 @@ Formát používá jedinou strukturu `[ ... ]`. Parser rozpoznává seznamy, sym
   [result [order [last user.orders 10] Order.createdAt DESC]]]
 ```
 
-Celá deklarace aplikace je v [application.flow](priv/workflows/application.flow); další permission scénáře jsou v [permissions.flow](../examples/permissions.flow). Oba soubory procházejí parserem v testech. `Flow.Program.compile/2` navíc kontroluje typy vstupů/výstupů a výrazů operací, cykly vazeb, HTTP trasy a kontrakty pluginů. Statická kontrola všech permission predikátů a jejich závislostí ještě není dokončená.
+Celá deklarace aplikace je v [application.flow](priv/workflows/application.flow); další permission scénáře jsou v [permissions.flow](../examples/permissions.flow). Oba soubory procházejí parserem v testech. `Flow.Program.compile/2` kontroluje typy vstupů/výstupů, výrazy operací i permission predikátů, cykly vazeb, HTTP trasy a kontrakty pluginů. Rekurzivní permission závislosti musí být pozitivní; záporné cykly se odmítnou.
 
 ## Implementované části
 
@@ -36,7 +36,8 @@ Celá deklarace aplikace je v [application.flow](priv/workflows/application.flow
 - `Flow.Transaction` autorizuje všechny vytvořené, změněné a smazané entity i všechna dotčená pole. Identita a její vztahy se při autorizaci čtou z původního stavu; `after` a `creates transaction` zpřístupňují navržený stav. Návrhy se do SQLite zapíšou teprve po autorizaci a ověření výsledné projekce.
 - `Flow.Evaluator` memoizuje deklarativní vazby, včetně dopředných referencí a lokálních vazeb uvnitř `map`. Operace nemají imperativní resolver.
 - `Flow.Plugins` poskytuje nativní kontrakty pro čistý výpočet platebního URL a resize obrázku, transakční uložení souboru a ukázkovou externí emailovou službu. Ukázkový email zatím žádnou zprávu neposílá. Externí účinky se musí zařadit pomocí `enqueue`; potvrzení má typ `QueueReceipt`, nikoliv budoucí výsledek pluginu.
-- `Flow.Queue` atomicky ukládá šifrované úlohy spolu s transakcí. Worker s opakovanou autentizací a autorizací bude doplněn v dalším kroku. Pro persistentní databázi bude potřeba stabilní 32bytový `queue_key`, aby se úlohy daly dešifrovat po restartu.
+- `Flow.Queue` atomicky ukládá šifrované úlohy spolu s transakcí. Worker znovu autentizuje identitu a ověřuje aktuální práva před každým pokusem. Předá pluginu stabilní `idempotency_key`, pokud jeho hostitelský callback přijímá dva argumenty. Chyby se opakují podle deklarovaného retry a poté zůstávají ve stavu `RETAINED`; ztráta identity či práv přejde do `BLOCKED`. Persistentní runtime vyžaduje stabilní 32bytový `queue_key`. Worker běží automaticky; pro testy lze nastavit `worker_interval: :manual` a volat `Flow.Runtime.process_jobs/1`.
+- `Flow.Context` validuje externí fakta dodaná důvěryhodným hostitelem podle typu `Context`, pokud je deklarován. Klient nemůže předat context, actor, MFA ani delegaci přes parametry runtime. Bez vlastního typu obsahuje context pouze aktuální čas.
 
 ## Použití
 

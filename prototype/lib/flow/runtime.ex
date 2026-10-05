@@ -29,6 +29,7 @@ defmodule Flow.Runtime do
   end
 
   def program(runtime), do: GenServer.call(runtime, :program)
+  def process_jobs(runtime), do: GenServer.call(runtime, :process_jobs, :infinity)
 
   @impl true
   def init(options) do
@@ -49,8 +50,12 @@ defmodule Flow.Runtime do
         for {name, contract} <- program.plugins do
           handler = handlers[name] || raise ArgumentError, "Missing plugin implementation #{name}"
 
-          unless handler.mode == contract.mode and is_function(handler.function),
-            do: raise(ArgumentError, "Plugin contract mismatch #{name}")
+          arity = if contract.mode == :transactional, do: 2, else: 1
+
+          unless handler.mode == contract.mode and
+                   (is_function(handler.function, arity) or
+                      (contract.mode == :external and is_function(handler.function, 2))),
+                 do: raise(ArgumentError, "Plugin contract mismatch #{name}")
         end
 
         {:ok, :ok} =
@@ -72,12 +77,17 @@ defmodule Flow.Runtime do
             :ok
           end)
 
+        interval = Keyword.get(options, :worker_interval, 1000)
+        if interval != :manual, do: Process.send_after(self(), :process_jobs, interval)
+
         {:ok,
          %{
            program: program,
            store: store,
            handlers: handlers,
            context_provider: Keyword.get(options, :context, fn _, _ -> %{} end),
+           clock: Keyword.get(options, :clock, &DateTime.utc_now/0),
+           worker_interval: interval,
            queue_key: Keyword.get(options, :queue_key, :crypto.strong_rand_bytes(32))
          }}
       rescue
@@ -109,6 +119,21 @@ defmodule Flow.Runtime do
             do: raise(ArgumentError, "queue_key must have 32 bytes")
           )
 
+      if Keyword.get(options, :database, ":memory:") != ":memory:" and
+           not Keyword.has_key?(options, :queue_key),
+         do: raise(ArgumentError, "Persistent runtimes require a stable 32-byte queue_key")
+
+      unless is_function(Keyword.get(options, :context, fn _, _ -> %{} end), 2),
+        do: raise(ArgumentError, "context must be a trusted two-argument provider")
+
+      unless is_function(Keyword.get(options, :clock, &DateTime.utc_now/0), 0),
+        do: raise(ArgumentError, "clock must be a trusted zero-argument provider")
+
+      interval = Keyword.get(options, :worker_interval, 1000)
+
+      unless interval == :manual or (is_integer(interval) and interval >= 10),
+        do: raise(ArgumentError, "worker_interval must be :manual or at least 10 milliseconds")
+
       :ok
     rescue
       error -> {:error, error}
@@ -117,6 +142,9 @@ defmodule Flow.Runtime do
 
   @impl true
   def handle_call(:program, _from, state), do: {:reply, state.program, state}
+
+  def handle_call(:process_jobs, _from, state),
+    do: {:reply, Store.transaction(state.store, &Queue.work(&1, state)), state}
 
   def handle_call({:execute, name, input, credential, transport}, _from, state) do
     operation = state.program.operations[name]
@@ -132,7 +160,8 @@ defmodule Flow.Runtime do
               state.program.schema,
               principal,
               transport,
-              state.context_provider
+              state.context_provider,
+              state.clock.()
             )
 
           Access.with_session(db, state.program.permissions, principal, context, fn session ->
@@ -183,9 +212,13 @@ defmodule Flow.Runtime do
   end
 
   defp authenticate!(state, db, transport, credential) do
-    case Auth.authenticate(state.program.auth, transport, credential, fn entity, field, value ->
-           Store.lookup(db, entity, field, value)
-         end) do
+    case Auth.authenticate(
+           state.program.auth,
+           transport,
+           credential,
+           fn entity, field, value ->
+             Store.lookup(db, entity, field, value)
+           end, now: DateTime.to_unix(state.clock.())) do
       {:ok, principal} ->
         principal
 
@@ -226,5 +259,12 @@ defmodule Flow.Runtime do
   @impl true
   def terminate(_reason, state) do
     if Process.alive?(state.store), do: GenServer.stop(state.store)
+  end
+
+  @impl true
+  def handle_info(:process_jobs, state) do
+    Store.transaction(state.store, &Queue.work(&1, state))
+    Process.send_after(self(), :process_jobs, state.worker_interval)
+    {:noreply, state}
   end
 end

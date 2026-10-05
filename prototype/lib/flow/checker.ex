@@ -527,7 +527,10 @@ defmodule Flow.Checker do
     {"retry", values} = Syntax.form(retry)
     options = Syntax.options(values, ~w(attempts delay exhausted))
     [attempts] = Syntax.args(options["attempts"] || node, "attempts", 1)
-    constant_integer!(attempts)
+
+    if constant_integer!(attempts) == 0,
+      do: Syntax.fail(attempts, :invalid_retry, "Retry attempts must be positive")
+
     [delay] = Syntax.args(options["delay"] || node, "delay", 1)
     duration!(delay)
     [exhausted] = Syntax.args(options["exhausted"] || node, "exhausted", 1)

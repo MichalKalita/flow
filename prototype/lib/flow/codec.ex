@@ -46,6 +46,9 @@ defmodule Flow.Codec do
     Value.validate!(schema, type, value)
   end
 
+  def decode(schema, {:image, _} = type, %{"$image" => image}, _),
+    do: Flow.Value.validate!(schema, type, Base.decode64!(image))
+
   def decode(schema, type, value, _), do: Value.validate!(schema, type, value)
 
   defp external({:named, "Bool"}, 0), do: false

@@ -52,6 +52,7 @@ defmodule Flow.Transaction do
     case change(session, reference) do
       nil ->
         unless Store.fetch(session.db, reference, ["id"]), do: unavailable!()
+        Access.raw_field(session, %Version{reference: reference, state: :before}, field)
 
         stage(session, %{
           reference: reference,
@@ -64,6 +65,9 @@ defmodule Flow.Transaction do
         unavailable!()
 
       change ->
+        if change.action == "UPDATE",
+          do: Access.raw_field(session, %Version{reference: reference, state: :before}, field)
+
         stage(session, %{
           change
           | after: Map.put(change.after, field, value),
@@ -166,11 +170,25 @@ defmodule Flow.Transaction do
     :ok
   end
 
-  def creates(session, entity),
-    do:
+  def creates(session, entity) do
+    current =
       changes(session)
       |> Enum.filter(&(&1.action == "CREATE" and &1.reference.entity == entity))
       |> Enum.map(& &1.reference)
+
+    prior = lookup(session, :prior_creates, []) |> Enum.filter(&(&1.entity == entity))
+    Enum.uniq(current ++ prior)
+  end
+
+  def restore_proof(session, proof) do
+    creates =
+      Enum.map(proof["creates"] || [], fn item ->
+        %Ref{entity: item["entity"], id: %Flow.ID{entity: item["entity"], value: item["id"]}}
+      end)
+
+    put(session, :prior_creates, creates)
+    put(session, :prior_updates, proof["updates"] || [])
+  end
 
   def random_id, do: :crypto.strong_rand_bytes(18) |> Base.url_encode64(padding: false)
 
@@ -190,8 +208,33 @@ defmodule Flow.Transaction do
         end)
 
       _ ->
-        false
+        prior_update?(session, reference, before, after_state)
     end
+  end
+
+  defp prior_update?(session, reference, before, after_state) do
+    Enum.any?(lookup(session, :prior_updates, []), fn proof ->
+      if proof["entity"] == reference.entity and proof["id"] == reference.id.value do
+        Enum.all?([{"before", before}, {"after", after_state}], fn {state, fields} ->
+          Enum.all?(fields, fn {field, value} ->
+            definition = Store.fields(session.db, reference.entity)[field]
+
+            archived =
+              Flow.Codec.decode(
+                session.db.schema,
+                definition.type,
+                Map.fetch!(proof[state], field)
+              )
+
+            Expression.equal?(archived, value) and
+              (state == "before" or
+                 Expression.equal?(Access.raw_field(session, reference, field), archived))
+          end)
+        end)
+      else
+        false
+      end
+    end)
   end
 
   defp check_references!(session, change) do
