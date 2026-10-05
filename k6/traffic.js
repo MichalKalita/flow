@@ -38,7 +38,6 @@ const PAYMENT_METHODS = ["CARD", "BANK"];
 const COMMANDS = ["START", "STOP"];
 
 const orderStatuses = http.expectedStatuses(201, 400);
-const orderReadStatuses = http.expectedStatuses(200, 404);
 const commandStatuses = http.expectedStatuses(202, 403);
 
 const profiles = {
@@ -94,8 +93,6 @@ if (!profiles[PROFILE]) {
 
 export const options = profiles[PROFILE];
 
-let lastOrderId = null;
-
 function pick(items) {
   return items[Math.floor(Math.random() * items.length)];
 }
@@ -141,8 +138,12 @@ export function setup() {
   return { productCount: products.length };
 }
 
+function shopper() {
+  return USERS[(__VU - 1) % USERS.length];
+}
+
 export default function () {
-  const user = pick(USERS);
+  const user = shopper();
   const token = applicationToken(user.sub, JWT_SECRET);
 
   const catalog = get("/demo/api/products", {
@@ -183,18 +184,19 @@ export default function () {
       headers: authHeaders(token),
       tags: { name: "GET /demo/api/users/{userId}/orders" },
     });
+    const list = orders.status === 200 ? orders.json() : [];
     check(orders, {
       "user orders": (r) => r.status === 200 && Array.isArray(r.json()),
     });
 
-    if (lastOrderId) {
-      const order = get(`/demo/api/orders/${lastOrderId}`, {
+    if (Array.isArray(list) && list.length > 0) {
+      const orderId = pick(list).id;
+      const order = get(`/demo/api/orders/${orderId}`, {
         headers: authHeaders(token),
         tags: { name: "GET /demo/api/orders/{orderId}" },
-        responseCallback: orderReadStatuses,
       });
       check(order, {
-        "own order or missing": (r) => r.status === 200 || r.status === 404,
+        "own order": (r) => r.status === 200,
       });
     }
   }
@@ -255,7 +257,16 @@ export default function () {
     });
     if (accepted) {
       const body = created.json();
-      lastOrderId = body.order && body.order.id;
+      const orderId = body.order && body.order.id;
+      if (orderId) {
+        const order = get(`/demo/api/orders/${orderId}`, {
+          headers: authHeaders(token),
+          tags: { name: "GET /demo/api/orders/{orderId}" },
+        });
+        check(order, {
+          "own order": (r) => r.status === 200,
+        });
+      }
     }
   }
 

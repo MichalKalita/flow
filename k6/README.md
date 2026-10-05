@@ -79,7 +79,7 @@ k6 run -e BASE_URL=http://127.0.0.1:8080 -e JWT_SECRET='your-secret' ./k6/traffi
 | every iteration | `GET /demo/api/products` | anonymous |
 | ~50% | `GET /demo/api/products/{id}/photos` | anonymous |
 | ~35% | public catalog on another hosted project | anonymous |
-| ~60% | `GET /demo/api/users` and that user's orders | JWT |
+| ~60% | `GET /demo/api/users`, that user's orders, then `GET /demo/api/orders/{orderId}` | JWT |
 | ~40% of users with a device | device status, alerts, sometimes a command | JWT |
 | ~15% | `POST /demo/api/orders` (quantity 1) | JWT |
 
