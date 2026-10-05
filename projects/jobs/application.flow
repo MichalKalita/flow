@@ -20,6 +20,7 @@
   [field name String]
   [field email String]
   [field headline String]
+  [field company [optional Company]]
   [field applications [list Application] [inverse Application.candidate]]]
 
 [entity Company
@@ -77,7 +78,7 @@
   [record [id 2] [identitySubject "idp:u2"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"] [headline "Editorial intern"]]
   [record [id 3] [identitySubject "idp:u3"] [roles [list]] [name "David Miller"] [email "david@example.test"] [headline "Front desk and people"]]
   [record [id 4] [identitySubject "idp:u4"] [roles [list]] [name "Omar Haddad"] [email "omar@example.test"] [headline "Interface design"]]
-  [record [id 5] [identitySubject "idp:hr"] [roles [list RECRUITER]] [name "River HR"] [email "hr@river.example"] [headline ""]]]]
+  [record [id 5] [identitySubject "idp:hr"] [roles [list RECRUITER]] [name "River HR"] [email "hr@river.example"] [headline ""] [company 1]]]]
 [seed Application [rows
   [record [id 1] [listing 1] [candidate 1] [coverLetter "I ship SQLite services."] [status REVIEWING] [createdAt "2026-09-10T09:00:00Z"]]
   [record [id 2] [listing 2] [candidate 2] [coverLetter "I mark up manuscripts."] [status SUBMITTED] [createdAt "2026-09-16T11:00:00Z"]]
@@ -103,13 +104,20 @@
   [Listing [READ [when [eq target.status OPEN]]]]]
 
 [permissions User
+  [User [READ [when [eq actor target]]]]
   [Application
-    [READ [when [or [eq actor target.candidate] [contains actor.roles RECRUITER]]]]
-    [CREATE [when [eq actor after.candidate]]]
-    [UPDATE [when [contains actor.roles RECRUITER]]]]
+    [READ [when [or
+      [eq actor target.candidate]
+      [and [contains actor.roles RECRUITER] [eq actor.company target.listing.company]]]]]
+    [CREATE [when [and
+      [eq actor after.candidate]
+      [eq after.listing.status OPEN]]]]
+    [UPDATE [when [and
+      [contains actor.roles RECRUITER]
+      [eq actor.company after.listing.company]]]]]
   [Message
     [READ [when [can READ target.application]]]
-    [CREATE [when [can READ after.application]]]]]
+    [CREATE [when [and [eq actor after.author] [can READ after.application]]]]]]
 
 [type ListingOutput [record
   [field id ListingID] [field title String] [field workplace Workplace]
@@ -125,7 +133,7 @@
 
 [query Listing
   [input listingId ListingID]
-  [output Listing]
+  [output ListingOutput]
   [http GET "/api/listings/{listingId}"]
   [result [entity $listingId]]]
 
@@ -137,29 +145,25 @@
   [result [order [last user.applications 50] Application.createdAt DESC]]]
 
 [mutate Apply
-  [input candidateId UserID]
   [input listingId ListingID]
   [input coverLetter String]
   [output ApplicationOutput]
   [http POST "/api/applications" [status 201]]
   [atomic]
-  [candidate [entity $candidateId]]
   [listing [entity $listingId]]
   [application [create Application [record
-    [id [new ApplicationID]] [candidate candidate] [listing listing]
+    [id [new ApplicationID]] [candidate request.actor] [listing listing]
     [coverLetter $coverLetter] [status SUBMITTED] [createdAt request.time]]]]
   [result application]]
 
 [mutate MessageCandidate
   [input applicationId ApplicationID]
-  [input authorId UserID]
   [input body String]
   [output MessageOutput]
   [http POST "/api/applications/{applicationId}/messages" [status 201]]
   [atomic]
   [application [entity $applicationId]]
-  [author [entity $authorId]]
   [message [create Message [record
-    [id [new MessageID]] [application application] [author author]
+    [id [new MessageID]] [application application] [author request.actor]
     [body $body] [createdAt request.time]]]]
   [result message]]

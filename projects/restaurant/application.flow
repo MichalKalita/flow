@@ -118,10 +118,15 @@
   [Table [READ [when true]]]]
 
 [permissions User
+  [User [READ [when [or [eq actor target] [contains actor.roles HOST]]]]]
   [Reservation
     [READ [when [or [eq actor target.guest] [contains actor.roles HOST]]]]
     [CREATE [when [eq actor after.guest]]]
-    [UPDATE [when [contains actor.roles HOST]]]]
+    [UPDATE [when [and
+      [contains actor.roles HOST]
+      [eq before.status REQUESTED]
+      [eq after.status CONFIRMED]
+      [only changed status]]]]]
   [Ticket
     [READ [when [or [eq actor target.reservation.guest] [contains actor.roles HOST]]]]
     [CREATE [when [contains actor.roles HOST]]]
@@ -131,6 +136,8 @@
 [type ReservationOutput [record
   [field id ReservationID] [field partySize PartySize]
   [field startsAt DateTime] [field status ReservationStatus]]]
+[type TicketOutput [record
+  [field id TicketID] [field total OrderTotal] [field status OrderStatus] [field createdAt DateTime]]]
 [type MenuItem [record [field dishId DishID] [field quantity Quantity]]]
 
 [query Menu
@@ -146,17 +153,15 @@
   [result [order [last user.reservations 20] Reservation.startsAt DESC]]]
 
 [mutate BookTable
-  [input guestId UserID]
   [input tableId TableID]
   [input partySize PartySize]
   [input startsAt DateTime]
   [output ReservationOutput]
   [http POST "/api/reservations" [status 201]]
   [atomic]
-  [guest [entity $guestId]]
   [table [entity $tableId]]
   [reservation [create Reservation [record
-    [id [new ReservationID]] [guest guest] [table table]
+    [id [new ReservationID]] [guest request.actor] [table table]
     [partySize $partySize] [startsAt $startsAt]
     [status REQUESTED] [createdAt request.time]]]]
   [result reservation]]
@@ -173,7 +178,7 @@
 [mutate OpenTicket
   [input reservationId ReservationID]
   [input items [list MenuItem [min 1] [max 30]]]
-  [output Ticket]
+  [output TicketOutput]
   [http POST "/api/tickets" [status 201]]
   [atomic]
   [reservation [entity $reservationId]]

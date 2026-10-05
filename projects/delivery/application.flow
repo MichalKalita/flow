@@ -128,14 +128,35 @@
   [MenuItem [READ [when true]]]]
 
 [permissions User
+  [User [READ [when [or [eq actor target] [contains actor.roles SUPPORT]]]]]
   [Order
     [READ [when [or [eq actor target.customer] [contains actor.roles SUPPORT]]]]
-    [CREATE [when [eq actor after.customer]]]]]
+    [CREATE [when [and
+      [eq actor after.customer]
+      [eq after.kitchen.open true]
+      [all after.items line [and
+        [eq line.item.kitchen after.kitchen]
+        [eq line.item.available true]
+        [eq line.price line.item.price]
+        [eq line.name line.item.name]]]]]]]
+  [Courier [READ [when [any actor.orders order [and
+    [eq order.courier target]
+    [eq order.status OUT_FOR_DELIVERY]]]]]]
+  [CourierPosition [READ [when [can READ target.courier]]]]]
 [permissions Courier
+  [Courier [READ [when [eq actor target]]]]
+  [Courier
+    [UPDATE [when [and [eq actor target] [only changed status]]]]]
   [Order
     [READ [when [eq actor target.courier]]]
-    [UPDATE [when [eq actor after.courier]]]]
-  [CourierPosition [CREATE [when [eq actor after.courier]]]]]
+    [UPDATE [when [and
+      [eq actor after.courier]
+      [eq before.courier null]
+      [eq before.status PLACED]
+      [eq after.status OUT_FOR_DELIVERY]]]]]
+  [CourierPosition
+    [READ [when [eq actor target.courier]]]
+    [CREATE [when [eq actor after.courier]]]]]
 
 [type KitchenOutput [record [field id KitchenID] [field name String] [field kind KitchenKind]]]
 [type ItemOutput [record [field id ItemID] [field name String] [field price Price]]]
@@ -165,20 +186,18 @@
   [result [live courier.positions]]]
 
 [mutate PlaceOrder
-  [input customerId UserID]
   [input kitchenId KitchenID]
   [input items [list CartItem [min 1] [max 30]]]
   [output OrderOutput]
   [http POST "/api/orders" [status 201]]
   [atomic]
-  [customer [entity $customerId]]
   [kitchen [entity $kitchenId]]
   [lines [map $items item
     [menu [entity item.itemId]]
     [snapshot [record [item menu] [name menu.name] [price menu.price] [quantity item.quantity]]]]]
-  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.quantity]]]]
+  [total [as OrderTotal [sum lines line [mul line.snapshot.price line.snapshot.quantity]]]]
   [order [create Order [record
-    [id [new OrderID]] [customer customer] [kitchen kitchen]
+    [id [new OrderID]] [customer request.actor] [kitchen kitchen]
     [items lines.snapshot] [total total] [status PLACED] [createdAt request.time]]]]
   [result order]]
 

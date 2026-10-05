@@ -96,10 +96,21 @@
   [Copy [READ [when true]]]]
 
 [permissions User
+  [User [READ [when [or [eq actor target] [contains actor.roles LIBRARIAN]]]]]
+  [Copy
+    [UPDATE [when [and
+      [contains actor.roles LIBRARIAN]
+      [or
+        [and [eq before.status AVAILABLE] [eq after.status LOANED]]
+        [and [eq before.status LOANED] [eq after.status AVAILABLE]]]]]]]
   [Loan
     [READ [when [or [eq actor target.patron] [contains actor.roles LIBRARIAN]]]]
-    [CREATE [when [contains actor.roles LIBRARIAN]]]
-    [UPDATE [when [contains actor.roles LIBRARIAN]]]]
+    [CREATE [when [and
+      [contains actor.roles LIBRARIAN]
+      [eq after.copy.status LOANED]]]]
+    [UPDATE [when [and
+      [contains actor.roles LIBRARIAN]
+      [eq after.status RETURNED]]]]]
   [Hold
     [READ [when [or [eq actor target.patron] [contains actor.roles LIBRARIAN]]]]
     [CREATE [when [eq actor after.patron]]]]]
@@ -147,14 +158,12 @@
   [result loan]]
 
 [mutate PlaceHold
-  [input patronId UserID]
   [input workId WorkID]
   [output HoldOutput]
   [http POST "/api/holds" [status 201]]
   [atomic]
-  [patron [entity $patronId]]
   [work [entity $workId]]
   [hold [create Hold [record
-    [id [new HoldID]] [patron patron] [work work]
+    [id [new HoldID]] [patron request.actor] [work work]
     [status WAITING] [createdAt request.time]]]]
   [result hold]]

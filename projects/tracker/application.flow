@@ -108,15 +108,18 @@
 
 [permissions User
   [Ticket
-    [READ [when true]]
+    [READ [when [or
+      [eq actor target.reporter]
+      [eq actor target.assignee]
+      [contains actor.roles MAINTAINER]]]]
     [CREATE [when [eq actor after.reporter]]]
     [UPDATE [when [or
       [eq actor target.reporter]
       [eq actor target.assignee]
       [contains actor.roles MAINTAINER]]]]]
   [Comment
-    [READ [when true]]
-    [CREATE [when [eq actor after.author]]]]]
+    [READ [when [can READ target.ticket]]]
+    [CREATE [when [and [eq actor after.author] [can READ after.ticket]]]]]]
 
 [type ProjectOutput [record [field id ProjectID] [field key String] [field name String]]]
 [type TicketOutput [record
@@ -143,7 +146,6 @@
   [result [entity $ticketId]]]
 
 [mutate OpenTicket
-  [input reporterId UserID]
   [input projectId ProjectID]
   [input title String]
   [input body String]
@@ -152,25 +154,22 @@
   [output TicketOutput]
   [http POST "/api/tickets" [status 201]]
   [atomic]
-  [reporter [entity $reporterId]]
   [project [entity $projectId]]
   [ticket [create Ticket [record
-    [id [new TicketID]] [reporter reporter] [project project]
+    [id [new TicketID]] [reporter request.actor] [project project]
     [title $title] [body $body] [kind $kind] [status OPEN]
     [priority $priority] [createdAt request.time]]]]
   [result ticket]]
 
 [mutate CommentOnTicket
   [input ticketId TicketID]
-  [input authorId UserID]
   [input body String]
   [output CommentOutput]
   [http POST "/api/tickets/{ticketId}/comments" [status 201]]
   [atomic]
   [ticket [entity $ticketId]]
-  [author [entity $authorId]]
   [comment [create Comment [record
-    [id [new CommentID]] [ticket ticket] [author author]
+    [id [new CommentID]] [ticket ticket] [author request.actor]
     [body $body] [createdAt request.time]]]]
   [result comment]]
 

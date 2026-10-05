@@ -19,6 +19,7 @@
   [field roles [list Role [max 2]]]
   [field name String]
   [field email String]
+  [field practitioner [optional Practitioner]]
   [field visits [list Visit] [inverse Visit.patient]]]
 
 [entity Practitioner
@@ -67,7 +68,7 @@
   [record [id 1] [identitySubject "idp:u1"] [roles [list]] [name "Petra Nováková"] [email "petra@example.test"]]
   [record [id 2] [identitySubject "idp:u2"] [roles [list]] [name "David Miller"] [email "david@example.test"]]
   [record [id 3] [identitySubject "idp:u3"] [roles [list]] [name "Nora Silva"] [email "nora@example.test"]]
-  [record [id 4] [identitySubject "idp:doc"] [roles [list DOCTOR]] [name "Clinic doctor"] [email "doc@example.test"]]
+  [record [id 4] [identitySubject "idp:doc"] [roles [list DOCTOR]] [name "Clinic doctor"] [email "doc@example.test"] [practitioner 1]]
   [record [id 5] [identitySubject "idp:desk"] [roles [list RECEPTION]] [name "Reception"] [email "desk@example.test"]]]]
 [seed Visit [rows
   [record [id 1] [patient 1] [practitioner 1] [slot 1] [status COMPLETED] [createdAt "2026-10-01T08:00:00Z"]]
@@ -98,13 +99,26 @@
   [Visit
     [READ [when [or
       [eq actor target.patient]
-      [contains actor.roles DOCTOR]
+      [eq actor.practitioner target.practitioner]
       [contains actor.roles RECEPTION]]]]
     [CREATE [when [or [eq actor after.patient] [contains actor.roles RECEPTION]]]]]
   [ClinicalNote
-    [READ [when [or [contains actor.roles DOCTOR] [contains actor.roles NURSE]]]]
-    [CREATE [when [contains actor.roles DOCTOR]]]]
-  [Slot [UPDATE [when [or [eq actor after.visit.patient] [contains actor.roles RECEPTION]]]]]]
+    [READ [when [or
+      [eq actor.practitioner target.visit.practitioner]
+      [contains actor.roles NURSE]]]]
+    [CREATE [when [and
+      [contains actor.roles DOCTOR]
+      [eq actor after.author]
+      [eq actor.practitioner after.visit.practitioner]]]]]
+  [Slot [UPDATE [when [and
+    [eq before.status OPEN]
+    [eq after.status BOOKED]
+    [only changed status]
+    [or
+      [contains actor.roles RECEPTION]
+      [any [creates transaction Visit] visit [and
+        [eq visit.slot target]
+        [eq visit.patient actor]]]]]]]]]
 
 [type SlotOutput [record
   [field id SlotID] [field startsAt DateTime] [field duration DurationMinutes] [field status SlotStatus]]]
@@ -134,21 +148,20 @@
   [atomic]
   [patient [entity $patientId]]
   [slot [entity $slotId]]
+  [practitioner slot.practitioner]
   [booked [set slot.status BOOKED]]
   [visit [create Visit [record
-    [id [new VisitID]] [patient patient] [practitioner slot.practitioner]
+    [id [new VisitID]] [patient patient] [practitioner practitioner]
     [slot slot] [status SCHEDULED] [createdAt request.time]]]]
   [result visit]]
 
 [mutate AddNote
   [input visitId VisitID]
-  [input authorId UserID]
   [input body String]
   [output NoteOutput]
   [http POST "/api/visits/{visitId}/notes" [status 201]]
   [atomic]
   [visit [entity $visitId]]
-  [author [entity $authorId]]
   [note [create ClinicalNote [record
-    [id [new NoteID]] [visit visit] [author author] [body $body] [createdAt request.time]]]]
+    [id [new NoteID]] [visit visit] [author request.actor] [body $body] [createdAt request.time]]]]
   [result note]]

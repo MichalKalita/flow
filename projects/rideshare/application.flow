@@ -97,16 +97,25 @@
 [transport WebSocket [auth user driver]]
 
 [permissions User
+  [User [READ [when [eq actor target]]]]
   [Trip
     [READ [when [eq actor target.rider]]]
-    [CREATE [when [eq actor after.rider]]]]]
+    [CREATE [when [eq actor after.rider]]]]
+  [Driver [READ [when [any actor.trips trip [and
+    [eq trip.driver target]
+    [or [eq trip.status MATCHED] [eq trip.status EN_ROUTE]]]]]]]
+  [DriverPosition [READ [when [can READ target.driver]]]]]
 [permissions Driver
+  [Driver [READ [when [eq actor target]]]]
   [Trip
     [READ [when [eq actor target.driver]]]
-    [UPDATE [when [eq actor after.driver]]]]
-  [DriverPosition [CREATE [when [eq actor after.driver]]]]]
-[permissions User
-  [DriverPosition [READ [when [any actor.trips trip [eq trip.driver target.driver]]]]]]
+    [UPDATE [when [and
+      [eq actor after.driver]
+      [eq before.status REQUESTED]
+      [eq after.status MATCHED]]]]]
+  [DriverPosition
+    [READ [when [eq actor target.driver]]]
+    [CREATE [when [eq actor after.driver]]]]]
 
 [type TripOutput [record
   [field id TripID] [field status TripStatus] [field fare Fare] [field createdAt DateTime]]]
@@ -134,30 +143,25 @@
   [result [live driver.positions]]]
 
 [mutate RequestTrip
-  [input riderId UserID]
   [input pickupLat Latitude]
   [input pickupLng Longitude]
   [input dropoffLat Latitude]
   [input dropoffLng Longitude]
-  [input fare Fare]
   [output TripOutput]
   [http POST "/api/trips" [status 201]]
   [atomic]
-  [rider [entity $riderId]]
   [trip [create Trip [record
-    [id [new TripID]] [rider rider] [pickupLat $pickupLat] [pickupLng $pickupLng]
+    [id [new TripID]] [rider request.actor] [pickupLat $pickupLat] [pickupLng $pickupLng]
     [dropoffLat $dropoffLat] [dropoffLng $dropoffLng]
-    [fare $fare] [status REQUESTED] [createdAt request.time]]]]
+    [fare 89.00] [status REQUESTED] [createdAt request.time]]]]
   [result trip]]
 
 [mutate AcceptTrip
   [input tripId TripID]
-  [input driverId DriverID]
   [output TripOutput]
   [http POST "/api/trips/{tripId}/accept"]
   [atomic]
   [trip [entity $tripId]]
-  [driver [entity $driverId]]
-  [assigned [set trip.driver driver]]
+  [assigned [set trip.driver request.actor]]
   [matched [set trip.status MATCHED]]
   [result trip]]

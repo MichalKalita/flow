@@ -118,6 +118,8 @@
   [field visibility PostVisibility] [field createdAt DateTime]]]
 [type CommentOutput [record
   [field id CommentID] [field author UserSummary] [field body String] [field createdAt DateTime]]]
+[type FollowOutput [record [field id FollowID] [field createdAt DateTime]]]
+[type LikeOutput [record [field id LikeID] [field createdAt DateTime]]]
 
 [query Timeline
   [input userId UserID]
@@ -141,38 +143,32 @@
   [result [order [last post.comments 50] Comment.createdAt ASC]]]
 
 [mutate CreatePost
-  [input authorId UserID]
   [input body String]
   [input visibility PostVisibility]
   [output PostOutput]
   [http POST "/api/posts" [status 201]]
   [atomic]
-  [author [entity $authorId]]
   [post [create Post [record
-    [id [new PostID]] [author author] [body $body]
+    [id [new PostID]] [author request.actor] [body $body]
     [visibility $visibility] [createdAt request.time]]]]
   [result post]]
 
 [mutate FollowUser
-  [input followerId UserID]
   [input followeeId UserID]
-  [output Follow]
+  [output FollowOutput]
   [http POST "/api/follows" [status 201]]
   [atomic]
-  [follower [entity $followerId]]
   [followee [entity $followeeId]]
   [follow [create Follow [record
-    [id [new FollowID]] [follower follower] [followee followee] [createdAt request.time]]]]
+    [id [new FollowID]] [follower request.actor] [followee followee] [createdAt request.time]]]]
   [result follow]]
 
 [mutate LikePost
-  [input userId UserID]
   [input postId PostID]
-  [output Like]
+  [output LikeOutput]
   [http POST "/api/likes" [status 201]]
   [atomic]
-  [user [entity $userId]]
   [post [entity $postId]]
   [like [create Like [record
-    [id [new LikeID]] [user user] [post post] [createdAt request.time]]]]
+    [id [new LikeID]] [user request.actor] [post post] [createdAt request.time]]]]
   [result like]]

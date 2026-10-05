@@ -113,10 +113,21 @@
   [Extra [READ [when true]]]]
 
 [permissions User
+  [User [READ [when [or [eq actor target] [contains actor.roles FRONT_DESK]]]]]
   [Stay
     [READ [when [or [eq actor target.guest] [contains actor.roles FRONT_DESK]]]]
-    [CREATE [when [eq actor after.guest]]]
-    [UPDATE [when [contains actor.roles FRONT_DESK]]]]
+    [CREATE [when [and
+      [eq actor after.guest]
+      [not [any [entities Stay] stay [and
+        [ne stay after]
+        [eq stay.room after.room]
+        [eq stay.checkIn after.checkIn]
+        [ne stay.status CANCELLED]]]]]]]
+    [UPDATE [when [and
+      [contains actor.roles FRONT_DESK]
+      [eq before.status CONFIRMED]
+      [eq after.status CHECKED_IN]
+      [only changed status]]]]]
   [HousekeepingTask
     [READ [when [contains actor.roles HOUSEKEEPING]]]
     [CREATE [when [contains actor.roles FRONT_DESK]]]
@@ -140,7 +151,6 @@
   [result [order [last user.stays 20] Stay.createdAt DESC]]]
 
 [mutate BookStay
-  [input guestId UserID]
   [input roomId RoomID]
   [input nights NightCount]
   [input guests GuestCount]
@@ -149,16 +159,15 @@
   [output StayOutput]
   [http POST "/api/stays" [status 201]]
   [atomic]
-  [guest [entity $guestId]]
   [room [entity $roomId]]
   [chosen [map $extras item
     [extra [entity item.extraId]]
     [snapshot [record [extra extra] [name extra.name] [price extra.price]]]]]
-  [roomCost [as StayTotal [mul room.nightly $nights]]]
-  [extraCost [as StayTotal [sum chosen line line.snapshot.price]]]
+  [roomCost [mul room.nightly $nights]]
+  [extraCost [sum chosen line line.snapshot.price]]
   [total [as StayTotal [add roomCost extraCost]]]
   [stay [create Stay [record
-    [id [new StayID]] [guest guest] [room room] [nights $nights] [guests $guests]
+    [id [new StayID]] [guest request.actor] [room room] [nights $nights] [guests $guests]
     [extras chosen.snapshot] [total total] [status REQUESTED]
     [checkIn $checkIn] [createdAt request.time]]]]
   [result stay]]

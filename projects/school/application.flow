@@ -106,11 +106,15 @@
   [Assignment
     [READ [when [or
       [eq actor target.course.teacher]
-      [any target.course.enrollments e [eq e.student actor]]]]]
+      [any target.course.enrollments e [and [eq e.student actor] [eq e.status ACTIVE]]]]]]
     [CREATE [when [eq actor after.course.teacher]]]]
   [Submission
     [READ [when [or [eq actor target.student] [eq actor target.assignment.course.teacher]]]]
-    [CREATE [when [eq actor after.student]]]
+    [CREATE [when [and
+      [eq actor after.student]
+      [any after.assignment.course.enrollments e [and
+        [eq e.student actor]
+        [eq e.status ACTIVE]]]]]]
     [UPDATE [when [eq actor after.assignment.course.teacher]]]]]
 
 [type CourseOutput [record [field id CourseID] [field code String] [field title String] [field term Term]]]
@@ -145,16 +149,14 @@
   [result enrollment]]
 
 [mutate SubmitWork
-  [input studentId UserID]
   [input assignmentId AssignmentID]
   [input body String]
   [output SubmissionOutput]
   [http POST "/api/submissions" [status 201]]
   [atomic]
-  [student [entity $studentId]]
   [assignment [entity $assignmentId]]
   [submission [create Submission [record
-    [id [new SubmissionID]] [student student] [assignment assignment]
+    [id [new SubmissionID]] [student request.actor] [assignment assignment]
     [body $body] [status SUBMITTED] [createdAt request.time]]]]
   [result submission]]
 

@@ -113,12 +113,17 @@
   [ClassSession [READ [when true]]]]
 
 [permissions User
+  [User [READ [when [or [eq actor target] [contains actor.roles STAFF]]]]]
   [Membership
     [READ [when [or [eq actor target.member] [contains actor.roles STAFF]]]]
-    [CREATE [when [or [eq actor after.member] [contains actor.roles STAFF]]]]]
+    [CREATE [when [contains actor.roles STAFF]]]]
   [Booking
     [READ [when [or [eq actor target.member] [eq actor target.session.instructor]]]]
-    [CREATE [when [eq actor after.member]]]]
+    [CREATE [when [and
+      [eq actor after.member]
+      [any actor.memberships membership [eq membership.status ACTIVE]]
+      [le [count after.session.bookings] after.session.capacity]
+      [eq [count [where after.session.bookings booking [eq booking.member after.member]]] 1]]]]]
   [CheckIn
     [READ [when [or [eq actor target.member] [contains actor.roles STAFF]]]]
     [CREATE [when [contains actor.roles STAFF]]]]]
@@ -128,6 +133,7 @@
   [field id ClassID] [field title String] [field kind ClassKind] [field startsAt DateTime]]]
 [type MembershipOutput [record [field id MembershipID] [field status MembershipStatus]]]
 [type BookingOutput [record [field id BookingID] [field createdAt DateTime]]]
+[type CheckInOutput [record [field id CheckInID] [field at DateTime]]]
 
 [query Plans
   [output [list PlanOutput [max 10]]]
@@ -153,20 +159,18 @@
   [result membership]]
 
 [mutate BookClass
-  [input memberId UserID]
   [input sessionId ClassID]
   [output BookingOutput]
   [http POST "/api/bookings" [status 201]]
   [atomic]
-  [member [entity $memberId]]
   [session [entity $sessionId]]
   [booking [create Booking [record
-    [id [new BookingID]] [member member] [session session] [createdAt request.time]]]]
+    [id [new BookingID]] [member request.actor] [session session] [createdAt request.time]]]]
   [result booking]]
 
 [mutate CheckInMember
   [input memberId UserID]
-  [output CheckIn]
+  [output CheckInOutput]
   [http POST "/api/check-ins" [status 201]]
   [atomic]
   [member [entity $memberId]]

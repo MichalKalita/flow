@@ -131,7 +131,16 @@
   [Review
     [CREATE [when [eq actor after.author]]]]
   [Book
-    [UPDATE [when [contains actor.roles STAFF]]]]]
+    [UPDATE [when [contains actor.roles STAFF]]]
+    [UPDATE [when [and
+      [only changed stock]
+      [gt before.stock after.stock]
+      [eq [sub before.stock after.stock]
+        [sum
+          [where
+            [flatMap [where [creates transaction Order] order [eq order.customer actor]] order order.items]
+            item [eq item.book target]]
+          item item.quantity]]]]]]]
 
 [type BookSummary [record
   [field id BookID] [field title String] [field isbn String] [field price Price] [field stock Stock]]]
@@ -148,7 +157,7 @@
 
 [query Book
   [input bookId BookID]
-  [output Book]
+  [output BookSummary]
   [http GET "/api/books/{bookId}"]
   [result [entity $bookId]]]
 
@@ -160,13 +169,12 @@
   [result [order [last book.reviews 50] Review.createdAt DESC]]]
 
 [mutate PlaceOrder
-  [input customerId UserID]
   [input items [list CartItem [min 1] [max 50]]]
   [input paymentMethod PaymentMethod]
   [output OrderOutput]
   [http POST "/api/orders" [status 201]]
   [atomic]
-  [customer [entity $customerId]]
+  [customer request.actor]
   [cart [groupSum $items bookId quantity Quantity]]
   [lines [map cart item
     [book [entity item.bookId]]
@@ -181,16 +189,14 @@
   [result order]]
 
 [mutate WriteReview
-  [input authorId UserID]
   [input bookId BookID]
   [input rating Rating]
   [input body String]
   [output ReviewOutput]
   [http POST "/api/reviews" [status 201]]
   [atomic]
-  [author [entity $authorId]]
   [book [entity $bookId]]
   [review [create Review [record
-    [id [new ReviewID]] [author author] [book book]
+    [id [new ReviewID]] [author request.actor] [book book]
     [rating $rating] [body $body] [createdAt request.time]]]]
   [result review]]
