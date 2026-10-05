@@ -1,6 +1,8 @@
 use flow_runtime::{
+    admin,
     engine::{Config, Runtime},
     http, mqtt,
+    observability::Observability,
     program::Program,
 };
 use std::sync::{Arc, Mutex};
@@ -44,11 +46,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("ApiKey {secret}"),
         );
     }
-    let runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
+    let admin_token = std::env::var("FLOW_ADMIN_TOKEN")
+        .map_err(|_| "Set FLOW_ADMIN_TOKEN (at least 32 bytes) for the internal dashboard")?;
+    if admin_token.len() < 32 {
+        return Err("FLOW_ADMIN_TOKEN must have at least 32 bytes".into());
+    }
+    let admin_bind = std::env::var("FLOW_ADMIN_BIND")
+        .unwrap_or_else(|_| "127.0.0.1:9090".into())
+        .parse::<std::net::SocketAddr>()?;
+    if !admin_bind.ip().is_loopback() {
+        return Err(
+            "Admin listener must bind to loopback; use an SSH tunnel for remote access".into(),
+        );
+    }
+    let observer = Observability::disk(
+        std::env::var("FLOW_OBSERVABILITY_DIR").unwrap_or_else(|_| "data/observability".into()),
+    )?;
+    let mut runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
+    runtime.observability = observer.clone();
     let runtime = Arc::new(Mutex::new(runtime));
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let mqtt_bind = args.get(3).map(String::as_str).unwrap_or("127.0.0.1:1883");
     let mqtt_listener = tokio::net::TcpListener::bind(mqtt_bind).await?;
+    let admin_listener = tokio::net::TcpListener::bind(admin_bind).await?;
+    println!(
+        "Flow admin listening on http://{}",
+        admin_listener.local_addr()?
+    );
+    let admin_router = admin::router(runtime.clone(), admin_token);
+    let admin_task = tokio::spawn(async move { axum::serve(admin_listener, admin_router).await });
     println!("Flow MQTT listening on {}", mqtt_listener.local_addr()?);
     let mqtt_runtime = runtime.clone();
     let mqtt_task = tokio::spawn(async move { mqtt::serve(mqtt_listener, mqtt_runtime).await });
@@ -62,5 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     mqtt_task.abort();
+    admin_task.abort();
+    tokio::task::spawn_blocking(move || observer.flush()).await??;
     Ok(())
 }

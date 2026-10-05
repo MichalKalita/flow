@@ -22,7 +22,7 @@ fn decode(s: &str) -> Result<String> {
         .map(|s| s.into_owned())
         .map_err(|_| Error::new("invalid_input", "Invalid URL encoding"))
 }
-fn route(pattern: &str, path: &str) -> Result<Option<Map<String, Value>>> {
+pub(crate) fn route(pattern: &str, path: &str) -> Result<Option<Map<String, Value>>> {
     let pattern = pattern.split('/').collect::<Vec<_>>();
     let path = path.split('/').collect::<Vec<_>>();
     if pattern.len() != path.len() {
@@ -50,7 +50,39 @@ fn merge(inputs: &mut Map<String, Value>, key: String, value: Value) -> Result<(
     };
     Ok(())
 }
-async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) -> Response {
+pub(crate) async fn dispatch(
+    State(runtime): State<Arc<Mutex<Runtime>>>,
+    request: Request,
+) -> Response {
+    let start = std::time::Instant::now();
+    let id = uuid::Uuid::new_v4().to_string();
+    let (observer, endpoint) = {
+        let guard = runtime.lock().unwrap();
+        let path = request.uri().path();
+        let endpoint = if request.method() == "GET" && path.starts_with("/api/files/") {
+            "GET /api/files/{id}".to_owned()
+        } else {
+            guard
+                .program
+                .operations
+                .iter()
+                .find(|op| {
+                    (op.method == request.method().as_str() || op.method == "WS")
+                        && route(&op.path, path).ok().flatten().is_some()
+                })
+                .map(|op| format!("{} {}", op.method, op.path))
+                .unwrap_or_else(|| "unmatched".into())
+        };
+        (guard.observability.clone(), endpoint)
+    };
+    let mut response = dispatch_inner(State(runtime), request).await;
+    observer.request(&endpoint, response.status().as_u16(), start.elapsed(), &id);
+    response
+        .headers_mut()
+        .insert("x-request-id", id.parse().unwrap());
+    response
+}
+async fn dispatch_inner(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) -> Response {
     let result = async {
         let (mut parts, body) = request.into_parts();
         let authorization = match parts

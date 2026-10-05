@@ -1,7 +1,10 @@
+pub mod admin;
+pub mod audit;
 pub mod engine;
 pub mod http;
 pub mod media;
 pub mod mqtt;
+pub mod observability;
 pub mod program;
 pub mod syntax;
 pub mod value;

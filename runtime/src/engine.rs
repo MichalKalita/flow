@@ -23,8 +23,9 @@ pub struct Config {
 }
 pub struct Runtime {
     pub program: Program,
-    db: Connection,
+    pub(crate) db: Connection,
     config: Config,
+    pub observability: crate::observability::Observability,
 }
 #[derive(Clone, Debug)]
 struct Change {
@@ -40,6 +41,7 @@ struct Scope {
     visiting: BTreeSet<String>,
 }
 struct Session<'a> {
+    observer: &'a crate::observability::Observability,
     p: &'a Program,
     db: &'a Connection,
     actor: Value,
@@ -164,6 +166,7 @@ impl Runtime {
             if program.plugins.contains_key("Files.put") {
                 db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_blobs(file_id TEXT PRIMARY KEY REFERENCES File(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,bytes BLOB NOT NULL);")?;
             }
+            crate::audit::install(&db, &program)?;
             for (entity, rows) in &program.seeds {
                 for node in rows {
                     let fields = literal(node)?.fields()?.clone();
@@ -216,6 +219,7 @@ impl Runtime {
             program,
             db,
             config,
+            observability: Default::default(),
         })
     }
     fn run_events(&self, events: Vec<Value>) -> Result<()> {
@@ -253,6 +257,7 @@ impl Runtime {
                 };
                 let now = Utc::now().to_rfc3339();
                 let mut session = Session {
+                    observer: &self.observability,
                     p: &self.program,
                     db: &self.db,
                     actor,
@@ -292,6 +297,7 @@ impl Runtime {
                 let value = session.eval(&operation.result, &mut scope, false)?;
                 session.authorize()?;
                 session.project(&operation.output, value)?;
+                self.db.execute("UPDATE _flow_audit_context SET operation=?1,transport='event',actor=?2 WHERE id=1", rusqlite::params![operation.name, serde_json::json!({"type":session.actor_type,"id":session.actor.text().ok()}).to_string()])?;
                 session.apply()?;
                 queue.extend(
                     session
@@ -307,12 +313,21 @@ impl Runtime {
         Ok(())
     }
     pub fn file_bytes(&self, id: &str, credential: Option<&str>) -> Result<Vec<u8>> {
+        let mut span = self.observability.span("io", "sqlite.file_bytes");
+        let result = self.file_bytes_inner(id, credential);
+        if result.is_ok() {
+            span.success();
+        }
+        result
+    }
+    fn file_bytes_inner(&self, id: &str, credential: Option<&str>) -> Result<Vec<u8>> {
         if !self.program.plugins.contains_key("Files.put") {
             return Err(err("not_found"));
         };
         let (actor_type, actor) =
             authenticate(&self.program, &self.db, &self.config, credential, "HTTP")?;
         let mut session = Session {
+            observer: &self.observability,
             p: &self.program,
             db: &self.db,
             actor,
@@ -378,6 +393,7 @@ impl Runtime {
             let (actor_type, actor) =
                 authenticate(&self.program, &self.db, &self.config, credential, transport)?;
             let mut session = Session {
+                observer: &self.observability,
                 p: &self.program,
                 db: &self.db,
                 actor,
@@ -391,6 +407,12 @@ impl Runtime {
                 invocations: vec![],
                 blobs: BTreeMap::new(),
             };
+            crate::audit::context(
+                &self.db,
+                stream,
+                transport,
+                &serde_json::json!({"type":session.actor_type,"id":session.actor.text().ok()}),
+            )?;
             let fields = Value::from_json(&input)?.fields()?.clone();
             let reference = session.create(stream, fields)?;
             session.authorize()?;
@@ -453,6 +475,7 @@ impl Runtime {
             let (actor_type, actor) =
                 authenticate(&self.program, &self.db, &self.config, credential, "MQTT")?;
             let mut session = Session {
+                observer: &self.observability,
                 p: &self.program,
                 db: &self.db,
                 actor,
@@ -551,6 +574,7 @@ impl Runtime {
             )?;
             let now = Utc::now().to_rfc3339();
             let mut session = Session {
+                observer: &self.observability,
                 p: &self.program,
                 db: &self.db,
                 actor,
@@ -564,6 +588,12 @@ impl Runtime {
                 invocations: vec![],
                 blobs: BTreeMap::new(),
             };
+            crate::audit::context(
+                &self.db,
+                name,
+                transport,
+                &serde_json::json!({"type":session.actor_type,"id":session.actor.text().ok()}),
+            )?;
             let input = Value::from_json(&input)?;
             let inputs = input.fields()?;
             if inputs.keys().any(|k| !op.inputs.contains_key(k)) {
@@ -940,10 +970,12 @@ impl Session<'_> {
                         q(foreign)
                     );
                     self.sql.push(sql.clone());
+                    let mut span = self.observer.span("io", "sqlite.read_relation");
                     let mut statement = self.db.prepare(&sql)?;
                     let ids = statement
                         .query_map([id], |r| r.get::<_, String>(0))?
                         .collect::<std::result::Result<Vec<_>, _>>()?;
+                    span.success();
                     let mut ids = ids;
                     if !before {
                         for ((e, id), change) in &self.changes {
@@ -978,8 +1010,10 @@ impl Session<'_> {
                     };
                     let sql = format!("SELECT {} FROM {} WHERE id=?1", q(field), q(entity));
                     self.sql.push(sql.clone());
+                    let mut span = self.observer.span("io", "sqlite.read_field");
                     let stored: Option<Option<String>> =
                         self.db.query_row(&sql, [id], |r| r.get(0)).optional()?;
+                    span.success();
                     let stored = stored.ok_or_else(|| err("not_found"))?;
                     let t = self.p.resolve(&f.ty)?;
                     let base = if let Type::Optional(inner) = t {
@@ -1313,6 +1347,7 @@ impl Session<'_> {
             }
             "invoke" => {
                 let name = arg(0)?.text()?;
+                let mut span = self.observer.span("plugin", name);
                 let method = self
                     .p
                     .plugins
@@ -1368,7 +1403,11 @@ impl Session<'_> {
                     _ => return Err(err("invalid_program")),
                 };
                 self.invocations.push((name.into(), input));
-                self.p.validate(&method.output, output, None)
+                let result = self.p.validate(&method.output, output, None);
+                if result.is_ok() {
+                    span.success();
+                }
+                result
             }
             "live" => self.eval(arg(0)?, scope, policy),
             "single" => {
@@ -1853,6 +1892,14 @@ impl Session<'_> {
         }
     }
     fn apply(&self) -> Result<()> {
+        let mut span = self.observer.span("io", "sqlite.apply");
+        let result = self.apply_inner();
+        if result.is_ok() {
+            span.success();
+        }
+        result
+    }
+    fn apply_inner(&self) -> Result<()> {
         for ((entity, id), change) in &self.changes {
             match change.action.as_str() {
                 "CREATE" => insert(self.db, entity, &change.after)?,
