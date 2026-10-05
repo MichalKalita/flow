@@ -58,11 +58,13 @@ stored data. Existing streaming connections hold their project runtime until the
 close; disconnect clients before decommissioning a project permanently.
 
 At most 32 projects are active, with source files bounded to 4 MiB and manifests
-to 64 KiB. Each project has bounded log buffers and telemetry history. HTTP
+to 64 KiB. Each project has bounded log buffers and telemetry history. Default HTTP
 admission is at least 16 concurrent application requests and scales with CPU and
 RAM (16 per CPU, capped at 16 per 2 GiB). Admin admits four, and MQTT admits 128
 connections across projects. Tokio workers follow CPU count. No external
 monitoring service or exporter is required.
+Set `FLOW_HTTP_ADMISSION=unlimited` to disable application HTTP admission limits;
+numeric values configure a fixed limit, and the default keeps host-based sizing.
 
 In the admin sidebar, select an individual project for its endpoints, archived
 logs, audit, JWT issuer, HTTP console and database editor, or select Entire system

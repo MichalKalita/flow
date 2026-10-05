@@ -9,6 +9,74 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 const APP: &str = include_str!("../application.flow");
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unlimited_admission_accepts_requests_while_more_than_sixty_four_bodies_are_pending() {
+    for hosted in [false, true] {
+        for admission in [Some(1), None] {
+            let mut config = Config::default();
+            config.jwt_keys.insert(
+                "user".into(),
+                b"development-key-32-bytes-minimum-123456".to_vec(),
+            );
+            config.event_credentials.insert(
+                "service:1".into(),
+                "ApiKey automation-key-long-enough-123456789".into(),
+            );
+            let runtime = std::sync::Arc::new(std::sync::Mutex::new(
+                Runtime::open(APP, ":memory:", config).unwrap(),
+            ));
+            let observer = runtime.lock().unwrap().observability.clone();
+            let prefix = if hosted { "/application" } else { "" };
+            let router = if hosted {
+                http::router_projects_with_admission(
+                    flow_runtime::projects::Projects::single(runtime),
+                    admission,
+                )
+            } else {
+                http::router_shared_with_admission(runtime, admission)
+            };
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let pending_count = if admission.is_some() { 1 } else { 65 };
+            let mut pending = Vec::new();
+            for _ in 0..pending_count {
+                let mut stream = TcpStream::connect(address).unwrap();
+                write!(
+                    stream,
+                    "POST {prefix}/api/orders HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n"
+                )
+                .unwrap();
+                pending.push(stream);
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if observer.snapshot()["service"]["gauges"]["http_inflight"] == pending_count {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let path = format!("{prefix}/api/products");
+            let (status, _) = request(address, "GET", &path, "", None).await;
+            assert_eq!(status, if admission.is_some() { 503 } else { 200 });
+            drop(pending);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while observer.snapshot()["service"]["gauges"]["http_inflight"] != 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(request(address, "GET", &path, "", None).await.0, 200);
+            server.abort();
+        }
+    }
+}
+
 fn token() -> String {
     let key = b"development-key-32-bytes-minimum-123456";
     let head = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256"}"#);

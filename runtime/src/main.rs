@@ -131,14 +131,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let workers = flow_runtime::resources::tokio_worker_threads();
     let blocking = flow_runtime::resources::tokio_blocking_threads();
     let admission = flow_runtime::resources::http_admission();
+    let admission_label = admission
+        .map(|limit| limit.to_string())
+        .unwrap_or_else(|| "unlimited".into());
     println!(
-        "Flow HTTP listening on http://{} (SQLite: {database}; {workers} Tokio workers, {blocking} blocking, {admission} in-flight)",
+        "Flow HTTP listening on http://{} (SQLite: {database}; {workers} Tokio workers, {blocking} blocking, {admission_label} in-flight)",
         listener.local_addr()?
     );
     let public = if project_mode {
-        http::router_projects_limited(projects.clone(), admission)
+        http::router_projects_with_admission(projects.clone(), admission)
     } else {
-        http::router_shared_limited(projects.get("application").unwrap(), admission)
+        http::router_shared_with_admission(projects.get("application").unwrap(), admission)
     };
     axum::serve(listener, public)
         .with_graceful_shutdown(async {

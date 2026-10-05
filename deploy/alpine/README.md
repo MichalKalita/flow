@@ -29,7 +29,7 @@ FLOW_ADMIN_BIND='0.0.0.0:9090'
 FLOW_ADMIN_ALLOW_REMOTE=1
 FLOW_TOKIO_WORKERS=2
 FLOW_TOKIO_BLOCKING=2
-FLOW_HTTP_ADMISSION=64
+FLOW_HTTP_ADMISSION=unlimited
 ```
 
 HTTP is available on the LAN on port 80, and the separate admin listener is

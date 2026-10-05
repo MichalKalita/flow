@@ -18,15 +18,34 @@ pub fn router_shared(runtime: Arc<Mutex<Runtime>>) -> Router {
     router_shared_limited(runtime, 16)
 }
 pub fn router_shared_limited(runtime: Arc<Mutex<Runtime>>, admission: usize) -> Router {
+    router_shared_with_admission(runtime, Some(admission))
+}
+pub fn router_shared_with_admission(
+    runtime: Arc<Mutex<Runtime>>,
+    admission: Option<usize>,
+) -> Router {
     let observer = runtime.lock().unwrap().observability.clone();
-    let admission = (
-        Arc::new(tokio::sync::Semaphore::new(admission.max(1))),
+    with_admission(
+        Router::new().fallback(dispatch).with_state(runtime),
+        admission,
         observer,
-    );
-    Router::new()
-        .fallback(dispatch)
-        .layer(middleware::from_fn_with_state(admission, admit))
-        .with_state(runtime)
+    )
+}
+fn with_admission(
+    router: Router,
+    admission: Option<usize>,
+    observer: crate::observability::Observability,
+) -> Router {
+    match admission {
+        Some(limit) => router.layer(middleware::from_fn_with_state(
+            (
+                Arc::new(tokio::sync::Semaphore::new(limit.max(1))),
+                observer,
+            ),
+            admit,
+        )),
+        None => router,
+    }
 }
 async fn admit(
     State((semaphore, observer)): State<(
@@ -313,14 +332,20 @@ pub fn router_projects_limited(
     projects: Arc<crate::projects::Projects>,
     admission: usize,
 ) -> Router {
-    let admission = (
-        Arc::new(tokio::sync::Semaphore::new(admission.max(1))),
-        projects.system.clone(),
-    );
-    Router::new()
-        .fallback(dispatch_project)
-        .layer(middleware::from_fn_with_state(admission, admit))
-        .with_state(projects)
+    router_projects_with_admission(projects, Some(admission))
+}
+pub fn router_projects_with_admission(
+    projects: Arc<crate::projects::Projects>,
+    admission: Option<usize>,
+) -> Router {
+    let observer = projects.system.clone();
+    with_admission(
+        Router::new()
+            .fallback(dispatch_project)
+            .with_state(projects),
+        admission,
+        observer,
+    )
 }
 async fn dispatch_project(
     State(projects): State<Arc<crate::projects::Projects>>,

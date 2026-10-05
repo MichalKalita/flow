@@ -251,9 +251,28 @@ pub fn host_memory_limit_bytes() -> Option<u64> {
         .and_then(serde_json::Value::as_u64)
 }
 
-pub fn http_admission() -> usize {
-    env_usize("FLOW_HTTP_ADMISSION")
-        .unwrap_or_else(|| http_admission_from(available_parallelism(), host_memory_limit_bytes()))
+pub fn http_admission() -> Option<usize> {
+    http_admission_config(
+        std::env::var("FLOW_HTTP_ADMISSION").ok().as_deref(),
+        available_parallelism(),
+        host_memory_limit_bytes(),
+    )
+}
+
+fn http_admission_config(
+    value: Option<&str>,
+    cores: usize,
+    ram_bytes: Option<u64>,
+) -> Option<usize> {
+    if value == Some("unlimited") {
+        return None;
+    }
+    Some(
+        value
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or_else(|| http_admission_from(cores, ram_bytes)),
+    )
 }
 
 pub fn http_admission_from(cores: usize, ram_bytes: Option<u64>) -> usize {
@@ -320,6 +339,15 @@ impl Runtime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_configuration_supports_explicit_unlimited_and_numeric_overrides() {
+        assert_eq!(http_admission_config(Some("unlimited"), 4, None), None);
+        assert_eq!(http_admission_config(Some("64"), 1, None), Some(64));
+        for value in [None, Some("0"), Some("invalid")] {
+            assert_eq!(http_admission_config(value, 1, None), Some(16));
+        }
+    }
 
     #[test]
     fn admission_stays_at_sixteen_on_the_minimum_host() {
