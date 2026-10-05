@@ -225,3 +225,76 @@ async fn mqtt_and_websocket_share_permissions_and_sqlite() {
     server.abort();
     mqtt_server.abort();
 }
+
+const AUTOMATION_KEY: &str = "automation-key-long-enough-123456789";
+fn event_source() -> String {
+    let hash = format!("{:x}", Sha256::digest(AUTOMATION_KEY));
+    source().replacen("[auth ", &format!("[type ServiceID [id Service]] [type AlertID [id Alert]]\n[entity Service [field id ServiceID] [field hash String [unique]]]\n[entity Alert [field id AlertID] [field device Device] [field battery Battery]]\n[seed Service [rows [record [id \"automation\"] [hash \"{hash}\"]]]]\n[permissions Service [Device [READ [when true]]] [Status [READ [when [can READ target.device]]]] [Alert [CREATE [when true]] [READ [when true]]]]\n[type AlertOutput [record [field id AlertID] [field battery Battery]]]\n[mutate LowBattery [output AlertOutput] [on Status [actor [service \"automation\"]]] [when [lt event.battery 20]] [atomic] [alert [create Alert [record [id [new AlertID]] [device event.device] [battery event.battery]]]] [result alert]]\n[query Alerts [output [list AlertOutput [max 10]]] [http GET \"/alerts\"] [result [first [entities Alert] 10]]]\n[auth [service Service [apiKey] [entity [eq Service.hash credential.hash]]] "),1).replace("[transport HTTP [auth user]]", "[transport HTTP [auth user service]]")
+}
+#[test]
+fn event_handlers_use_verified_native_actor_and_transactional_permissions() {
+    let source = event_source();
+    assert!(Runtime::open(&source, ":memory:", Config::default()).is_err());
+    let mut config = Config::default();
+    config
+        .event_credentials
+        .insert("service:automation".into(), auth(AUTOMATION_KEY));
+    let mut runtime = Runtime::open(&source, ":memory:", config.clone()).unwrap();
+    let device = auth(DEVICE_KEY);
+    let service = auth(AUTOMATION_KEY);
+    runtime
+        .publish_topic(
+            "devices/d1/status",
+            json!({"battery":30,"online":true}),
+            Some(&device),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .execute("Alerts", json!({}), Some(&service))
+            .unwrap(),
+        json!([])
+    );
+    runtime
+        .publish_topic(
+            "devices/d1/status",
+            json!({"battery":12,"online":true}),
+            Some(&device),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .execute("Alerts", json!({}), Some(&service))
+            .unwrap()[0]["battery"],
+        12
+    );
+    assert_eq!(
+        runtime
+            .execute("LowBattery", json!({}), Some(&service))
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+    let denied = source.replace(
+        "[CREATE [when true]] [READ [when true]]",
+        "[CREATE [when false]] [READ [when true]]",
+    );
+    let mut runtime = Runtime::open(&denied, ":memory:", config).unwrap();
+    assert_eq!(
+        runtime
+            .publish_topic(
+                "devices/d1/status",
+                json!({"battery":12,"online":true}),
+                Some(&device)
+            )
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert_eq!(
+        runtime
+            .execute("Latest", json!({"id":"d1"}), Some(&auth(USER_KEY)))
+            .unwrap()["status"],
+        Value::Null
+    );
+}

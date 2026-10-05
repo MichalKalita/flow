@@ -42,6 +42,13 @@ pub struct Stream {
     pub max_messages: usize,
 }
 #[derive(Clone, Debug)]
+pub struct Event {
+    pub source: String,
+    pub adapter: String,
+    pub actor_id: String,
+    pub condition: Node,
+}
+#[derive(Clone, Debug)]
 pub struct Operation {
     pub name: String,
     pub mutation: bool,
@@ -53,6 +60,7 @@ pub struct Operation {
     pub path: String,
     pub status: u16,
     pub stream: Option<String>,
+    pub event: Option<Event>,
 }
 #[derive(Clone, Debug)]
 pub struct Grant {
@@ -495,6 +503,46 @@ impl Program {
             if mutation != n.option("atomic").is_some() {
                 return Err(fail("Mutations require atomic; queries cannot be atomic"));
             };
+            let event =
+                if let Some(on) = n.option("on") {
+                    if !mutation {
+                        return Err(fail("Event operations must be atomic mutations"));
+                    };
+                    let source = ident(on.arg(0)?.text()?)?;
+                    if !p.streams.contains_key(&source) {
+                        return Err(fail("Unknown event source"));
+                    };
+                    let actor = opt(on, "actor")?.arg(0)?;
+                    let adapter = ident(actor.head())?;
+                    let actor_id = actor.arg(0)?.text()?.to_owned();
+                    if !p.auth.iter().any(|a| {
+                        a.alias == adapter && a.mode != "anonymous" && a.mode != "certificate"
+                    }) {
+                        return Err(fail(
+                            "Event actor requires a verifiable configured auth adapter",
+                        ));
+                    };
+                    let condition = n
+                        .option("when")
+                        .map(|w| w.arg(0).cloned())
+                        .transpose()?
+                        .unwrap_or(Node::Symbol("true".into()));
+                    check_expr(&condition, false)?;
+                    Some(Event {
+                        source,
+                        adapter,
+                        actor_id,
+                        condition,
+                    })
+                } else {
+                    None
+                };
+            if event.is_none() && n.option("when").is_some() {
+                return Err(fail("Operation when requires an event source"));
+            };
+            if event.is_some() && n.option("websocket").is_some() {
+                return Err(fail("Operation has conflicting transports"));
+            };
             let websocket = n.option("websocket");
             let (method, path, status, stream) = if let Some(ws) = websocket {
                 if mutation {
@@ -510,6 +558,8 @@ impl Program {
                     200,
                     Some(stream),
                 )
+            } else if event.is_some() {
+                ("EVENT".into(), "/".into(), 200, None)
             } else {
                 let http = opt(n, "http")?;
                 let method = http.arg(0)?.text()?.to_owned();
@@ -553,10 +603,7 @@ impl Program {
                         }
                         unique(&mut inputs, key, (t, default))?;
                     }
-                    "output" | "http" | "atomic" | "result" | "websocket" => {}
-                    "on" | "when" => {
-                        return Err(fail("Only HTTP operations supported in this runtime"));
-                    }
+                    "output" | "http" | "atomic" | "result" | "websocket" | "on" | "when" => {}
                     _ => {
                         let key = ident(part.head())?;
                         if ["actor", "target", "before", "after", "request", "context"]
@@ -575,6 +622,9 @@ impl Program {
                     }
                 }
             }
+            if event.is_some() && !inputs.is_empty() {
+                return Err(fail("Event handlers cannot take request inputs"));
+            };
             let result = opt(n, "result")?.arg(0)?.clone();
             check_expr(&result, false)?;
             if stream.is_some() && result.head() != "live" {
@@ -613,6 +663,7 @@ impl Program {
                 .collect::<Vec<_>>()
                 .join("/");
             if method != "WS"
+                && method != "EVENT"
                 && p.operations.iter().any(|o| {
                     o.method == method
                         && o.path
@@ -636,6 +687,7 @@ impl Program {
                 path,
                 status,
                 stream,
+                event,
             });
         }
         for (entity, rows) in &p.seeds {
@@ -1002,6 +1054,7 @@ fn check_symbols(
             let root = symbol.split('.').next().unwrap();
             if !bindings.contains_key(root)
                 && root != "request"
+                && root != "event"
                 && root.chars().next().is_some_and(char::is_lowercase)
             {
                 return Err(fail(format!("Unknown reference {symbol}")));

@@ -5,7 +5,7 @@ Minimalistický deklarativní runtime v Rustu: Flow soubor → SQLite + HTTP/MQT
 ```sh
 cd runtime
 cargo run -- --check application.flow
-FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
+FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' FLOW_AUTOMATION_KEY='automation-key-long-enough-123456789' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
 ```
 
 [Spuštění, funkce a omezení](runtime/README.md) · [Syntaxe](runtime/LANGUAGE.md) · [Spustitelná aplikace](runtime/application.flow) · [Plný návrhový příklad](examples/application.flow) · [Permission scénáře](examples/PERMISSIONS.md)

@@ -42,6 +42,10 @@ async fn real_http_routes_and_permissions() {
         "user".into(),
         b"development-key-32-bytes-minimum-123456".to_vec(),
     );
+    config.event_credentials.insert(
+        "service:device-automation".into(),
+        "ApiKey automation-key-long-enough-123456789".into(),
+    );
     let runtime = Runtime::open(APP, ":memory:", config).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

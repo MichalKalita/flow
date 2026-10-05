@@ -19,6 +19,7 @@ fn q(name: &str) -> String {
 #[derive(Clone, Default)]
 pub struct Config {
     pub jwt_keys: BTreeMap<String, Vec<u8>>,
+    pub event_credentials: BTreeMap<String, String>,
 }
 pub struct Runtime {
     pub program: Program,
@@ -65,6 +66,21 @@ impl Runtime {
                     "JWT key must have at least 32 bytes and match a declared adapter",
                 ));
             };
+        }
+        for operation in &program.operations {
+            if let Some(event) = &operation.event
+                && !config
+                    .event_credentials
+                    .contains_key(&format!("{}:{}", event.adapter, event.actor_id))
+            {
+                return Err(Error::new(
+                    "configuration",
+                    format!(
+                        "Missing verified event actor {}:{}",
+                        event.adapter, event.actor_id
+                    ),
+                ));
+            }
         }
         let db = Connection::open(path)?;
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;")?;
@@ -144,6 +160,25 @@ impl Runtime {
                     insert(&db, entity, row.fields()?)?;
                 }
             }
+            for operation in &program.operations {
+                if let Some(event) = &operation.event {
+                    let credential =
+                        &config.event_credentials[&format!("{}:{}", event.adapter, event.actor_id)];
+                    let (_, actor) = authenticate_candidates(
+                        &program,
+                        &db,
+                        &config,
+                        Some(credential),
+                        std::slice::from_ref(&event.adapter),
+                    )?;
+                    if actor.text()? != event.actor_id {
+                        return Err(Error::new(
+                            "configuration",
+                            "Event credential does not match declared actor",
+                        ));
+                    };
+                }
+            }
             db.execute(
                 "INSERT OR IGNORE INTO _flow_schema(id,hash) VALUES(1,?1)",
                 [hash],
@@ -162,6 +197,92 @@ impl Runtime {
             db,
             config,
         })
+    }
+    fn run_events(&self, events: Vec<Value>) -> Result<()> {
+        let mut queue = std::collections::VecDeque::from(events);
+        let mut count = 0;
+        while let Some(reference) = queue.pop_front() {
+            count += 1;
+            if count > 256 {
+                return Err(err("limit"));
+            };
+            let Value::Ref { entity, .. } = &reference else {
+                return Err(err("invalid_program"));
+            };
+            for operation in &self.program.operations {
+                let Some(event) = &operation.event else {
+                    continue;
+                };
+                if event.source != *entity {
+                    continue;
+                };
+                let credential = self
+                    .config
+                    .event_credentials
+                    .get(&format!("{}:{}", event.adapter, event.actor_id))
+                    .ok_or_else(|| err("unauthenticated"))?;
+                let (actor_type, actor) = authenticate_candidates(
+                    &self.program,
+                    &self.db,
+                    &self.config,
+                    Some(credential),
+                    std::slice::from_ref(&event.adapter),
+                )?;
+                if actor.text()? != event.actor_id {
+                    return Err(err("forbidden"));
+                };
+                let now = Utc::now().to_rfc3339();
+                let mut session = Session {
+                    p: &self.program,
+                    db: &self.db,
+                    actor,
+                    actor_type,
+                    changes: BTreeMap::new(),
+                    cache: BTreeMap::new(),
+                    permission_stack: BTreeSet::new(),
+                    steps: 0,
+                    now: now.clone(),
+                    sql: vec![],
+                };
+                let mut scope = Scope {
+                    defs: operation.bindings.clone(),
+                    values: BTreeMap::from([
+                        ("event".into(), reference.clone()),
+                        (
+                            "request".into(),
+                            Value::record(BTreeMap::from([
+                                (
+                                    "id".into(),
+                                    Value::Id("Request".into(), uuid::Uuid::new_v4().to_string()),
+                                ),
+                                ("time".into(), Value::Str(now)),
+                            ])),
+                        ),
+                    ]),
+                    ..Default::default()
+                };
+                if !session.eval(&event.condition, &mut scope, false)?.truth()? {
+                    continue;
+                };
+                for binding in operation.bindings.keys() {
+                    session.binding(binding, &mut scope, false)?;
+                }
+                let value = session.eval(&operation.result, &mut scope, false)?;
+                session.authorize()?;
+                session.project(&operation.output, value)?;
+                session.apply()?;
+                queue.extend(
+                    session
+                        .changes
+                        .iter()
+                        .filter(|((entity, _), change)| {
+                            change.action == "CREATE" && self.program.streams.contains_key(entity)
+                        })
+                        .map(|(_, change)| change.reference.clone()),
+                );
+            }
+        }
+        Ok(())
     }
     pub fn authenticate_transport(&self, credential: Option<&str>, transport: &str) -> Result<()> {
         authenticate(&self.program, &self.db, &self.config, credential, transport).map(|_| ())
@@ -220,6 +341,7 @@ impl Runtime {
             let reference = session.create(stream, fields)?;
             session.authorize()?;
             session.apply()?;
+            self.run_events(vec![reference.clone()])?;
             let cutoff = (Utc::now() - chrono::Duration::seconds(definition.duration)).to_rfc3339();
             self.db.execute(
                 &format!(
@@ -392,6 +514,9 @@ impl Runtime {
             .find(|o| o.name == name)
             .ok_or_else(|| err("not_found"))?
             .clone();
+        if op.event.is_some() {
+            return Err(err("not_found"));
+        };
         self.db.execute_batch("BEGIN IMMEDIATE;")?;
         let result = (|| -> Result<_> {
             let (actor_type, actor) = authenticate(
@@ -460,6 +585,15 @@ impl Runtime {
             };
             let output = session.project(&op.output, value)?.json()?;
             session.apply()?;
+            let events = session
+                .changes
+                .iter()
+                .filter(|((entity, _), change)| {
+                    change.action == "CREATE" && self.program.streams.contains_key(entity)
+                })
+                .map(|(_, change)| change.reference.clone())
+                .collect();
+            self.run_events(events)?;
             Ok((output, session.sql, keys))
         })();
         match result {
@@ -564,6 +698,24 @@ fn authenticate(
     credential: Option<&str>,
     transport: &str,
 ) -> Result<(String, Value)> {
+    authenticate_candidates(
+        p,
+        db,
+        config,
+        credential,
+        p.transports
+            .get(transport)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    )
+}
+fn authenticate_candidates(
+    p: &Program,
+    db: &Connection,
+    config: &Config,
+    credential: Option<&str>,
+    aliases: &[String],
+) -> Result<(String, Value)> {
     if let Some(credential) = credential {
         if credential.len() > 65536 {
             return Err(err("unauthenticated"));
@@ -576,12 +728,11 @@ fn authenticate(
             "ApiKey" => "apiKey",
             _ => return Err(err("unauthenticated")),
         };
-        for auth in p.auth.iter().filter(|a| {
-            a.mode == mode
-                && p.transports
-                    .get(transport)
-                    .is_some_and(|aliases| aliases.contains(&a.alias))
-        }) {
+        for auth in p
+            .auth
+            .iter()
+            .filter(|a| a.mode == mode && aliases.contains(&a.alias))
+        {
             let subject = if mode == "apiKey" {
                 if secret.len() < 32 || secret.len() > 4096 {
                     return Err(err("unauthenticated"));
@@ -602,12 +753,10 @@ fn authenticate(
         }
         return Err(err("unauthenticated"));
     }
-    if p.auth.iter().any(|a| {
-        a.mode == "anonymous"
-            && p.transports
-                .get(transport)
-                .is_some_and(|aliases| aliases.contains(&a.alias))
-    }) {
+    if p.auth
+        .iter()
+        .any(|a| a.mode == "anonymous" && aliases.contains(&a.alias))
+    {
         Ok(("Anonymous".into(), Value::Null))
     } else {
         Err(err("unauthenticated"))
@@ -1308,7 +1457,12 @@ impl Session<'_> {
                         reference: target.clone(),
                         action: "DELETE".into(),
                         after: BTreeMap::new(),
-                        changed: BTreeSet::new(),
+                        changed: self.p.entities[entity]
+                            .fields
+                            .iter()
+                            .filter(|(_, f)| f.relation.is_none())
+                            .map(|(name, _)| name.clone())
+                            .collect(),
                     },
                 );
                 Ok(target)
@@ -1399,7 +1553,9 @@ impl Session<'_> {
         };
         let value = self.p.validate(&f.ty, value, Some(target.clone()))?;
         let key = (entity.clone(), id.clone());
-        self.raw(&target.pin(), field)?;
+        if !self.changes.get(&key).is_some_and(|c| c.action == "CREATE") {
+            self.raw(&target.pin(), field)?;
+        }
         let change = self.changes.entry(key).or_insert_with(|| Change {
             reference: target.clone(),
             action: "UPDATE".into(),

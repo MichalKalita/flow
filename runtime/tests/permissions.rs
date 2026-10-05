@@ -143,3 +143,73 @@ fn deny_unknown_or_unsafe_programs() {
     let op = r#"[query Write [input id DocumentID] [output Bool] [http GET "/write"] [document [entity $id]] [hidden [set document.secret "x"]] [result true]]"#;
     assert!(Program::compile(&source("", op)).is_err());
 }
+
+#[test]
+fn delete_honors_entity_and_field_rights() {
+    let rules =
+        r#"[permissions User [Document [DELETE [includes READ] [when [eq actor target.owner]]]]]"#;
+    let op = r#"[mutate Remove [input id DocumentID] [output Bool] [http DELETE "/docs/{id}"] [atomic] [removed [delete [entity $id]]] [result true]]"#;
+    let mut runtime = Runtime::open(
+        &source(rules, &format!("{READ}\n{op}")),
+        ":memory:",
+        Config::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime
+            .execute("Remove", json!({"id":"d1"}), Some(AUTH))
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        runtime.execute("Docs", json!({}), Some(AUTH)).unwrap(),
+        json!([])
+    );
+    let restricted = format!("{rules}\n[permissions User [Document.secret [DELETE [when false]]]]");
+    let mut runtime = Runtime::open(
+        &source(&restricted, &format!("{READ}\n{op}")),
+        ":memory:",
+        Config::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime
+            .execute("Remove", json!({"id":"d1"}), Some(AUTH))
+            .unwrap_err()
+            .code,
+        "forbidden"
+    );
+    assert_eq!(
+        runtime
+            .execute("Docs", json!({}), Some(AUTH))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn newly_created_records_can_be_updated_before_commit() {
+    let rules = r#"[permissions User [Document [CREATE [when [and [eq actor after.owner] [eq after.title "Updated"]]]] [READ [when [eq actor target.owner]]]]]"#;
+    let op = r#"[mutate Add [input id DocumentID] [input userId UserID] [output Bool] [http POST "/docs"] [atomic]
+    [added [create Document [record [id $id] [owner [entity $userId]] [title "Initial"] [secret "private"] [salary 2500] [contact $userId]]]]
+    [updated [set added.title "Updated"]] [result true]]"#;
+    let mut runtime = Runtime::open(
+        &source(rules, &format!("{READ}\n{op}")),
+        ":memory:",
+        Config::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        runtime
+            .execute("Add", json!({"id":"d2","userId":"u1"}), Some(AUTH))
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        runtime.execute("Docs", json!({}), Some(AUTH)).unwrap()[1]["title"],
+        "Updated"
+    );
+}

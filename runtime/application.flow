@@ -366,3 +366,15 @@
   [websocket "/ws" [source DevicePosition]]
   [device [entity $deviceId]]
   [result [live device.positions]]]
+
+[mutate LowBattery
+  [output AlertOutput]
+  [on DeviceStatus [actor [service "device-automation"]]]
+  [when [lt event.battery 20]]
+  [atomic]
+  [alert [create DeviceAlert [record [id [new AlertID]] [device event.device]
+    [kind LOW_BATTERY] [createdAt event.receivedAt]]]]
+  [result alert]]
+
+
+[seed Service [rows [record [id "device-automation"] [keyHash "b2430e50684c45ecef24f0f00985f1287ea9cf4d7d86f2949eb9ea6849cc299d"] [roles [list DEVICE_AUTOMATION]]]]]

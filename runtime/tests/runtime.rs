@@ -12,6 +12,10 @@ const KEY: &[u8] = b"development-key-32-bytes-minimum-123456";
 fn config() -> Config {
     Config {
         jwt_keys: BTreeMap::from([("user".into(), KEY.to_vec())]),
+        event_credentials: BTreeMap::from([(
+            "service:device-automation".into(),
+            "ApiKey automation-key-long-enough-123456789".into(),
+        )]),
     }
 }
 fn token(subject: &str) -> String {
@@ -64,7 +68,7 @@ fn source_compiles_and_public_projection_is_narrow() {
             .unwrap()
             .operations
             .iter()
-            .filter(|o| o.method != "WS")
+            .filter(|o| o.method != "WS" && o.event.is_none())
             .count(),
         9
     );

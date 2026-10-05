@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             program
                 .operations
                 .iter()
-                .filter(|o| o.method != "WS")
+                .filter(|o| o.method != "WS" && o.event.is_none())
                 .count(),
             program
                 .operations
@@ -37,6 +37,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::default();
     if let Ok(secret) = std::env::var("FLOW_JWT_SECRET") {
         config.jwt_keys.insert("user".into(), secret.into_bytes());
+    }
+    if let Ok(secret) = std::env::var("FLOW_AUTOMATION_KEY") {
+        config.event_credentials.insert(
+            "service:device-automation".into(),
+            format!("ApiKey {secret}"),
+        );
     }
     let runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
     let runtime = Arc::new(Mutex::new(runtime));

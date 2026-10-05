@@ -7,7 +7,7 @@ Jeden proces načte Flow soubor, zkontroluje deklarace, otevře SQLite a automat
 ```sh
 cd runtime
 cargo run -- --check application.flow
-FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
+FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' FLOW_AUTOMATION_KEY='automation-key-long-enough-123456789' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
 ```
 
 Výchozí argumenty jsou `application.flow`, `flow.sqlite`, HTTP `127.0.0.1:8080` a MQTT `127.0.0.1:1883`. Čtvrtý argument mění MQTT adresu. WebSocket používá stejný listener jako HTTP. Server nepoužívá TLS. SQLite je přibalené do Rust závislosti, není potřeba databázový server. Program a databáze jsou svázané otiskem zdroje; změna schématu vyžaduje explicitní migraci nebo novou databázi. Seed se doplní pouze pro dosud neexistující ID, při restartu se data nepřepisují.
@@ -25,9 +25,9 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/api/orders
 ```
 
-`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje devět HTTP operací a dva WebSocket odběry. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
+`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje devět HTTP operací a dva WebSocket odběry a eventový automat. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
 
-Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Pluginy, obrázky, fronta a eventové automaty ještě nejsou přeneseny. Jejich operace se při kompilaci odmítnou. `[publish]` uloží streamový záznam do SQLite, odkud se doručí aktuálně autorizovaným MQTT/WebSocket odběrům. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
+Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Pluginy, obrázky a fronta ještě nejsou přeneseny. Jejich operace se při kompilaci odmítnou. `[publish]` uloží streamový záznam do SQLite, odkud se doručí aktuálně autorizovaným MQTT/WebSocket odběrům. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
 
 ## MQTT a WebSocket
 
@@ -42,6 +42,12 @@ WebSocket upgrade `/ws` přijímá stejný `Authorization` header jako HTTP, ale
 Odpověď je `{"id":"status","data":{"online":true,"battery":12}}`. Ukončení odběru používá `{"id":"status","unsubscribe":true}`. Odběr doručí dostupnou historii a potom nové zprávy. Interní ID rozlišují i zprávy se stejným obsahem, do výstupu se přitom vybírají pouze pole výstupního typu.
 
 Oba transporty čtou stejnou SQLite databázi každých 100 ms a při každém průchodu znovu ověřují credentials a aktuální permissions. Odebrání přístupu zastaví další doručování; WebSocket vrátí chybu pro zasažený odběr. Odběry mají omezený počet a paměť. Durable MQTT sessions, QoS 2, retain flag a Last Will zatím nejsou implementované.
+
+## Eventové automaty
+
+`[on DeviceStatus [actor [service "device-automation"]]]` spouští operaci po vytvoření streamového záznamu. `[when ...]` určuje čistou podmínku. Runtime používá samostatné credentials z důvěryhodné konfigurace `Config.event_credentials`, s klíčem `service:device-automation`; klient je nemůže dodat v payloadu. Service se znovu autentizuje a její aktuální permissions se vynucují pro čtení eventu i všechny změny automatu. Konfigurace a vazba na deklarované ID se ověří už při startu.
+
+Hlavní aplikace obsahuje `LowBattery`: pod 20 % vytvoří `DeviceAlert`. Seedovaná service má vývojový klíč `automation-key-long-enough-123456789`, předaný CLI přes `FLOW_AUTOMATION_KEY`. Stream a navazující automat se potvrzují atomicky; odmítnutí permissions vrátí celou publikaci zpět. Eventové řetězení má limit 256 událostí na transakci.
 
 ## Jádro
 
