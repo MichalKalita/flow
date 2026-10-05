@@ -1,0 +1,6 @@
+{
+  "jwt_secrets": {
+    "user": "FLOW_JWT_SECRET",
+    "courier": "FLOW_JWT_SECRET"
+  }
+}

@@ -155,4 +155,4 @@ Inspirace: [NoFlo](https://noflojs.org/) pro skládání komponent, [Ash + React
 
 Jazyk navazuje na [BLACKBOX-LAYERS.md](BLACKBOX-LAYERS.md); propojení s [ARCHITECTURE-PROPOSAL.md](ARCHITECTURE-PROPOSAL.md) zůstává otevřené. Dopracovat je nutné syntaxe, kompozice, kontrakty pluginů, konzistence kolekcí, externí retry, význam odpovědí a aktualizace rozpracovaných operací.
 
-Aktuální implementace je [minimalistický Rust runtime s HTTP a SQLite](runtime/README.md). Kompletní deklarativní příklad [application.flow](examples/application.flow) zahrnuje typy, MQTT zdroje, HTTP scénáře, auth a permissions; celý tento širší příklad ještě není podporován HTTP runtime.
+Aktuální implementace je [minimalistický Rust runtime s HTTP a SQLite](runtime/README.md). Ukázkové aplikace jsou hostované projekty v [projects/](projects/).

@@ -8,7 +8,7 @@ Central permissions govern reads and complete transactions across all transports
 
 Run `./start.sh` from the repository root. The script loads `.env`, builds the
 embedded admin frontend and starts a release runtime. The default database is
-`data/projects/demo.sqlite`, with hosted programs in `projects/`. See
+`data/projects/<name>.sqlite`, with hosted programs in `projects/`. See
 [hosted project configuration](../projects/README.md) for routing, reload and admin
 data management. Single-file mode remains available for tests and direct invocation:
 

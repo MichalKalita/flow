@@ -8,9 +8,12 @@ HTTPS and automatic certificates are deferred.
 
 Every immediate subdirectory is a project. Names use 1–64 ASCII letters, digits,
 underscores or hyphens; `all` and `system` are reserved. Put its program in
-`application.flow`.
+`application.flow`. The sample apps are folders here: `bookstore`, `clinic`,
+`delivery`, `demo`, `gym`, `hotel`, `jobs`, `library`, `restaurant`,
+`rideshare`, `school`, `social-network` and `tracker`.
 The folder name is its HTTP base path: `demo/api/products`, for example, is served
-at `http://localhost/demo/api/products`. WebSocket paths receive the same prefix.
+at `http://localhost/demo/api/products`. `bookstore/api/books` is
+`http://localhost/bookstore/api/books`. WebSocket paths receive the same prefix.
 File URLs produced by the runtime also include the project prefix. MQTT uses one
 listener: CONNECT with username `demo/device` or `demo/user` and the corresponding
 adapter credential as password. Topics are local to the selected project.

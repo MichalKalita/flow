@@ -1,6 +1,7 @@
 use flow_runtime::{
     engine::{Config, Runtime},
     observability::Observability,
+    program::Program,
     projects::Projects,
 };
 use serde_json::json;
@@ -336,4 +337,41 @@ fn admin_writes_validate_references_and_audit_atomically_with_conflict_detection
             .unwrap()["rows"],
         json!([])
     );
+}
+#[test]
+fn repository_hosted_projects_compile_and_load() {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../projects");
+    let dir = Directory::new();
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        if !entry.file_type().unwrap().is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let program = entry.path().join("application.flow");
+        if !program.exists() {
+            continue;
+        }
+        Program::compile(&std::fs::read_to_string(&program).unwrap()).unwrap();
+        dir.source(&name, &std::fs::read_to_string(&program).unwrap());
+        names.push(name);
+    }
+    names.sort();
+    assert!(names.contains(&"demo".into()));
+    assert!(names.contains(&"bookstore".into()));
+    let projects = dir.load();
+    assert_eq!(projects.active().len(), names.len());
+    for name in &names {
+        let item = projects
+            .list()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == *name)
+            .cloned()
+            .unwrap();
+        assert_eq!(item["status"], "running", "{name}");
+        assert!(projects.get(name).is_some());
+    }
 }
