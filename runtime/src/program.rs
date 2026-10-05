@@ -66,6 +66,7 @@ pub struct Operation {
     pub inputs: BTreeMap<String, (Type, Option<Node>)>,
     pub output: Type,
     pub bindings: BTreeMap<String, Node>,
+    pub binding_order: Vec<String>,
     pub result: Node,
     pub method: String,
     pub path: String,
@@ -658,6 +659,7 @@ impl Program {
             }
             let mut inputs = BTreeMap::new();
             let mut bindings = BTreeMap::new();
+            let mut binding_order = Vec::new();
             for part in &n.args()?[1..] {
                 match part.head() {
                     "input" => {
@@ -688,7 +690,8 @@ impl Program {
                         if !mutation && has_effect(part.arg(0)?) {
                             return Err(fail("Query cannot write"));
                         };
-                        unique(&mut bindings, key, part.arg(0)?.clone())?;
+                        unique(&mut bindings, key.clone(), part.arg(0)?.clone())?;
+                        binding_order.push(key);
                     }
                 }
             }
@@ -756,6 +759,7 @@ impl Program {
                 inputs,
                 output,
                 bindings,
+                binding_order,
                 result,
                 method,
                 path,

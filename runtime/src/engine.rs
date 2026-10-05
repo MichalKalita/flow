@@ -458,7 +458,7 @@ impl Runtime {
                 if !session.eval(&event.condition, &mut scope, false)?.truth()? {
                     continue;
                 };
-                for binding in operation.bindings.keys() {
+                for binding in &operation.binding_order {
                     session.binding(binding, &mut scope, false)?;
                 }
                 let value = session.eval(&operation.result, &mut scope, false)?;
@@ -830,7 +830,8 @@ impl Runtime {
                     ("actor".into(), session.actor.clone()),
                 ])),
             );
-            for binding in op.bindings.keys() {
+            // Source order: a later [set] must not hide fields a previous binding reads.
+            for binding in &op.binding_order {
                 session.binding(binding, &mut scope, false)?;
             }
             let value = session.eval(&op.result, &mut scope, false)?;
