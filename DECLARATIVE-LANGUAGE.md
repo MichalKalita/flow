@@ -1,6 +1,6 @@
 # Deklarativní jazyk pro skládání aplikací
 
-Status: Historický koncepční návrh. Ilustrativní syntaxe v tomto dokumentu byla nahrazena jednotným hranatým zápisem popsaným v [dokumentaci parseru](prototype/docs/LANGUAGE.md). Dokument doplňuje [BLACKBOX-REQUIREMENTS.md](BLACKBOX-REQUIREMENTS.md), jeho potvrzené požadavky nemění.
+Status: Historický koncepční návrh. Ilustrativní syntaxe v tomto dokumentu byla nahrazena jednotným hranatým zápisem popsaným v [dokumentaci parseru](runtime/LANGUAGE.md). Dokument doplňuje [BLACKBOX-REQUIREMENTS.md](BLACKBOX-REQUIREMENTS.md), jeho potvrzené požadavky nemění.
 
 Aktualizované závazné požadavky na brandované číselné typy, konečné rozsahy a limity kolekcí jsou v [LANGUAGE-REQUIREMENTS.md](LANGUAGE-REQUIREMENTS.md). V těchto oblastech nahrazují starší ilustrativní příklady níže.
 
@@ -155,4 +155,4 @@ Inspirace: [NoFlo](https://noflojs.org/) pro skládání komponent, [Ash + React
 
 Jazyk navazuje na [BLACKBOX-LAYERS.md](BLACKBOX-LAYERS.md); propojení s [ARCHITECTURE-PROPOSAL.md](ARCHITECTURE-PROPOSAL.md) zůstává otevřené. Dopracovat je nutné syntaxe, kompozice, kontrakty pluginů, konzistence kolekcí, externí retry, význam odpovědí a aktualizace rozpracovaných operací.
 
-Aktuální implementace obsahuje pouze [parser syntaktického AST](prototype/docs/LANGUAGE.md). Kompletní deklarativní příklad [application.flow](prototype/priv/workflows/application.flow) zahrnuje typy, MQTT zdroje, HTTP scénáře, auth a permissions; validátor a runtime nejsou implementované.
+Aktuální implementace je [minimalistický Rust runtime s HTTP a SQLite](runtime/README.md). Kompletní deklarativní příklad [application.flow](examples/application.flow) zahrnuje typy, MQTT zdroje, HTTP scénáře, auth a permissions; celý tento širší příklad ještě není podporován HTTP runtime.

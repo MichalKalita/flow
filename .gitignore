@@ -1,13 +1,3 @@
 .tools/
-prototype/_build/
-prototype/deps/
-prototype/.mix/
-prototype/.hex/
-prototype/data/
-prototype/e2e/node_modules/
-prototype/e2e/test-results/
-prototype/e2e/playwright-report/
-*.beam
-erl_crash.dump
 runtime/target/
 runtime/data/

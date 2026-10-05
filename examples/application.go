@@ -1,7 +1,7 @@
 package main
 
 func main() {
-	// Přepis prototype/priv/workflows/application.flow; návrhové API Flow není implementované.
+	// Přepis examples/application.flow; návrhové API Flow není implementované.
 	// bind/ref označují symboly scénáře; vnořené kroky se deklarují, nevykonávají při registraci.
 	// Zachovává pravidla současného Flow včetně jeho neomezených dotazů a obecných číselných typů.
 

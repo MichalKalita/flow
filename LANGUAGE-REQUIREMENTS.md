@@ -64,4 +64,4 @@ Limit výsledku neznamená automaticky limit počtu prohledaných databázových
 
 ## Stav prototypu
 
-Současný Elixir projekt je pouze parser jednotného hranatého zápisu do AST. Nekontroluje doménové typy, brandy, rozsahy, limity kolekcí ani platnost propojení. Požadavky tohoto dokumentu patří budoucímu validátoru a runtime. Implementovanou syntaxi popisuje [dokumentace parseru](prototype/docs/LANGUAGE.md).
+Rust implementace v [runtime](runtime/README.md) má parser, kontrolu schématu, přesnou číselnou aritmetiku, HTTP a SQLite. Kontroluje rozsahy, scale a limity vstupních/výstupních kolekcí; úplné statické odvozování nominálních typů výrazů a agregací ještě není dokončené. Syntaxi popisuje [LANGUAGE.md](runtime/LANGUAGE.md). Tento dokument zůstává cílovým kontraktem jazyka.

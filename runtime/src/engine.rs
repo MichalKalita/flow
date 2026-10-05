@@ -1011,7 +1011,7 @@ impl Session<'_> {
             }
             "can" => {
                 let action = arg(0)?.text()?;
-                let target = self.eval(arg(1)?, scope, true)?;
+                let target = self.eval(arg(1)?, scope, policy)?;
                 Ok(Value::Bool(
                     Self::target_kind(&target).is_some() && self.allowed(action, &target, None)?,
                 ))

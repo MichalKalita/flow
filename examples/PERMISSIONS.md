@@ -1,6 +1,6 @@
 # Permissions a auth v jednotném hranatém formátu
 
-Aktuální parser převádí pouze syntaxi do AST. Níže jsou dohodnuté doménové konvence pro budoucí validátor a runtime. Kompletní aplikace je v [application.flow](../prototype/priv/workflows/application.flow), další scénáře v [permissions.flow](permissions.flow). Gramatiku a API popisuje [LANGUAGE.md](../prototype/docs/LANGUAGE.md).
+Níže jsou dohodnuté doménové konvence. Jejich aktuální implementaci a omezení popisuje [Rust runtime](../runtime/README.md). Kompletní aplikace je v [application.flow](application.flow), další scénáře v [permissions.flow](permissions.flow). Gramatiku a API popisuje [LANGUAGE.md](../runtime/LANGUAGE.md).
 
 ## Permissions ze strany aktéra
 
