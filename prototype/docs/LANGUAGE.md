@@ -96,7 +96,7 @@ TRANSACTION
 RESPONSE 201 WITH {note: note, payment: payment, job: job}
 ```
 
-Zápisy, `QUEUE` a `PUBLISH` vyžadují aktivní transakci. `COMMIT` musí být právě jednou, mimo iteraci; po něm se ve stejném transakčním bloku nesmí provádět další účinky. Chyba před commitem vrací databázi do původního stavu. Vnořená transakce není podporována. `INSERT` vrací vložený záznam, `UPDATE` seznam změněných záznamů a `DELETE` seznam výsledků hostitelského adaptéru. Změny jsou hodnoty a nevymění automaticky dříve navázaný snapshot.
+Zápisy, `QUEUE` a `PUBLISH` vyžadují aktivní transakci. `COMMIT` musí být právě jednou, mimo iteraci; po něm se ve stejném transakčním bloku nesmí provádět další účinky. Chyba před commitem vrací databázi do původního stavu. Vnořená transakce není podporována. `INSERT` vrací vložený záznam, `UPDATE` seznam změněných záznamů a `DELETE` seznam výsledků hostitelského adaptéru. Změny jsou hodnoty a nevymění automaticky dříve navázaný snapshot. Pokud scénář později aktualizuje objednávku, odpověď musí buď načíst novou hodnotu, nebo vytvořit novou projekci, například merge(order, {payment_url: payment.url}); application.flow používá tuto explicitní projekci.
 
 `CALL` provádí registrovanou externí operaci. Databázový rollback sám nevrací externí účinky; host musí respektovat kontrakt operace a případně zajistit kompenzaci. `QUEUE` deklaruje odložené volání, počet pokusů, prodlevu a osud po posledním neúspěchu (`RETAIN`/`DELETE`). Trvalá fronta `flow_jobs` se zapisuje ve stejné transakci jako obchodní změny. Worker provádí registrované operace a zaznamenává pokusy. Kontrakty jsou v `Native.operations/0`; vstupy a úspěšné výstupy se validují.
 

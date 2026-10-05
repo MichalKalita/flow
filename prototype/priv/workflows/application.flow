@@ -99,7 +99,7 @@ TRANSACTION
         simulate_failure: :email_failure
     } POLICY 3 ATTEMPTS DELAY 1000 ms RETAIN
     COMMIT
-RESPONSE 201 WITH {order: merge(order, {currency: "CZK"}), payment: payment, email: {state: "queued"}}
+RESPONSE 201 WITH {order: merge(order, {currency: "CZK", payment_url: payment.url}), payment: payment, email: {state: "queued"}}
 
 HTTP GET /api/orders/:order_id
 INPUT order_id String

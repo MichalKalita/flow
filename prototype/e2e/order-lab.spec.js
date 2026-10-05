@@ -143,6 +143,13 @@ const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fi
 const accessFixtures=['browser-mower','panel-mower','corrupt',...Array.from({length:17},(_,i)=>'limit-'+i)].map(device_id=>({id:'e2e-'+device_id,user_id:'u1',token:'demo-petra',device_id}));
 const seedFixtures='\nSEED DeviceAccess WITH '+JSON.stringify(accessFixtures).replace(/"(id|user_id|token|device_id)":/g,'$1:')+'\n';
 const extraFlow = seedFixtures+`
+HTTP POST /api/quantifiers
+INPUT values List<Int>
+positive = ALL value IN :values SATISFY value > 0
+nonnegative = NOT EXISTS value IN :values WHERE value < 0
+total = SUM value IN :values OF value
+RETURN {positive: positive, nonnegative: nonnegative, total: total}
+
 TYPE Contact = {id: String, email: String, nickname: String?}
 TABLE Contacts = Contact
 TABLE ContactsAudit = {id: String, text: String}
@@ -502,6 +509,9 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     const response=await responsePromise; expect(response.status()).toBe(201);
     const body=await response.json(); successRequest=body.request_id; successOrder=body.order.id;
     expect(body.order.total_cents).toBe(498000);
+    expect(body.order.payment_url).toBe(body.payment.url);
+    const persisted=await (await request.get(`/api/orders/${body.order.id}`)).json();
+    for(const field of ['id','user_id','items','total_cents','payment_method','payment_url','status'])expect(body.order[field]).toEqual(persisted[field]);
     expect(body.order.items[0]).toMatchObject({name:'Studio sluchátka',price_cents:249000,quantity:2});
     await expect(page.locator('#order-result')).toContainText('Objednávka commitnuta.');
     await page.getByRole('button',{name:'Prozkoumat požadavek →'}).click();
@@ -657,6 +667,14 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
   });
 
 
+
+  test('ALL, NOT EXISTS and SUM preserve empty and nonempty collection semantics over real HTTP', async ({request}) => {
+    for(const [values,expected] of [[[],{positive:true,nonnegative:true,total:0}],[[1,2],{positive:true,nonnegative:true,total:3}],[[1,-2],{positive:false,nonnegative:false,total:-1}],[[0],{positive:false,nonnegative:true,total:0}]]){
+      const response=await request.post('/api/quantifiers',{data:{values}});expect(response.status()).toBe(200);expect(await response.json()).toMatchObject(expected);
+    }
+    const source='HTTP GET /invalid\nRETURN {result: ALL value IN [1] SATISFY value}';
+    const response=await request.post('/api/language/check',{data:source,headers:{'Content-Type':'text/plain'}});expect(response.status()).toBe(422);
+  });
 
   test('duplicate generic records return a business conflict and roll back preceding writes', async ({request}) => {
     const contact={id:'contact-1',email:'first@example.test'};

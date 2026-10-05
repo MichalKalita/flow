@@ -31,7 +31,7 @@ V přehledu otevřete detail požadavku: obsahuje vstupní JSON, HTTP výsledek 
 
 ## Deklarativní tok
 
-Celá aplikace je v jediném `priv/workflows/application.flow`: typy s rozsahy, tabulky, typované MQTT zdroje, HTTP scénáře a WebSocket odběry. Obecný parser, typová kontrola a interpreter vykonávají dotazy, podmínky, iterace, CRUD, transakce a registrované pluginy. Objednávková logika je ve Flow. `FLOW_PATH` mění cestu jediného souboru; úprava vyžaduje restart. Syntaxi a hranice implementace popisuje [dokumentace jazyka](docs/LANGUAGE.md).
+Celá aplikace je v jediném `priv/workflows/application.flow`: typy s rozsahy, tabulky, typované MQTT zdroje, HTTP scénáře a WebSocket odběry. Obecný parser, typová kontrola a interpreter vykonávají dotazy, podmínky, iterace, CRUD, transakce a registrované pluginy. Objednávková logika je ve Flow. `FLOW_PATH` mění cestu jediného souboru; úprava vyžaduje restart. Syntaxi a hranice implementace popisuje [dokumentace jazyka](docs/LANGUAGE.md). Požadavky a jejich důkazy shrnuje [ověření implementace](docs/IMPLEMENTATION-STATUS.md).
 
 Jedna SQLite transakce vytvoří cenový snapshot, podmíněně odečte sklad, získá demo payment URL a vloží emailovou úlohu. Selhání před commitem vše vrátí. Jeden Store proces serializuje operace; to je záměrné zjednodušení lokálního prototypu. SQLite má zapnuté WAL, foreign keys a `synchronous=FULL`.
 
