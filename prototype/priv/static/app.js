@@ -4,7 +4,7 @@ const pretty = (value) => esc(JSON.stringify(value, null, 2));
 const money = (cents) => new Intl.NumberFormat('cs-CZ', {style:'currency', currency:'CZK', maximumFractionDigits:2}).format(cents / 100);
 const time = (date) => new Date(date).toLocaleTimeString('cs-CZ');
 const short = (id) => id ? `${id.slice(0, 12)}…` : '—';
-const labels = {overview:'Přehled',lab:'Nová objednávka',orders:'Objednávky',plugins:'Pluginy',workflow:'Deklarace toku'};
+const labels = {devices:'Živá zařízení',overview:'Přehled',lab:'Nová objednávka',orders:'Objednávky',plugins:'Pluginy',workflow:'Deklarace toku'};
 let data = null;
 let initialized = false;
 let selectedRequest = null;
@@ -155,3 +155,35 @@ $('#order-form').addEventListener('submit', async event => {
 page(labels[location.hash.slice(1)] ? location.hash.slice(1) : 'overview');
 refresh();
 setInterval(refresh, 1000);
+
+let deviceSocket = null;
+let deviceCopies = [];
+$('#device-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (deviceSocket) deviceSocket.close();
+  deviceCopies = [];
+  $('#device-messages').textContent = '';
+  $('#device-status').textContent = $('#device-position').textContent = 'Čekám na zprávu…';
+  const deviceId = $('#device-id').value.trim();
+  const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
+  deviceSocket = socket;
+  $('#device-connection').textContent = 'Připojuji…';
+  socket.onopen = () => {
+    if (deviceSocket !== socket) return;
+    $('#device-connection').textContent = 'Připojeno';
+    for (const source of ['DeviceStatus', 'DevicePosition']) socket.send(JSON.stringify({action:'subscribe', source, params:{device_id:deviceId}, latest:true}));
+  };
+  socket.onmessage = event => {
+    if (deviceSocket !== socket) return;
+    const copy = JSON.parse(event.data);
+    if (copy.type === 'error') $('#device-connection').textContent = copy.message;
+    if (copy.type !== 'message') return;
+    const target = copy.source === 'DeviceStatus' ? '#device-status' : '#device-position';
+    $(target).textContent = JSON.stringify(copy.payload, null, 2);
+    deviceCopies.unshift(copy); deviceCopies.length = Math.min(deviceCopies.length, 50);
+    $('#device-messages').textContent = deviceCopies.map(copy => JSON.stringify(copy)).join('\n');
+  };
+  socket.onclose = () => { if (deviceSocket === socket) $('#device-connection').textContent = 'Odpojeno'; };
+  socket.onerror = () => { if (deviceSocket === socket) $('#device-connection').textContent = 'Chyba spojení'; };
+});
+$('#device-stop').addEventListener('click', () => { if (deviceSocket) deviceSocket.close(); });

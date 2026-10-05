@@ -94,3 +94,30 @@ INPUT order_id String
 order = ONE FROM Orders AS o WHERE o.id = :order_id
 REQUIRE order IS PRESENT ELSE 404 order_not_found "Objednávka neexistuje."
 RETURN order
+
+# Soubory i aplikační záznamy se potvrdí společně.
+TYPE ProductPhoto = Image WHERE value.byte_size <= 10485760 AND value.width <= 8000 AND value.height <= 8000
+TYPE PhotoSize = Int WHERE value BETWEEN 1 AND 4096
+TABLE Photos = {id: String, product_id: String, file_id: String, url: String, width: Int, height: Int}
+HTTP POST /api/products/:product_id/photo
+INPUT product_id String
+INPUT photo ProductPhoto
+INPUT width PhotoSize = 800
+INPUT height PhotoSize = 600
+TRANSACTION
+    product = ONE FROM Products AS p WHERE p.id = :product_id
+    REQUIRE product IS PRESENT ELSE 404 product_not_found "Produkt neexistuje."
+    resized: ProductPhoto = CALL Image.resize WITH {image: :photo, width: :width, height: :height}
+    stored = CALL Files.put WITH {file: resized}
+    saved = INSERT Photos WITH {id: uuid("photo"), product_id: :product_id, file_id: stored.id, url: stored.url, width: resized.width, height: resized.height}
+    COMMIT
+RESPONSE 201 WITH {photo: saved, file: stored}
+
+HTTP GET /api/products/:product_id/photos
+INPUT product_id String
+photos = FROM Photos AS p WHERE p.product_id = :product_id
+RETURN {photos: photos}
+
+WEBSOCKET /ws
+    SOURCE DeviceStatus
+    SOURCE DevicePosition

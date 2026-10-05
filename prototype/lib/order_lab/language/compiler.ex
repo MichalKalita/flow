@@ -149,6 +149,24 @@ defmodule OrderLab.Language.Compiler do
         Map.merge(endpoint, %{inputs: inputs, source_names: Map.keys(mqtt)})
       end)
 
+    Enum.each(program.websockets, fn endpoint ->
+      unless Regex.match?(~r{^/[A-Za-z0-9_./-]+$}, endpoint.path),
+        do: fail("WebSocket path must be a static URL path")
+
+      unless length(endpoint.sources) == length(Enum.uniq(endpoint.sources)),
+        do: fail("Duplicate WebSocket source")
+
+      Enum.each(endpoint.sources, fn name ->
+        unless Map.has_key?(mqtt, name), do: fail("Unknown WebSocket source #{name}")
+      end)
+
+      if Enum.any?(endpoints, &(&1.method == "GET" and &1.path == endpoint.path)),
+        do: fail("WebSocket and HTTP GET paths cannot overlap")
+    end)
+
+    paths = Enum.map(program.websockets, & &1.path)
+    unless length(paths) == length(Enum.uniq(paths)), do: fail("Duplicate WebSocket path")
+
     signatures = Enum.map(endpoints, &{&1.method, canonical_route(&1.path)})
     unless length(signatures) == length(Enum.uniq(signatures)), do: fail("Duplicate HTTP route")
     %{program | types: definitions, tables: tables, mqtt: mqtt, endpoints: endpoints}
@@ -265,8 +283,12 @@ defmodule OrderLab.Language.Compiler do
   end
 
   defp check_node(%{kind: kind} = n, s) when kind in [:call, :queue] do
-    effect!(s, kind == :queue)
     op = Map.get(s.operations, n.operation) || fail("Unknown registered operation #{n.operation}")
+    effect!(s, kind == :queue or Map.get(op, :effect) == :write)
+
+    if kind == :queue and Map.get(op, :queueable, true) == false,
+      do: fail("#{n.operation} is not a queue operation")
+
     Checker.expect_expr!(n.input, op.input, s.env)
 
     if kind == :queue do

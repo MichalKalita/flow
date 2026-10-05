@@ -31,7 +31,7 @@ V přehledu otevřete detail požadavku: obsahuje vstupní JSON, HTTP výsledek 
 
 ## Deklarativní tok
 
-Celá aplikace je v jediném `priv/workflows/application.flow`: typy s rozsahy, tabulky, typované MQTT zdroje a HTTP scénáře. Obecný parser, typová kontrola a interpreter vykonávají dotazy, podmínky, iterace, CRUD, transakce a registrované pluginy. Objednávková logika je ve Flow. `FLOW_PATH` mění cestu jediného souboru; úprava vyžaduje restart. Syntaxi a hranice implementace popisuje [dokumentace jazyka](docs/LANGUAGE.md).
+Celá aplikace je v jediném `priv/workflows/application.flow`: typy s rozsahy, tabulky, typované MQTT zdroje, HTTP scénáře a WebSocket odběry. Obecný parser, typová kontrola a interpreter vykonávají dotazy, podmínky, iterace, CRUD, transakce a registrované pluginy. Objednávková logika je ve Flow. `FLOW_PATH` mění cestu jediného souboru; úprava vyžaduje restart. Syntaxi a hranice implementace popisuje [dokumentace jazyka](docs/LANGUAGE.md).
 
 Jedna SQLite transakce vytvoří cenový snapshot, podmíněně odečte sklad, získá demo payment URL a vloží emailovou úlohu. Selhání před commitem vše vrátí. Jeden Store proces serializuje operace; to je záměrné zjednodušení lokálního prototypu. SQLite má zapnuté WAL, foreign keys a `synchronous=FULL`.
 
@@ -50,6 +50,10 @@ curl -s http://127.0.0.1:4000/api/orders \
 
 `GET /api/devices/:device_id` vrací poslední MQTT stav a polohy za posledních pět minut. MQTT 3.1.1 server naslouchá na `127.0.0.1:1883` (`MQTT_PORT` mění port). Přijímá striktně typovaný JSON na `devices/:device_id/status` a `devices/:device_id/position`; poskytuje QoS 0/1, subscriptions a retained zprávy. `ON MQTT DeviceStatus` spouští deklarovaný scénář nízké baterie; jeho požadavky a výsledky jsou vidět v adminu.
 
+Admin → **Živá zařízení** otevírá WebSocket `/ws` a odebírá stav i polohu zadané sekačky. Odběr používá typ zdroje a parametry: `{"action":"subscribe","source":"DeviceStatus","params":{"device_id":"mower1"},"latest":true}`. Každý připojený odběratel dostává vlastní kopii validovaných zpráv. Odpojení ukončí odběry; historie se automaticky nedoplňuje.
+
+`POST /api/products/:product_id/photo` přijímá ověřený PNG/JPEG jako JSON/base64, zmenší jej a uloží spolu se záznamem v jedné transakci.
+
 `POST /api/language/check` validuje Flow zaslaný jako text bez spuštění.
 
 `GET /api/admin`, `GET /api/requests/:id`, `GET /api/orders/:id`, `POST /api/email-jobs/:id/retry`, `GET /health`.
@@ -64,7 +68,7 @@ npm ci
 npm test
 ```
 
-Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, validaci vstupů, idempotenci, souběžné objednávky, emailové retry a ruční opravu, admin panel, mobilní layout a persistenci po restartu. Další E2E scénáře ve stejném jediném souboru ověřují obecné CRUD, rozsahy typů a typované výpočty, podmíněné filtry, INNER/LEFT JOIN, podmíněné projekce, EXISTS, savepointy, MQTT QoS 1, DUP a retained subscriptions. Screenshoty a log serveru jsou v `e2e/test-results/`.
+Ověřují úspěšnou objednávku, cenový snapshot, rollback skladu a platby, validaci vstupů, idempotenci, souběžné objednávky, emailové retry a ruční opravu, admin panel, mobilní layout a persistenci po restartu. Další E2E scénáře ve stejném jediném souboru ověřují obecné CRUD, rozsahy typů a typované výpočty, podmíněné filtry, INNER/LEFT JOIN, podmíněné projekce, EXISTS, savepointy, MQTT QoS 1, DUP a retained subscriptions, WebSocket kopie pro více klientů, izolaci zařízení, odhlášení a živý admin panel; také skutečné dekódování a resize obrázků a transakční rollback souborů. Screenshoty a log serveru jsou v `e2e/test-results/`.
 
 ## Hranice prototypu
 

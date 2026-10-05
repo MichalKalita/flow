@@ -15,6 +15,7 @@
       <button data-page="overview" class="nav-button active"><span>◉</span> Přehled <span class="nav-count" id="request-count">0</span></button>
       <button data-page="orders" class="nav-button"><span>▤</span> Objednávky</button>
       <button data-page="plugins" class="nav-button"><span>⇄</span> Pluginy</button>
+      <button data-page="devices" class="nav-button"><span>⌁</span> Živá zařízení</button>
       <button data-page="workflow" class="nav-button"><span>⌘</span> Deklarace toku</button>
     </nav>
     <div class="sidebar-label">VYZKOUŠET</div>
@@ -42,6 +43,12 @@
       </section>
       <section id="page-orders" class="page" hidden><div class="heading"><div><span class="eyebrow">POTVRZENÝ APLIKAČNÍ STAV</span><h1>Objednávky<span class="heading-dot">.</span></h1><p>Zde jsou pouze objednávky, které prošly commitem.</p></div></div><div id="orders-list"></div></section>
       <section id="page-plugins" class="page" hidden><div class="heading"><div><span class="eyebrow">VSTUPY, VÝSTUPY, CHYBY</span><h1>Volání pluginů<span class="heading-dot">.</span></h1><p>Lokální platební URL a simulované emaily. Všechny pokusy zůstávají dohledatelné.</p></div></div><div class="plugin-summary"><div class="panel"><span class="plugin-icon">↗</span><h2>Payment</h2><p>Vytvoří demo platební URL nebo vrátí obchodní chybu.</p><code>create_url(order, country, method)</code></div><div class="panel"><span class="plugin-icon">✉</span><h2>Email</h2><p>Simuluje odeslání až po commitu. 3 pokusy, odstup 1 s, pak ponechání chyby.</p><code>send_confirmation(order, payment)</code></div></div><div class="section-title"><h2>Historie volání</h2><select id="plugin-filter" aria-label="Filtrovat plugin"><option value="all">Všechny pluginy</option><option>Payment</option><option>Email</option></select></div><div id="plugin-calls"></div></section>
+      <section id="page-devices" class="page" hidden>
+        <div class="heading"><div><span class="eyebrow">MQTT → WEBSOCKET</span><h1>Živá zařízení<span class="heading-dot">.</span></h1><p>Kopie typovaných zpráv pro vybranou sekačku.</p></div><span id="device-connection" class="tag" aria-live="polite">Odpojeno</span></div>
+        <form id="device-form" class="panel"><label for="device-id">ID zařízení</label><input id="device-id" value="mower1" required maxlength="100"><button class="button primary" type="submit">Odebírat zprávy</button><button id="device-stop" class="button" type="button">Odpojit</button></form>
+        <div class="plugin-summary"><div class="panel"><h2>Stav sekačky</h2><pre id="device-status">Čekám na zprávu…</pre></div><div class="panel"><h2>Poloha</h2><pre id="device-position">Čekám na zprávu…</pre></div></div>
+        <div class="code-panel"><div class="code-heading">Přijaté kopie zpráv · posledních 50</div><pre id="device-messages"></pre></div>
+      </section>
       <section id="page-workflow" class="page" hidden><div class="heading"><div><span class="eyebrow">APLIKAČNÍ LOGIKA JAKO DEKLARACE</span><h1>Definice aplikace<span class="heading-dot">.</span></h1><p>Tento soubor runtime načte a přeloží při startu.</p></div><span class="tag">Flow</span></div><div class="code-panel"><div class="code-heading"><span>application.flow</span><span>registrované operace</span></div><pre id="workflow-source"></pre></div><div class="architecture-strip"><strong>Obecný interpreter scénářů.</strong><span>Typy, HTTP scénáře a MQTT zdroje v jediném souboru. Adaptéry a pluginy jsou v Elixiru.</span></div></section>
     </div>
   </main>

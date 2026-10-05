@@ -1,7 +1,7 @@
 defmodule OrderLab.Language.Types do
   @moduledoc "Strict JSON type validation, including recursively resolved refinement predicates."
   alias OrderLab.Language.{Error, Evaluator}
-  @primitives ~w(String Int Number Float Bool JSON)
+  @primitives ~w(String Int Number Float Bool JSON File Image)
 
   def resolve!(type, definitions, visited \\ [])
 
@@ -54,6 +54,9 @@ defmodule OrderLab.Language.Types do
     end)
   end
 
+  defp normalize(value, {:named, name}) when name in ["File", "Image"],
+    do: OrderLab.FileValue.normalize!(value, name)
+
   defp normalize(value, _), do: value
 
   defp check!(nil, {:optional, _}, _), do: :ok
@@ -100,6 +103,17 @@ defmodule OrderLab.Language.Types do
     end)
   end
 
+  defp check!(value, {:named, name}, path) when name in ["File", "Image"] and is_map(value) do
+    check!(
+      value,
+      {:record,
+       Map.new(value, fn {key, _} ->
+         {key, Map.get(OrderLab.FileValue.fields(name), key, {:named, "JSON"})}
+       end)},
+      path
+    )
+  end
+
   defp check!(_, type, path), do: invalid!(path, "expected #{describe(type)}")
 
   defp json!(value, _)
@@ -115,6 +129,12 @@ defmodule OrderLab.Language.Types do
   end
 
   defp json!(_, path), do: invalid!(path, "expected JSON value")
+
+  def has_file?({:named, name}), do: name in ["File", "Image"]
+  def has_file?({:record, fields}), do: Enum.any?(fields, fn {_, type} -> has_file?(type) end)
+  def has_file?({:list, type}), do: has_file?(type)
+  def has_file?({:optional, type}), do: has_file?(type)
+  def has_file?({:refined, type, _}), do: has_file?(type)
 
   def describe({:named, name}), do: name
   def describe({:list, type}), do: "List<#{describe(type)}>"

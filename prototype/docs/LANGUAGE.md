@@ -215,3 +215,48 @@ values = FOR EACH number IN :numbers
 `IF podmínka THEN výraz ELSE výraz` je čistý výraz. Vyhodnotí pouze vybranou větev; na obou stranách musí být kompatibilní typy. Kombinace čísla a null vytvoří volitelný číselný typ, kombinace Int a Number vytvoří Number. Totéž platí pro číselné položky seznamu a návratové hodnoty iterace. Každá větev má vlastní vazby a typové zúžení: `IS PRESENT` umožní přístup k polím ve THEN; `IS NOT PRESENT` jej umožní ve ELSE. Také odvozování výsledku `FOR EACH` respektuje lokální vazby jednotlivých větví.
 
 Refinement predikáty musí být deterministické. `uuid`, `now` a `ago` se v TYPE WHERE odmítají. Při čtení uložených záznamů a MQTT historie se znovu ověřuje aktuální kontrakt; stará data se po změně schématu nesmí vydávat za nový typ bez validace.
+
+## WebSocket odběr typovaných zpráv
+
+WebSocket endpoint se deklaruje ve stejném aplikačním souboru jako HTTP a MQTT:
+
+```text
+WEBSOCKET /ws
+    SOURCE DeviceStatus
+    SOURCE DevicePosition
+```
+
+`SOURCE` je seznam povolených, již deklarovaných MQTT zdrojů. Kompilátor odmítne neznámý zdroj, duplicitní endpoint či kolizi se stejnou HTTP GET cestou. Zatím jsou podporovány statické WebSocket cesty. Klient po připojení posílá JSON příkazy:
+
+```json
+{"action":"subscribe","source":"DeviceStatus","params":{"device_id":"mower1"},"latest":true}
+```
+
+Server ověří parametry podle typu zdroje, potvrdí odběr zprávou `type: "subscribed"` a při `latest: true` pošle i poslední uloženou zprávu, pokud existuje. Každá další přijatá a validovaná MQTT zpráva pro toto zařízení vytvoří kopii pro každého odběratele:
+
+```json
+{"type":"message","source":"DeviceStatus","params":{"device_id":"mower1"},"payload":{"online":true,"battery":88},"received_at":"2026-10-05T12:00:00.000000Z"}
+```
+
+Odhlášení používá stejný zdroj a parametry s `action: "unsubscribe"`; odpověď má `type: "unsubscribed"`. Opakovaný subscribe nevytváří duplicitní odběr. Neplatné příkazy vrátí `type: "error"` a spojení zůstává použitelné. Nelze odebírat libovolné topic stringy ani wildcardy. Jedno spojení má nejvýše 16 odběrů a příkaz nejvýše 8 KiB. Odpojení klienta odběry automaticky odstraní; pomalý klient s přeplněnou procesní schránkou se odpojí kódem 1013.
+
+Kopie se odesílají po uložení MQTT zprávy, nezávisle na následném úspěchu jejího ON MQTT scénáře. Neplatný payload se neuloží ani nerozešle. Zachycená retransmise QoS1 DUP se znovu nerozešle. Odběr je živý: nemá potvrzování jednotlivých kopií ani trvalou frontu pro odpojeného klienta; `latest` poskytuje poslední známou hodnotu, ne obnovu celé historie. Prototyp nemá autentizaci ani autorizaci odběrů. Admin → Živá zařízení umožňuje odběr stavu a polohy vybrané sekačky.
+
+## Ověřené soubory a obrázky
+
+`File` a `Image` jsou nativní typy s ověřeným obsahem, nikoliv libovolné JSON záznamy. HTTP vstup obsahuje base64 v `data` a volitelný `name`. Runtime dopočítá `media_type`, `byte_size` a `sha256`; Image navíc `format`, `width` a `height`. Pokud klient dodá metadata, musí přesně odpovídat obsahu. Image vyžaduje skutečné dekódování PNG nebo JPEG přes libvips; PDF, poškozený obrázek a falešná přípona tento typ nesplní.
+
+```text
+TYPE ProductPhoto = Image WHERE value.byte_size <= 10485760 AND value.width <= 8000 AND value.height <= 8000
+HTTP POST /photos
+INPUT photo ProductPhoto
+TRANSACTION
+    resized: ProductPhoto = CALL Image.resize WITH {image: :photo, width: 800, height: 600}
+    stored = CALL Files.put WITH {file: resized}
+    COMMIT
+RETURN stored
+```
+
+Image je kompatibilní s File. File se musí ověřit přes `CALL Image.decode WITH {file: :file}`, než může být vstupem Image.resize. Resize zachová poměr stran a původní PNG/JPEG formát, vejde se do zadaného obdélníku a nezvětšuje malé obrázky. Šířka a výška cíle mají rozsah 1–8192. Vstupní soubory mají limit 10 MiB; dekódovaný obrázek nejvýše 8192 × 8192 a současně 20 milionů pixelů. HTTP používá JSON/base64, multipart zatím nepodporuje.
+
+`Files.put` vrací `{id, url, name, media_type, byte_size, sha256}`. `Files.read WITH {id: ...}` vrací File a `Files.delete WITH {id: ...}` vrací `{id, deleted}`. Obsah je uložen v SQLite; put/delete musí být uvnitř TRANSACTION a vracejí se společně s aplikačními záznamy při rollbacku. URL `/files/:id` vrací skutečné bajty souboru. Tyto operace ani Image.resize/decode nelze vložit do QUEUE. Příklad produktu s fotografií je součástí `application.flow`.

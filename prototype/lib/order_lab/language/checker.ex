@@ -21,6 +21,9 @@ defmodule OrderLab.Language.Checker do
       {:record, fields} ->
         Map.get(fields, field) || fail("Unknown field #{field}")
 
+      {:named, name} when name in ["File", "Image"] ->
+        Map.get(OrderLab.FileValue.fields(name), field) || fail("Unknown #{name} field #{field}")
+
       {:optional, _} ->
         fail("Optional record must be guarded with IS PRESENT before accessing #{field}")
 
@@ -315,6 +318,9 @@ defmodule OrderLab.Language.Checker do
 
   def compatible?(actual, expected) do
     case {base(actual), base(expected)} do
+      {{:named, "Image"}, {:named, "File"}} ->
+        true
+
       {_, @json} ->
         true
 

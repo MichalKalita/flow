@@ -224,6 +224,8 @@ defmodule OrderLab.Language.Runtime do
 
   defp execute(%{kind: :call} = node, ctx) do
     effects_allowed!(ctx)
+    operation = Map.fetch!(OrderLab.Language.Native.operations(), node.operation)
+    if Map.get(operation, :effect) == :write, do: writes_allowed!(ctx)
     output = ctx.host.(:call, %{operation: node.operation, input: evaluate(node.input, ctx)})
     continue(bind(ctx, node.binding, output))
   end

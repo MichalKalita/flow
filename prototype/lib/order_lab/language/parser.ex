@@ -3,7 +3,16 @@ defmodule OrderLab.Language.Parser do
   alias OrderLab.Language.Expression, as: E
 
   def parse!(source, file \\ "<source>") do
-    program = %{types: %{}, tables: %{}, mqtt: %{}, endpoints: [], source: source, file: file}
+    program = %{
+      types: %{},
+      tables: %{},
+      mqtt: %{},
+      websockets: [],
+      endpoints: [],
+      source: source,
+      file: file
+    }
+
     top(Lexer.lines(source, file), program)
   end
 
@@ -134,6 +143,21 @@ defmodule OrderLab.Language.Parser do
 
         top(rest, %{program | mqtt: Map.put(program.mqtt, name, source)})
 
+      [{:word, "WEBSOCKET", _, _} | tokens] ->
+        route = Enum.map_join(tokens, fn {_, value, _, _} -> to_string(value) end)
+        {clauses, rest} = children(rest, line, program.file)
+
+        sources =
+          Enum.map(clauses, fn clause ->
+            case clause.tokens do
+              [{:word, "SOURCE", _, _}, {:word, name, _, _}] -> name
+              _ -> error!("WebSocket declaration expects SOURCE name", clause, program.file)
+            end
+          end)
+
+        endpoint = %{path: route, sources: sources, file: program.file, line: line.line}
+        top(rest, %{program | websockets: program.websockets ++ [endpoint]})
+
       [{:word, "HTTP", _, _}, {:word, method, _, _} | route_tokens] ->
         if method not in ["GET", "POST", "PUT", "PATCH", "DELETE"],
           do: error!("Unsupported HTTP method", line, program.file)
@@ -146,7 +170,15 @@ defmodule OrderLab.Language.Parser do
         {body, rest} =
           Enum.split_while(rest, fn next ->
             next.indent > 0 or
-              E.text(next.tokens) not in ["HTTP", "MQTT", "ON", "TYPE", "FILTER", "TABLE"]
+              E.text(next.tokens) not in [
+                "HTTP",
+                "MQTT",
+                "ON",
+                "WEBSOCKET",
+                "TYPE",
+                "FILTER",
+                "TABLE"
+              ]
           end)
 
         {inputs, body} = inputs(body, program.file, [])

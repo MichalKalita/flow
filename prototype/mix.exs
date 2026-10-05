@@ -10,6 +10,12 @@ defmodule OrderLab.MixProject do
   end
 
   defp deps do
-    [{:bandit, "~> 1.12"}, {:jason, "~> 1.4"}, {:exqlite, "~> 0.40"}]
+    [
+      {:bandit, "~> 1.12"},
+      {:jason, "~> 1.4"},
+      {:exqlite, "~> 0.40"},
+      {:vix, "~> 0.41"},
+      {:websock_adapter, "~> 0.5"}
+    ]
   end
 end

@@ -21,6 +21,12 @@ defmodule OrderLab.Store do
   def mqtt_publish(topic, payload, retain),
     do: GenServer.call(__MODULE__, {:mqtt_publish, topic, payload, retain})
 
+  def websocket(path), do: GenServer.call(__MODULE__, {:websocket, path})
+
+  def subscription(source, params, pid, action, latest, keys),
+    do: GenServer.call(__MODULE__, {:subscription, source, params, pid, action, latest, keys})
+
+  def file(id), do: GenServer.call(__MODULE__, {:file, id})
   def mqtt_retained, do: GenServer.call(__MODULE__, :mqtt_retained)
 
   def init(_) do
@@ -69,6 +75,7 @@ defmodule OrderLab.Store do
       max_attempts INTEGER NOT NULL,retry_delay_ms INTEGER NOT NULL,final_disposition TEXT NOT NULL,
       next_at INTEGER NOT NULL,error_json TEXT,result_json TEXT);
     INSERT OR IGNORE INTO flow_jobs SELECT id,order_id,request_id,'Email.send_confirmation',input_json,state,attempts,max_attempts,retry_delay_ms,final_disposition,next_at,error_json,result_json FROM email_jobs;
+    CREATE TABLE IF NOT EXISTS flow_files(id TEXT PRIMARY KEY,value_json TEXT NOT NULL,request_id TEXT NOT NULL REFERENCES requests(id),created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS mqtt_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT NOT NULL,topic TEXT NOT NULL,payload_json TEXT NOT NULL,received_at TEXT NOT NULL,retained INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS mqtt_source_topic ON mqtt_messages(source,topic,id);
     """)
@@ -93,6 +100,69 @@ defmodule OrderLab.Store do
     )
 
     {:ok, %{db: db, steps: OrderLab.Workflow.compile!()}}
+  end
+
+  def handle_call({:websocket, path}, _, state),
+    do: {:reply, Enum.find(state.steps.websockets, &(&1.path == path)), state}
+
+  def handle_call({:subscription, name, params, pid, action, latest, keys}, _, state) do
+    result =
+      try do
+        source = Map.fetch!(state.steps.mqtt, name)
+        type = {:record, Map.new(source.params, &{&1.name, &1.type})}
+        params = OrderLab.Language.Types.validate!(params, type)
+        values = Enum.map(source.params, &params[&1.name])
+
+        if Enum.any?(values, &String.contains?(&1, ["/", "+", "#", "\0"])),
+          do: raise("Invalid topic parameter")
+
+        key = {name, values}
+
+        last =
+          if latest and action == "subscribe" do
+            case OrderLab.Language.Native.source(state.db, state.steps, key, now())
+                 |> List.last() do
+              nil ->
+                nil
+
+              row ->
+                %{
+                  "type" => "message",
+                  "source" => name,
+                  "params" => params,
+                  "payload" => Map.delete(row, "received_at"),
+                  "received_at" => row["received_at"]
+                }
+            end
+          end
+
+        if action == "subscribe" do
+          if MapSet.size(keys) >= 16 and not MapSet.member?(keys, key),
+            do: raise("At most 16 subscriptions are allowed")
+
+          OrderLab.PubSub.subscribe(pid, key)
+        else
+          OrderLab.PubSub.unsubscribe(pid, key)
+        end
+
+        {:ok, key, params, last}
+      rescue
+        error -> {:error, Exception.message(error)}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:file, id}, _, state) do
+    result =
+      try do
+        OrderLab.Files.read(state.db, %{"id" => id}, %{})
+      rescue
+        error ->
+          {:error, %{"code" => "invalid_stored_file", "message" => Exception.message(error)}}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({:route, method, path}, _, state) do
@@ -170,6 +240,15 @@ defmodule OrderLab.Store do
           )
 
           exec!(state.db, "COMMIT")
+          key = {source.name, Enum.map(source.params, &values[&1.name])}
+
+          OrderLab.PubSub.broadcast(key, %{
+            "type" => "message",
+            "source" => source.name,
+            "params" => values,
+            "payload" => value,
+            "received_at" => timestamp
+          })
 
           Enum.filter(state.steps.endpoints, &(&1.method == "MQTT" and &1.path == source.name))
           |> Enum.each(fn endpoint ->
@@ -245,7 +324,8 @@ defmodule OrderLab.Store do
         query!(db, "SELECT * FROM flow_jobs ORDER BY rowid DESC")
         |> Enum.map(&decode(&1, ["input_json", "error_json", "result_json"])),
       "workflow" => state.steps.source,
-      "workflow_path" => state.steps.file
+      "workflow_path" => state.steps.file,
+      "websocket" => OrderLab.PubSub.stats()
     }
 
     {:reply, result, state}
@@ -472,7 +552,7 @@ defmodule OrderLab.Store do
   defp invoke(module, plugin, operation, input, request_id, order_id, attempt) do
     started_at = now()
     started = System.monotonic_time(:millisecond)
-    result = module.call(input)
+    result = if is_function(module, 1), do: module.(input), else: module.call(input)
 
     {status, output} =
       case result do

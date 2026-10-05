@@ -12,7 +12,58 @@ defmodule OrderLab.Language.Native do
     int = {:named, "Int"}
     item = {:record, %{"id" => string, "name" => string, "price_cents" => int, "quantity" => int}}
 
+    dimension =
+      {:refined, int,
+       {:binary, "AND", {:binary, ">=", {:variable, "value"}, {:literal, 1}},
+        {:binary, "<=", {:variable, "value"}, {:literal, 8192}}}}
+
+    file_ref =
+      {:record,
+       Map.merge(
+         Map.take(OrderLab.FileValue.fields("File"), ~w(name media_type byte_size sha256)),
+         %{"id" => string, "url" => string}
+       )}
+
     %{
+      "Image.resize" => %{
+        module: OrderLab.Plugins.ImageResize,
+        effect: :pure,
+        queueable: false,
+        input:
+          {:record, %{"image" => {:named, "Image"}, "width" => dimension, "height" => dimension}},
+        output: {:named, "Image"}
+      },
+      "Image.decode" => %{
+        module: OrderLab.Plugins.ImageDecode,
+        effect: :pure,
+        queueable: false,
+        input: {:record, %{"file" => {:named, "File"}}},
+        output: {:named, "Image"}
+      },
+      "Files.put" => %{
+        module: OrderLab.Files,
+        native: :put,
+        effect: :write,
+        queueable: false,
+        input: {:record, %{"file" => {:named, "File"}}},
+        output: file_ref
+      },
+      "Files.read" => %{
+        module: OrderLab.Files,
+        native: :read,
+        effect: :read,
+        queueable: false,
+        input: {:record, %{"id" => string}},
+        output: {:named, "File"}
+      },
+      "Files.delete" => %{
+        module: OrderLab.Files,
+        native: :delete,
+        effect: :write,
+        queueable: false,
+        input: {:record, %{"id" => string}},
+        output: {:record, %{"id" => string, "deleted" => {:named, "Bool"}}}
+      },
       "Payment.create_url" => %{
         module: OrderLab.Plugins.Payment,
         input:
@@ -70,9 +121,14 @@ defmodule OrderLab.Language.Native do
 
         :call ->
           op = Map.fetch!(operations(), args.operation)
-          Types.validate!(args.input, op.input)
+          input = Types.validate!(args.input, op.input)
 
-          case invoke.(args.operation, op.module, args.input) do
+          implementation =
+            if Map.has_key?(op, :native),
+              do: fn input -> apply(op.module, op.native, [db, input, request]) end,
+              else: op.module
+
+          case invoke.(args.operation, implementation, input) do
             {:ok, result} ->
               Types.validate!(result, op.output)
 
@@ -82,7 +138,7 @@ defmodule OrderLab.Language.Native do
 
         :queue ->
           op = Map.fetch!(operations(), args.operation)
-          Types.validate!(args.input, op.input)
+          input = Types.validate!(args.input, op.input)
           job = Evaluator.builtin("uuid", ["job"])
 
           query!(
@@ -93,7 +149,7 @@ defmodule OrderLab.Language.Native do
               args.input["order_id"],
               request["id"],
               args.operation,
-              Jason.encode!(args.input),
+              Jason.encode!(input),
               System.system_time(:millisecond),
               args.attempts,
               args.delay,

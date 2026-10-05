@@ -6,6 +6,7 @@ defmodule OrderLab.Application do
 
     Supervisor.start_link(
       [
+        OrderLab.PubSub,
         OrderLab.Store,
         OrderLab.EmailWorker,
         OrderLab.MQTT,

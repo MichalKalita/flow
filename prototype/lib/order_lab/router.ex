@@ -61,6 +61,25 @@ defmodule OrderLab.Router do
     end
   end
 
+  get "/files/:id" do
+    case OrderLab.Store.file(id) do
+      {:ok, file} ->
+        conn
+        |> put_resp_content_type(file["media_type"])
+        |> put_resp_header("x-content-type-options", "nosniff")
+        |> put_resp_header(
+          "content-disposition",
+          "inline; filename*=UTF-8''" <> URI.encode(file["name"], &URI.char_unreserved?/1)
+        )
+        |> send_resp(200, Base.decode64!(file["data"]))
+
+      {:error, error} ->
+        send_json(conn, if(error["code"] == "file_not_found", do: 404, else: 500), %{
+          "error" => error
+        })
+    end
+  end
+
   post "/api/language/check" do
     case read_body(conn, length: 256_000) do
       {:ok, body, conn} ->
@@ -79,7 +98,9 @@ defmodule OrderLab.Router do
                 Enum.filter(program.endpoints, &(&1.method != "MQTT")),
                 &%{"method" => &1.method, "path" => &1.path}
               ),
-            "mqtt" => Map.keys(program.mqtt)
+            "mqtt" => Map.keys(program.mqtt),
+            "websocket" =>
+              Enum.map(program.websockets, &%{"path" => &1.path, "sources" => &1.sources})
           })
         rescue
           e in OrderLab.Language.Error ->
@@ -101,9 +122,22 @@ defmodule OrderLab.Router do
   end
 
   match _ do
-    case OrderLab.Store.route(conn.method, conn.request_path) do
-      nil -> send_json(conn, 404, %{"error" => "not_found"})
-      {endpoint, params} -> handle_scenario(conn, endpoint, params)
+    websocket = if conn.method == "GET", do: OrderLab.Store.websocket(conn.request_path)
+
+    if websocket do
+      try do
+        WebSockAdapter.upgrade(conn, OrderLab.WebSocket, websocket,
+          timeout: 60_000,
+          max_frame_size: 8192
+        )
+      rescue
+        _ -> send_json(conn, 400, %{"error" => "websocket_upgrade_required"})
+      end
+    else
+      case OrderLab.Store.route(conn.method, conn.request_path) do
+        nil -> send_json(conn, 404, %{"error" => "not_found"})
+        {endpoint, params} -> handle_scenario(conn, endpoint, params)
+      end
     end
   end
 
@@ -132,7 +166,12 @@ defmodule OrderLab.Router do
 
       dispatch_scenario(conn, endpoint, input)
     else
-      case read_body(conn, length: 64_000) do
+      body_limit =
+        if Enum.any?(endpoint.inputs, &OrderLab.Language.Types.has_file?(&1.type)),
+          do: OrderLab.FileValue.max_body_bytes(),
+          else: 64_000
+
+      case read_body(conn, length: body_limit, read_length: body_limit) do
         {:ok, body, conn} ->
           handle_json(conn, endpoint, params, body)
 
@@ -142,7 +181,7 @@ defmodule OrderLab.Router do
             Map.put(raw_input(body), "truncated", true),
             413,
             "body_too_large",
-            "Tělo požadavku překračuje limit 64 kB."
+            "Tělo požadavku překračuje limit #{body_limit} bajtů."
           )
 
         {:error, _} ->

@@ -10,6 +10,7 @@ let directory;
 let serverOutput = '';
 let successRequest;
 let successOrder;
+let savedPhoto;
 
 async function startServer() {
   server = spawn('mix', ['run', '--no-halt'], {
@@ -84,6 +85,16 @@ async function mqttClient() {
     close(){socket.end(mqttPacket(0xE0));}
   };
 }
+async function wsClient() {
+  const socket=new WebSocket('ws://127.0.0.1:4100/ws');
+  const messages=[];const waits=[];
+  socket.addEventListener('message',event=>{const data=JSON.parse(event.data);if(waits.length)waits.shift()(data);else messages.push(data);});
+  await new Promise((resolve,reject)=>{socket.addEventListener('open',resolve,{once:true});socket.addEventListener('error',reject,{once:true});});
+  const next=()=>new Promise((resolve,reject)=>{if(messages.length)return resolve(messages.shift());const timer=setTimeout(()=>reject(new Error('WebSocket message timeout')),3000);waits.push(value=>{clearTimeout(timer);resolve(value);});});
+  return {socket,next,send(value){socket.send(JSON.stringify(value));},close(){socket.close();}};
+}
+const pngFixture=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAACCAYAAAB/qH1jAAAAEklEQVR4nGP4z8DwHxkzoAsAAA8hD/EEN8afAAAAAElFTkSuQmCC','base64');
+const upload=(data=pngFixture,extra={})=>({data:data.toString('base64'),name:'fixture.png',...extra});
 const extraFlow = `
 TYPE Rating = Number WHERE value BETWEEN 1.0 AND 5.0
 TYPE Note = {id: String, text: String, rating: Rating, tags: List<String>}
@@ -163,6 +174,24 @@ TRANSACTION
     value: Rating = :rating + 1
     COMMIT
 RETURN {rating: value}
+HTTP POST /api/files/rollback
+INPUT file File
+TRANSACTION
+    saved = CALL Files.put WITH {file: :file}
+    INSERT Photos WITH {id: "rolled-back-file", product_id: "p1", file_id: saved.id, url: saved.url, width: 1, height: 1}
+    FAIL 409 deliberate_failure "Roll back file and row"
+    COMMIT
+RETURN true
+HTTP DELETE /api/files/:id
+INPUT id String
+TRANSACTION
+    deleted = CALL Files.delete WITH {id: :id}
+    COMMIT
+RETURN deleted
+HTTP POST /api/files/decode
+INPUT file File
+decoded: Image = CALL Image.decode WITH {file: :file}
+RETURN {width: decoded.width, height: decoded.height, format: decoded.format}
 HTTP POST /api/notes
 INPUT text String
 INPUT rating Rating
@@ -456,6 +485,9 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect((await request.post('/api/language/check',{data:valid,headers:{'Content-Type':'text/plain'}})).status()).toBe(200);
     const invalid=[
       'REST GET /old\nRETURN true',
+      'HTTP POST /bad\nINPUT file File\nCALL Image.resize WITH {image: :file, width: 2, height: 2}\nRETURN true',
+      'HTTP POST /bad\nINPUT file File\nCALL Files.put WITH {file: :file}\nRETURN true',
+      'WEBSOCKET /ws\n    SOURCE Missing',
       'TYPE Random = String WHERE uuid("id") = value\nHTTP GET /bad\nRETURN true',
       'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP GET /bad\nrating: Rating = 7\nRETURN rating',
       'TYPE Rating = Number WHERE value BETWEEN 1 AND 5\nHTTP POST /bad\nINPUT rating Rating = 7\nRETURN :rating',
@@ -531,12 +563,115 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     expect(traces.find(r=>r.path==='devices/d4/action').http_status).toBe(200);
   });
 
+
+  test('real PNG resize and native file storage commit together and Chrome decodes the resulting pixels', async ({request,page}) => {
+    const response=await request.post('/api/products/p1/photo',{data:{photo:upload(),width:2,height:2},headers:{'Idempotency-Key':'photo-1'}});expect(response.status()).toBe(201);savedPhoto=await response.json();
+    expect(savedPhoto.photo.width).toBe(2);expect(savedPhoto.photo.height).toBe(1);expect(savedPhoto.file.media_type).toBe('image/png');
+    const download=await request.get(savedPhoto.file.url);expect(download.status()).toBe(200);const bytes=await download.body();expect(bytes.readUInt32BE(16)).toBe(2);expect(bytes.readUInt32BE(20)).toBe(1);
+    await page.goto('/admin');
+    const decoded=await page.evaluate(async url=>{const image=new Image();image.src=url;await image.decode();const canvas=document.createElement('canvas');canvas.width=image.width;canvas.height=image.height;canvas.getContext('2d').drawImage(image,0,0);return {width:image.width,height:image.height,pixel:Array.from(canvas.getContext('2d').getImageData(0,0,1,1).data)};},savedPhoto.file.url);
+    expect(decoded.width).toBe(2);expect(decoded.height).toBe(1);expect(decoded.pixel[0]).toBeGreaterThan(200);
+    const calls=(await snapshot(request)).plugin_calls.filter(c=>c.request_id===savedPhoto.request_id);expect(calls.map(c=>`${c.plugin}.${c.operation}`).sort()).toEqual(['Files.put','Image.resize']);
+    const replay=await request.post('/api/products/p1/photo',{data:{photo:upload(),width:2,height:2},headers:{'Idempotency-Key':'photo-1'}});expect((await replay.json()).file.id).toBe(savedPhoto.file.id);
+  });
+
+  test('image types reject PDF, spoofed dimensions, malformed data and truncated images before plugin execution', async ({request,page}) => {
+    for(const photo of [upload(Buffer.from('%PDF-1.7\nnot an image')),upload(pngFixture,{width:999}),upload(pngFixture.subarray(0,40)),{data:'not base64',name:'fake.jpg'}]) {
+      const response=await request.post('/api/products/p1/photo',{data:{photo,width:2,height:2}});expect(response.status()).toBe(422);const result=await response.json();expect((await snapshot(request)).plugin_calls.filter(c=>c.request_id===result.request_id)).toEqual([]);
+    }
+    await page.goto('/admin');
+    const jpeg=await page.evaluate(async base64=>{const image=new Image();image.src='data:image/png;base64,'+base64;await image.decode();const canvas=document.createElement('canvas');canvas.width=4;canvas.height=2;canvas.getContext('2d').drawImage(image,0,0);return canvas.toDataURL('image/jpeg').split(',')[1];},pngFixture.toString('base64'));
+    const response=await request.post('/api/products/p2/photo',{data:{photo:{data:jpeg,name:'actual.jpeg'},width:2,height:2}});expect(response.status()).toBe(201);expect((await response.json()).file.media_type).toBe('image/jpeg');
+    const decode=await request.post('/api/files/decode',{data:{file:upload()}});expect(decode.status()).toBe(200);expect((await decode.json()).format).toBe('PNG');
+    const pdf=await request.post('/api/files/decode',{data:{file:upload(Buffer.from('%PDF-1.7\n'))}});expect(pdf.status()).toBe(422);expect((await pdf.json()).error.code).toBe('image_decode_failed');
+  });
+
+  test('file rollback leaves no file or row and native DELETE participates in transactions', async ({request}) => {
+    const before=execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),'SELECT COUNT(*) FROM flow_files;']).toString().trim();
+    const response=await request.post('/api/files/rollback',{data:{file:upload()}});expect(response.status()).toBe(409);
+    const after=execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),'SELECT COUNT(*) FROM flow_files;']).toString().trim();expect(after).toBe(before);
+    expect(execFileSync('/usr/bin/sqlite3',[path.join(directory,'e2e.sqlite3'),"SELECT COUNT(*) FROM flow_records WHERE table_name='Photos' AND id='rolled-back-file';"]).toString().trim()).toBe('0');
+    const temporary=await request.post('/api/products/p1/photo',{data:{photo:upload(),width:2,height:2}});const file=(await temporary.json()).file;
+    const removed=await request.delete(`/api/files/${file.id}`);expect(removed.status()).toBe(200);expect((await request.get(file.url)).status()).toBe(404);
+  });
+
+  test('WebSocket subscribers receive independent typed MQTT copies, isolate devices, suppress DUP and unsubscribe', async ({request}) => {
+    const a=await wsClient();const b=await wsClient();const mqtt=await mqttClient();
+    const subscribe={action:'subscribe',source:'DeviceStatus',params:{device_id:'mower1'}};
+    try {
+      a.send(subscribe);b.send(subscribe);expect((await a.next()).type).toBe('subscribed');expect((await b.next()).type).toBe('subscribed');
+      await mqtt.publish('devices/other/status',{online:true,battery:99});
+      await mqtt.publish('devices/mower1/status',{online:true,battery:97},{id:2});
+      for(const ws of [a,b]){const copy=await ws.next();expect(copy.source).toBe('DeviceStatus');expect(copy.params.device_id).toBe('mower1');expect(copy.payload).toEqual({online:true,battery:97});expect(copy.received_at).toBeTruthy();}
+      await mqtt.publish('devices/mower1/status',{online:true,battery:97},{id:2,dup:true});
+      await mqtt.publish('devices/mower1/status',{online:false,battery:96},{id:3});expect((await a.next()).payload.battery).toBe(96);expect((await b.next()).payload.battery).toBe(96);
+      a.send({...subscribe,action:'unsubscribe'});expect((await a.next()).type).toBe('unsubscribed');
+      a.send({action:'subscribe',source:'DevicePosition',params:{device_id:'mower1'}});expect((await a.next()).type).toBe('subscribed');
+      const invalid=await mqttClient();
+      const invalidClosed=new Promise(resolve=>invalid.socket.once('close',resolve));
+      invalid.socket.write(mqttPacket(0x32,Buffer.concat([mqttString('devices/mower1/status'),Buffer.from([0,1]),Buffer.from(JSON.stringify({online:true,battery:101}))])));
+      await invalidClosed;
+      await mqtt.publish('devices/mower1/status',{online:false,battery:95},{id:4});expect((await b.next()).payload.battery).toBe(95);
+      await mqtt.publish('devices/mower1/position',{latitude:50,longitude:14},{id:5});expect((await a.next()).source).toBe('DevicePosition');
+      const c=await wsClient();try{c.send({...subscribe,latest:true});expect((await c.next()).type).toBe('subscribed');expect((await c.next()).payload.battery).toBe(95);}finally{c.close();}
+    } finally {a.close();b.close();mqtt.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('WebSocket contract rejects invalid subscriptions and a real Chrome client receives mower updates', async ({request,page}) => {
+    const client=await wsClient();
+    try {
+      for(const command of [{action:'subscribe',source:'Unknown',params:{}},{action:'subscribe',source:'DeviceStatus',params:{device_id:7}},{action:'subscribe',source:'DeviceStatus',params:{device_id:'x',extra:true}},{action:'subscribe',source:'DeviceStatus',params:{device_id:'a/b'}}]){client.send(command);expect((await client.next()).type).toBe('error');}
+      expect((await snapshot(request)).websocket.subscriptions).toBe(0);
+    } finally {client.close();}
+    await page.goto('/admin');
+    await page.evaluate(async()=>{window.copies=[];window.mowerSocket=new WebSocket('ws://'+location.host+'/ws');window.mowerSocket.onmessage=event=>window.copies.push(JSON.parse(event.data));await new Promise(resolve=>window.mowerSocket.onopen=resolve);window.mowerSocket.send(JSON.stringify({action:'subscribe',source:'DeviceStatus',params:{device_id:'browser-mower'}}));});
+    await expect.poll(()=>page.evaluate(()=>window.copies.some(copy=>copy.type==='subscribed'))).toBe(true);
+    const mqtt=await mqttClient();try{await mqtt.publish('devices/browser-mower/status',{online:true,battery:88});}finally{mqtt.close();}
+    await expect.poll(()=>page.evaluate(()=>window.copies.find(copy=>copy.type==='message')?.payload.battery)).toBe(88);
+    await page.evaluate(()=>window.mowerSocket.close());
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
+  test('admin live device panel subscribes, displays mower copies and disconnects', async ({request,page}) => {
+    await page.goto('/admin');
+    await page.getByRole('button',{name:'Živá zařízení'}).click();
+    await page.locator('#device-id').fill('panel-mower');
+    await page.getByRole('button',{name:'Odebírat zprávy'}).click();
+    await expect.poll(async()=> (await snapshot(request)).websocket.subscriptions).toBe(2);
+    const mqtt=await mqttClient();
+    try {
+      await mqtt.publish('devices/panel-mower/status',{online:true,battery:73});
+      await mqtt.publish('devices/panel-mower/position',{latitude:50.2,longitude:14.3},{id:2});
+      await expect(page.locator('#device-status')).toContainText('73');
+      await expect(page.locator('#device-position')).toContainText('50.2');
+      await expect(page.locator('#device-messages')).toContainText('panel-mower');
+    } finally {mqtt.close();}
+    await page.getByRole('button',{name:'Odpojit',exact:true}).click();
+    await expect(page.locator('#device-connection')).toHaveText('Odpojeno');
+    await expect.poll(async()=> (await snapshot(request)).websocket.subscriptions).toBe(0);
+  });
+
+  test('WebSocket subscription limit is bounded and duplicate subscriptions remain idempotent', async ({request}) => {
+    const client=await wsClient();
+    try {
+      for(let i=0;i<16;i++) {client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'limit-'+i}});expect((await client.next()).type).toBe('subscribed');}
+      client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'limit-0'}});expect((await client.next()).type).toBe('subscribed');
+      client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'limit-16'}});expect((await client.next()).type).toBe('error');
+      expect((await snapshot(request)).websocket.subscriptions).toBe(16);
+      client.send({action:'unsubscribe',source:'DeviceStatus',params:{device_id:'limit-0'}});expect((await client.next()).type).toBe('unsubscribed');
+      client.send({action:'subscribe',source:'DeviceStatus',params:{device_id:'limit-16'}});expect((await client.next()).type).toBe('subscribed');
+    } finally {client.close();}
+    await expect.poll(async()=> (await snapshot(request)).websocket.connections).toBe(0);
+  });
+
   test('process restart preserves SQL state, request history, plugin calls and completed idempotency keys', async ({request}) => {
     await expect.poll(async()=> (await snapshot(request)).email_jobs.every(j=>['sent','failed'].includes(j.state))).toBe(true);
     const before=await snapshot(request);
     await stopServer(); await startServer();
     const after=await snapshot(request);
     for (const key of ['products','users','orders','requests','plugin_calls','email_jobs']) expect(after[key]).toEqual(before[key]);
+    expect((await request.get(savedPhoto.file.url)).status()).toBe(200);
     const device=await request.get('/api/devices/d1');const persisted=await device.json();expect(persisted.status.battery).toBe(80);expect(persisted.positions).toHaveLength(2);
     const replay=await post(request,payload(),'e2e-replay'); expect(replay.status).toBe(201); expect(replay.body.replayed).toBe(true);
     expect((await snapshot(request)).orders).toEqual(before.orders);
@@ -562,6 +697,8 @@ test.describe.serial('Order Lab · real HTTP, browser and persistent SQLite', ()
     await startServer();
     let response=await request.get('/api/devices/corrupt');expect(response.status()).toBe(500);expect((await response.json()).error.code).toBe('language_error');
     response=await request.get('/api/notes',{params:{filter:'{}'}});expect(response.status()).toBe(500);expect((await response.json()).error.code).toBe('language_error');
+    const ws=await wsClient();
+    try {ws.send({action:'subscribe',source:'DevicePosition',params:{device_id:'corrupt'},latest:true});expect((await ws.next()).type).toBe('error');expect((await snapshot(request)).websocket.subscriptions).toBe(0);} finally {ws.close();}
     expect((await request.get('/health')).status()).toBe(200);
   });
 
