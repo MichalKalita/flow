@@ -1,8 +1,9 @@
 use flow_runtime::{
     engine::{Config, Runtime},
-    http,
+    http, mqtt,
     program::Program,
 };
+use std::sync::{Arc, Mutex};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -12,9 +13,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("Usage: flow-runtime --check application.flow")?;
         let program = Program::compile(&std::fs::read_to_string(path)?)?;
         println!(
-            "Valid: {} entities, {} HTTP operations",
+            "Valid: {} entities, {} HTTP operations, {} WebSocket subscriptions",
             program.entities.len(),
-            program.operations.len()
+            program
+                .operations
+                .iter()
+                .filter(|o| o.method != "WS")
+                .count(),
+            program
+                .operations
+                .iter()
+                .filter(|o| o.method == "WS")
+                .count()
         );
         return Ok(());
     }
@@ -29,15 +39,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.jwt_keys.insert("user".into(), secret.into_bytes());
     }
     let runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
+    let runtime = Arc::new(Mutex::new(runtime));
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    let mqtt_bind = args.get(3).map(String::as_str).unwrap_or("127.0.0.1:1883");
+    let mqtt_listener = tokio::net::TcpListener::bind(mqtt_bind).await?;
+    println!("Flow MQTT listening on {}", mqtt_listener.local_addr()?);
+    let mqtt_runtime = runtime.clone();
+    let mqtt_task = tokio::spawn(async move { mqtt::serve(mqtt_listener, mqtt_runtime).await });
     println!(
         "Flow HTTP listening on http://{} (SQLite: {database})",
         listener.local_addr()?
     );
-    axum::serve(listener, http::router(runtime))
+    axum::serve(listener, http::router_shared(runtime))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    mqtt_task.abort();
     Ok(())
 }

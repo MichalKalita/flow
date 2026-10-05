@@ -1,8 +1,10 @@
 pub mod engine;
 pub mod http;
+pub mod mqtt;
 pub mod program;
 pub mod syntax;
 pub mod value;
+pub mod websocket;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

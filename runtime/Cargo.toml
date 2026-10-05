@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "io-util", "sync", "time"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 num-bigint = "0.4"
@@ -17,3 +17,7 @@ ring = "0.17"
 base64 = "0.22"
 sha2 = "0.10"
 percent-encoding = "2"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+futures-util = "0.3"

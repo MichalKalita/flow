@@ -59,7 +59,15 @@ fn parser_and_exact_numbers() {
 }
 #[test]
 fn source_compiles_and_public_projection_is_narrow() {
-    assert_eq!(Program::compile(APP).unwrap().operations.len(), 9);
+    assert_eq!(
+        Program::compile(APP)
+            .unwrap()
+            .operations
+            .iter()
+            .filter(|o| o.method != "WS")
+            .count(),
+        9
+    );
     let mut r = runtime();
     let (products, trace) = r.execute_traced("Products", json!({}), None).unwrap();
     assert_eq!(products.as_array().unwrap().len(), 4);

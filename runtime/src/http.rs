@@ -2,18 +2,19 @@ use crate::{Error, Result, engine::Runtime};
 use axum::{
     Router,
     body::{Body, to_bytes},
-    extract::{Request, State},
+    extract::{FromRequestParts, Request, State, WebSocketUpgrade},
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use percent_encoding::percent_decode_str;
 use serde_json::{Map, Value, json};
 use std::sync::{Arc, Mutex};
 
 pub fn router(runtime: Runtime) -> Router {
-    Router::new()
-        .fallback(dispatch)
-        .with_state(Arc::new(Mutex::new(runtime)))
+    router_shared(Arc::new(Mutex::new(runtime)))
+}
+pub fn router_shared(runtime: Arc<Mutex<Runtime>>) -> Router {
+    Router::new().fallback(dispatch).with_state(runtime)
 }
 fn decode(s: &str) -> Result<String> {
     percent_decode_str(s)
@@ -51,7 +52,7 @@ fn merge(inputs: &mut Map<String, Value>, key: String, value: Value) -> Result<(
 }
 async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) -> Response {
     let result = async {
-        let (parts, body) = request.into_parts();
+        let (mut parts, body) = request.into_parts();
         let authorization = match parts
             .headers
             .get_all("authorization")
@@ -69,6 +70,30 @@ async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) 
         };
         let method = parts.method.as_str();
         let path = parts.uri.path();
+        let is_websocket = runtime.lock().ok().is_some_and(|r| {
+            r.program
+                .operations
+                .iter()
+                .any(|o| o.method == "WS" && o.path == path)
+        });
+        if is_websocket {
+            runtime
+                .lock()
+                .map_err(|_| Error::new("internal", "Runtime lock failed"))?
+                .authenticate_transport(authorization.as_deref(), "WebSocket")?;
+            let path = path.to_owned();
+            let upgrade = WebSocketUpgrade::from_request_parts(&mut parts, &())
+                .await
+                .map_err(|_| Error::new("invalid_input", "Expected WebSocket upgrade"))?;
+            return Ok::<_, Error>(
+                upgrade
+                    .max_message_size(1024 * 1024)
+                    .on_upgrade(move |socket| {
+                        crate::websocket::session(socket, runtime, authorization, path)
+                    })
+                    .into_response(),
+            );
+        }
         let (name, status, mut inputs) = {
             let guard = runtime
                 .lock()
@@ -124,11 +149,11 @@ async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) 
         })
         .await
         .map_err(|_| Error::new("internal", "Runtime task failed"))??;
-        Ok::<_, Error>((status, output))
+        Ok::<_, Error>(json_response(status, output))
     }
     .await;
     let (status, body) = match result {
-        Ok((status, body)) => (status, body),
+        Ok(response) => return response,
         Err(error) => {
             let status = match error.code {
                 "unauthenticated" => 401,
@@ -147,6 +172,9 @@ async fn dispatch(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) 
             )
         }
     };
+    json_response(status, body)
+}
+fn json_response(status: u16, body: Value) -> Response {
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
         .header("content-type", "application/json; charset=utf-8")

@@ -163,6 +163,204 @@ impl Runtime {
             config,
         })
     }
+    pub fn authenticate_transport(&self, credential: Option<&str>, transport: &str) -> Result<()> {
+        authenticate(&self.program, &self.db, &self.config, credential, transport).map(|_| ())
+    }
+    pub fn mqtt_credential(&self, alias: &str, secret: &str) -> Result<String> {
+        let auth = self
+            .program
+            .auth
+            .iter()
+            .find(|a| a.alias == alias)
+            .ok_or_else(|| err("unauthenticated"))?;
+        if !self
+            .program
+            .transports
+            .get("MQTT")
+            .is_some_and(|a| a.contains(&auth.alias))
+        {
+            return Err(err("unauthenticated"));
+        };
+        match auth.mode.as_str() {
+            "apiKey" => Ok(format!("ApiKey {secret}")),
+            "jwt" => Ok(format!("Bearer {secret}")),
+            _ => Err(err("unauthenticated")),
+        }
+    }
+    pub fn publish(
+        &mut self,
+        stream: &str,
+        input: serde_json::Value,
+        credential: Option<&str>,
+        transport: &str,
+    ) -> Result<String> {
+        let definition = self
+            .program
+            .streams
+            .get(stream)
+            .ok_or_else(|| err("not_found"))?
+            .clone();
+        self.db.execute_batch("BEGIN IMMEDIATE;")?;
+        let result = (|| -> Result<_> {
+            let (actor_type, actor) =
+                authenticate(&self.program, &self.db, &self.config, credential, transport)?;
+            let mut session = Session {
+                p: &self.program,
+                db: &self.db,
+                actor,
+                actor_type,
+                changes: BTreeMap::new(),
+                cache: BTreeMap::new(),
+                permission_stack: BTreeSet::new(),
+                steps: 0,
+                now: Utc::now().to_rfc3339(),
+                sql: vec![],
+            };
+            let fields = Value::from_json(&input)?.fields()?.clone();
+            let reference = session.create(stream, fields)?;
+            session.authorize()?;
+            session.apply()?;
+            let cutoff = (Utc::now() - chrono::Duration::seconds(definition.duration)).to_rfc3339();
+            self.db.execute(
+                &format!(
+                    "DELETE FROM {} WHERE json_extract(receivedAt,'$') < ?1",
+                    q(stream)
+                ),
+                [cutoff],
+            )?;
+            let groups = definition
+                .topic
+                .split('/')
+                .filter_map(|s| s.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
+                .collect::<Vec<_>>();
+            let mut predicates = vec![];
+            let mut group_values = vec![];
+            for field in groups {
+                predicates.push(format!("{}=?{}", q(field), group_values.len() + 1));
+                group_values.push(storage(&session.raw(&reference, field)?)?);
+            }
+            let where_clause = if predicates.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", predicates.join(" AND "))
+            };
+            let sql = format!(
+                "DELETE FROM {} WHERE id IN (SELECT id FROM {} {} ORDER BY rowid DESC LIMIT -1 OFFSET {})",
+                q(stream),
+                q(stream),
+                where_clause,
+                definition.max_messages
+            );
+            self.db
+                .execute(&sql, rusqlite::params_from_iter(group_values))?;
+            reference.text()
+        })();
+        match result {
+            Ok(id) => {
+                if let Err(e) = self.db.execute_batch("COMMIT;") {
+                    let _ = self.db.execute_batch("ROLLBACK;");
+                    return Err(e.into());
+                };
+                Ok(id)
+            }
+            Err(e) => {
+                let _ = self.db.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+    pub fn publish_topic(
+        &mut self,
+        topic: &str,
+        input: serde_json::Value,
+        credential: Option<&str>,
+    ) -> Result<String> {
+        let mut matches = vec![];
+        for (name, stream) in &self.program.streams {
+            if let Some(fields) = crate::mqtt::topic_inputs(&stream.topic, topic)? {
+                matches.push((name.clone(), fields));
+            }
+        }
+        if matches.len() != 1 {
+            return Err(err("not_found"));
+        };
+        let (name, fields) = matches.pop().unwrap();
+        let mut input = input
+            .as_object()
+            .cloned()
+            .ok_or_else(|| err("invalid_input"))?;
+        for (field, id) in fields {
+            if input
+                .get(&field)
+                .is_some_and(|v| v != &serde_json::Value::String(id.clone()))
+            {
+                return Err(err("invalid_input"));
+            };
+            input.insert(field, serde_json::Value::String(id));
+        }
+        self.publish(&name, serde_json::Value::Object(input), credential, "MQTT")
+    }
+    pub fn mqtt_messages(
+        &mut self,
+        filter: &str,
+        credential: Option<&str>,
+    ) -> Result<Vec<(String, String, serde_json::Value)>> {
+        self.db.execute_batch("BEGIN;")?;
+        let result = (|| -> Result<_> {
+            let (actor_type, actor) =
+                authenticate(&self.program, &self.db, &self.config, credential, "MQTT")?;
+            let mut session = Session {
+                p: &self.program,
+                db: &self.db,
+                actor,
+                actor_type,
+                changes: BTreeMap::new(),
+                cache: BTreeMap::new(),
+                permission_stack: BTreeSet::new(),
+                steps: 0,
+                now: Utc::now().to_rfc3339(),
+                sql: vec![],
+            };
+            let mut messages = vec![];
+            for (name, stream) in &self.program.streams {
+                let sql = format!("SELECT id FROM {} ORDER BY rowid", q(name));
+                let mut statement = self.db.prepare(&sql)?;
+                let ids = statement
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                for id in ids {
+                    let reference = Value::reference(name, &id);
+                    if !session.allowed("READ", &reference, None)? {
+                        continue;
+                    };
+                    let mut segments = vec![];
+                    for segment in stream.topic.split('/') {
+                        if let Some(field) =
+                            segment.strip_prefix('{').and_then(|s| s.strip_suffix('}'))
+                        {
+                            segments.push(session.field(&reference, field, false)?.text()?)
+                        } else {
+                            segments.push(segment.into())
+                        }
+                    }
+                    let topic = segments.join("/");
+                    if !crate::mqtt::matches(filter, &topic) {
+                        continue;
+                    };
+                    let payload = session
+                        .project(
+                            &wire_type(&self.program, &stored_type(&self.program, name)?)?,
+                            reference,
+                        )?
+                        .json()?;
+                    messages.push((format!("{name}:{id}"), topic, payload));
+                }
+            }
+            Ok(messages)
+        })();
+        let _ = self.db.execute_batch("ROLLBACK;");
+        result
+    }
     pub fn execute(
         &mut self,
         name: &str,
@@ -177,6 +375,16 @@ impl Runtime {
         input: serde_json::Value,
         authorization: Option<&str>,
     ) -> Result<(serde_json::Value, Vec<String>)> {
+        self.execute_transport(name, input, authorization, "HTTP")
+            .map(|(out, sql, _)| (out, sql))
+    }
+    pub fn execute_transport(
+        &mut self,
+        name: &str,
+        input: serde_json::Value,
+        authorization: Option<&str>,
+        transport: &str,
+    ) -> Result<(serde_json::Value, Vec<String>, Vec<String>)> {
         let op = self
             .program
             .operations
@@ -186,8 +394,13 @@ impl Runtime {
             .clone();
         self.db.execute_batch("BEGIN IMMEDIATE;")?;
         let result = (|| -> Result<_> {
-            let (actor_type, actor) =
-                authenticate(&self.program, &self.db, &self.config, authorization)?;
+            let (actor_type, actor) = authenticate(
+                &self.program,
+                &self.db,
+                &self.config,
+                authorization,
+                transport,
+            )?;
             let now = Utc::now().to_rfc3339();
             let mut session = Session {
                 p: &self.program,
@@ -236,9 +449,18 @@ impl Runtime {
             }
             let value = session.eval(&op.result, &mut scope, false)?;
             session.authorize()?;
+            let keys = if op.stream.is_some() {
+                value
+                    .list()?
+                    .iter()
+                    .map(Value::text)
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                vec![]
+            };
             let output = session.project(&op.output, value)?.json()?;
             session.apply()?;
-            Ok((output, session.sql))
+            Ok((output, session.sql, keys))
         })();
         match result {
             Ok(v) => {
@@ -268,6 +490,24 @@ fn stored_type(p: &Program, entity: &str) -> Result<Type> {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     ))
+}
+fn wire_type(p: &Program, t: &Type) -> Result<Type> {
+    Ok(match p.resolve(t)? {
+        Type::Named(entity) if p.entities.contains_key(entity) => Type::Id(entity.clone()),
+        Type::Record(fields) => Type::Record(
+            fields
+                .iter()
+                .map(|(name, field)| {
+                    let mut field = field.clone();
+                    field.ty = wire_type(p, &field.ty)?;
+                    Ok((name.clone(), field))
+                })
+                .collect::<Result<_>>()?,
+        ),
+        Type::List(inner, min, max) => Type::List(Box::new(wire_type(p, inner)?), *min, *max),
+        Type::Optional(inner) => Type::Optional(Box::new(wire_type(p, inner)?)),
+        t => t.clone(),
+    })
 }
 fn exists(db: &Connection, entity: &str, id: &str) -> Result<bool> {
     Ok(db
@@ -322,6 +562,7 @@ fn authenticate(
     db: &Connection,
     config: &Config,
     credential: Option<&str>,
+    transport: &str,
 ) -> Result<(String, Value)> {
     if let Some(credential) = credential {
         if credential.len() > 65536 {
@@ -335,11 +576,12 @@ fn authenticate(
             "ApiKey" => "apiKey",
             _ => return Err(err("unauthenticated")),
         };
-        for auth in p
-            .auth
-            .iter()
-            .filter(|a| a.mode == mode && p.http_auth.contains(&a.alias))
-        {
+        for auth in p.auth.iter().filter(|a| {
+            a.mode == mode
+                && p.transports
+                    .get(transport)
+                    .is_some_and(|aliases| aliases.contains(&a.alias))
+        }) {
             let subject = if mode == "apiKey" {
                 if secret.len() < 32 || secret.len() > 4096 {
                     return Err(err("unauthenticated"));
@@ -360,10 +602,12 @@ fn authenticate(
         }
         return Err(err("unauthenticated"));
     }
-    if p.auth
-        .iter()
-        .any(|a| a.mode == "anonymous" && p.http_auth.contains(&a.alias))
-    {
+    if p.auth.iter().any(|a| {
+        a.mode == "anonymous"
+            && p.transports
+                .get(transport)
+                .is_some_and(|aliases| aliases.contains(&a.alias))
+    }) {
         Ok(("Anonymous".into(), Value::Null))
     } else {
         Err(err("unauthenticated"))
@@ -512,7 +756,7 @@ impl Session<'_> {
                     .clone();
                 if let Some((related, foreign)) = &f.relation {
                     let sql = format!(
-                        "SELECT id FROM {} WHERE {}=?1 ORDER BY id",
+                        "SELECT id FROM {} WHERE {}=?1 ORDER BY rowid",
                         q(related),
                         q(foreign)
                     );
@@ -521,20 +765,21 @@ impl Session<'_> {
                     let ids = statement
                         .query_map([id], |r| r.get::<_, String>(0))?
                         .collect::<std::result::Result<Vec<_>, _>>()?;
-                    let mut ids: BTreeSet<_> = ids.into_iter().collect();
+                    let mut ids = ids;
                     if !before {
                         for ((e, id), change) in &self.changes {
                             if e == related {
                                 if change.action == "DELETE"
                                     || change.after.get(foreign).is_some_and(|v| !equal(v, target))
                                 {
-                                    ids.remove(id);
+                                    ids.retain(|existing| existing != id);
                                 } else if change
                                     .after
                                     .get(foreign)
                                     .is_some_and(|v| equal(v, target))
+                                    && !ids.contains(id)
                                 {
-                                    ids.insert(id.clone());
+                                    ids.push(id.clone());
                                 }
                             }
                         }
@@ -876,6 +1121,7 @@ impl Session<'_> {
                 };
                 Ok(Value::List(values[range].to_vec()))
             }
+            "live" => self.eval(arg(0)?, scope, policy),
             "single" => {
                 let value = self.eval(arg(0)?, scope, policy)?;
                 let values = value.list()?;
@@ -1272,6 +1518,19 @@ impl Session<'_> {
                 "invalid_program",
                 "Entity outputs require an explicit record projection",
             )),
+            Type::Id(ref brand) => {
+                let value = if let Value::Ref { entity, id, .. } = value {
+                    if entity != *brand {
+                        return Err(err("invalid_output"));
+                    };
+                    Value::Id(entity, id)
+                } else {
+                    value
+                };
+                self.p
+                    .validate(&t, value, None)
+                    .map_err(|_| err("invalid_output"))
+            }
             _ => self
                 .p
                 .validate(&t, value, None)
@@ -1315,7 +1574,7 @@ impl Session<'_> {
         Ok(())
     }
 }
-fn duration(s: &str) -> Result<i64> {
+pub(crate) fn duration(s: &str) -> Result<i64> {
     if !s.is_ascii() {
         return Err(err("invalid_input"));
     }

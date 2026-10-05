@@ -1,5 +1,5 @@
 # Spustitelná HTTP varianta původního příkladu.
-# Externí pluginy, obrázky, MQTT, WebSocket a eventy jsou v examples/application.flow.
+# Externí pluginy, obrázky a eventy jsou v examples/application.flow.
 # Payment je pouze lokální návrh URL, nikoli integrace platební brány.
 # Jedna syntaxe: [název argumenty...]. Všechny výrazy jsou prefixové.
 # Symboly včetně referencí jsou text. Význam kontroluje až budoucí validátor.
@@ -90,6 +90,7 @@
 [entity Device
   [field id DeviceID]
   [field certificateFingerprint [optional String] [unique]]
+  [field keyHash [optional String] [unique]]
   [field alerts [list DeviceAlert] [inverse DeviceAlert.device]]
   [field access [list DeviceAccess] [inverse DeviceAccess.device]]
   [field status [list DeviceStatus] [stream DeviceStatus.device]]
@@ -119,7 +120,7 @@
     [name "David Miller"] [email "david@example.test"] [country "US"]]
   [record [id "u3"] [identitySubject "idp:u3"] [roles [list]]
     [name "Nora Silva"] [email "nora@example.test"] [country "BR"]]]]
-[seed Device [rows [record [id "mower1"]] [record [id "mower2"]]]]
+[seed Device [rows [record [id "mower1"] [keyHash "0e2adcdce6bbb8e00f024743d68a57644b9b100853fe4a6efc465e22a844b17c"]] [record [id "mower2"]]]]
 [seed DeviceAccess [rows
   [record [id "petra-mower1"] [user "u1"] [device "mower1"] [rights [list READ CONTROL]]]
   [record [id "david-mower2"] [user "u2"] [device "mower2"] [rights [list READ CONTROL]]]]]
@@ -151,11 +152,12 @@
     [jwt [issuer "https://identity.example.com"] [audience "application"]]
     [entity [eq User.identitySubject claims.sub]]]
   [service Service [apiKey] [entity [eq Service.keyHash credential.hash]]]
+  [deviceKey Device [apiKey] [entity [eq Device.keyHash credential.hash]]]
   [device Device [certificate]
     [entity [eq Device.certificateFingerprint certificate.fingerprint]]]
   [anonymous Anonymous]]
 [transport HTTP [auth user service anonymous]]
-[transport MQTT [auth device service]]
+[transport MQTT [auth device deviceKey service]]
 [transport WebSocket [auth user service]]
 
 # Pozitivní práva ze strany aktéra. actor je identita, target cílová entita.
@@ -222,6 +224,7 @@
   
   ]
 [permissions Device
+  [DeviceCommand [READ [when [eq actor target.device]]]]
   [DeviceStatus [CREATE [when [eq actor after.device]]]]
   [DevicePosition [CREATE [when [eq actor after.device]]]]]
 
@@ -352,3 +355,14 @@
   [output [list UserSummary [max 100]]]
   [http GET "/api/users"]
   [result [first [entities User] 100]]]
+
+[query LiveDeviceStatus
+  [input deviceId DeviceID] [output StatusOutput]
+  [websocket "/ws" [source DeviceStatus]]
+  [device [entity $deviceId]]
+  [result [live device.status]]]
+[query LiveDevicePosition
+  [input deviceId DeviceID] [output PositionOutput]
+  [websocket "/ws" [source DevicePosition]]
+  [device [entity $deviceId]]
+  [result [live device.positions]]]

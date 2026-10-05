@@ -1,6 +1,6 @@
 # Flow runtime v Rustu
 
-Jeden proces načte Flow soubor, zkontroluje deklarace, otevře SQLite a automaticky zaregistruje HTTP trasy z `[http ...]`. Business operace zůstávají deklarativní. Permissions se vyhodnocují při čtení a před zápisem celé transakce; žádná route nemá vlastní kopii autorizačních pravidel.
+Jeden proces načte Flow soubor, zkontroluje deklarace, otevře SQLite a automaticky zaregistruje HTTP trasy, MQTT streamy a WebSocket odběry z `[http ...]`. Business operace zůstávají deklarativní. Permissions se vyhodnocují při čtení a před zápisem celé transakce; žádná route nemá vlastní kopii autorizačních pravidel.
 
 ## Spuštění
 
@@ -10,7 +10,7 @@ cargo run -- --check application.flow
 FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
 ```
 
-Výchozí argumenty jsou `application.flow`, `flow.sqlite` a `127.0.0.1:8080`. Server používá HTTP. SQLite je přibalené do Rust závislosti, není potřeba databázový server. Program a databáze jsou svázané otiskem zdroje; změna schématu vyžaduje explicitní migraci nebo novou databázi. Seed se doplní pouze pro dosud neexistující ID, při restartu se data nepřepisují.
+Výchozí argumenty jsou `application.flow`, `flow.sqlite`, HTTP `127.0.0.1:8080` a MQTT `127.0.0.1:1883`. Čtvrtý argument mění MQTT adresu. WebSocket používá stejný listener jako HTTP. Server nepoužívá TLS. SQLite je přibalené do Rust závislosti, není potřeba databázový server. Program a databáze jsou svázané otiskem zdroje; změna schématu vyžaduje explicitní migraci nebo novou databázi. Seed se doplní pouze pro dosud neexistující ID, při restartu se data nepřepisují.
 
 ```sh
 curl http://127.0.0.1:8080/api/products
@@ -25,9 +25,23 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   http://127.0.0.1:8080/api/orders
 ```
 
-`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje devět HTTP operací. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
+`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje devět HTTP operací a dva WebSocket odběry. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
 
-Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Pluginy, obrázky, fronta, MQTT, WebSocket a eventové automaty nejsou součástí této minimální HTTP verze. Jejich operace se při kompilaci odmítnou; `[publish]` v HTTP variantě uloží streamový záznam do SQLite, neposílá MQTT zprávu. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
+Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Pluginy, obrázky, fronta a eventové automaty ještě nejsou přeneseny. Jejich operace se při kompilaci odmítnou. `[publish]` uloží streamový záznam do SQLite, odkud se doručí aktuálně autorizovaným MQTT/WebSocket odběrům. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
+
+## MQTT a WebSocket
+
+MQTT listener implementuje MQTT 3.1.1 s čistou session: CONNECT, PUBLISH s QoS 0/1, SUBSCRIBE, UNSUBSCRIBE, PING a DISCONNECT. Odběry doručuje s QoS 0, podporuje `+` a `#`. Username je alias adaptéru z `[auth]`, password jeho credential. Seedované zařízení `mower1` používá alias `deviceKey` a vývojový klíč `device-key-32-bytes-minimum-123456789`. Může publikovat do `devices/mower1/status` a `devices/mower1/position` a číst své příkazy. Topic určuje brandovanou vazbu `device`; nesmí odporovat payloadu. ID a čas příjmu generuje runtime. Retence respektuje deklarovanou dobu a maximum zpráv pro konkrétní topic.
+
+WebSocket upgrade `/ws` přijímá stejný `Authorization` header jako HTTP, ale ověřuje adaptéry povolené transportem `WebSocket`. Klient posílá například:
+
+```json
+{"id":"status","query":"LiveDeviceStatus","input":{"deviceId":"mower1"}}
+```
+
+Odpověď je `{"id":"status","data":{"online":true,"battery":12}}`. Ukončení odběru používá `{"id":"status","unsubscribe":true}`. Odběr doručí dostupnou historii a potom nové zprávy. Interní ID rozlišují i zprávy se stejným obsahem, do výstupu se přitom vybírají pouze pole výstupního typu.
+
+Oba transporty čtou stejnou SQLite databázi každých 100 ms a při každém průchodu znovu ověřují credentials a aktuální permissions. Odebrání přístupu zastaví další doručování; WebSocket vrátí chybu pro zasažený odběr. Odběry mají omezený počet a paměť. Durable MQTT sessions, QoS 2, retain flag a Last Will zatím nejsou implementované.
 
 ## Jádro
 
@@ -48,4 +62,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Integrační testy pokrývají objednávky, rollback, vlastnictví, autentizaci, práva zařízení, přesná čísla, úzkou projekci a restart SQLite. Formát syntaxe popisuje [LANGUAGE.md](LANGUAGE.md).
+Integrační testy pokrývají objednávky, rollback, vlastnictví, autentizaci, práva zařízení, přesná čísla, úzkou projekci a restart SQLite, streamovou retenci, přenos MQTT → WebSocket a odebrání práv u aktivních odběrů. Formát syntaxe popisuje [LANGUAGE.md](LANGUAGE.md).

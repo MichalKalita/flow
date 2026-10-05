@@ -36,6 +36,12 @@ pub struct Entity {
     pub fields: BTreeMap<String, Field>,
 }
 #[derive(Clone, Debug)]
+pub struct Stream {
+    pub topic: String,
+    pub duration: i64,
+    pub max_messages: usize,
+}
+#[derive(Clone, Debug)]
 pub struct Operation {
     pub name: String,
     pub mutation: bool,
@@ -46,6 +52,7 @@ pub struct Operation {
     pub method: String,
     pub path: String,
     pub status: u16,
+    pub stream: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct Grant {
@@ -71,6 +78,8 @@ pub struct Program {
     pub grants: Vec<Grant>,
     pub auth: Vec<Auth>,
     pub http_auth: Vec<String>,
+    pub transports: BTreeMap<String, Vec<String>>,
+    pub streams: BTreeMap<String, Stream>,
     pub seeds: Vec<(String, Vec<Node>)>,
     pub source: String,
 }
@@ -211,6 +220,8 @@ impl Program {
             grants: vec![],
             auth: vec![],
             http_auth: vec![],
+            transports: BTreeMap::new(),
+            streams: BTreeMap::new(),
             seeds: vec![],
             source: source.into(),
         };
@@ -244,6 +255,22 @@ impl Program {
                         .collect();
                     let mut fs = fields(&field_nodes)?;
                     if n.head() == "stream" {
+                        let topic = opt(n, "mqtt")?.arg(0)?.text()?.to_owned();
+                        let history = opt(n, "history")?;
+                        let duration =
+                            crate::engine::duration(opt(history, "duration")?.arg(0)?.text()?)?;
+                        let max_messages = size(opt(history, "maxMessages")?.arg(0)?)?;
+                        if max_messages == 0 || duration == 0 {
+                            return Err(fail("Stream history must be positive"));
+                        };
+                        p.streams.insert(
+                            name.clone(),
+                            Stream {
+                                topic,
+                                duration,
+                                max_messages,
+                            },
+                        );
                         fs.entry("id".into()).or_insert(Field {
                             ty: Type::Id(name.clone()),
                             relation: None,
@@ -265,16 +292,16 @@ impl Program {
                     .seeds
                     .push((ident(n.arg(0)?.text()?)?, opt(n, "rows")?.args()?.to_vec())),
                 "transport" => {
-                    if n.arg(0)?.text()? == "HTTP" {
-                        if !p.http_auth.is_empty() {
-                            return Err(fail("Duplicate HTTP transport"));
-                        };
-                        p.http_auth = opt(n, "auth")?
-                            .args()?
-                            .iter()
-                            .map(|n| Ok(n.text()?.to_owned()))
-                            .collect::<Result<_>>()?;
-                    }
+                    let name = ident(n.arg(0)?.text()?)?;
+                    let aliases = opt(n, "auth")?
+                        .args()?
+                        .iter()
+                        .map(|n| Ok(n.text()?.to_owned()))
+                        .collect::<Result<Vec<_>>>()?;
+                    if name == "HTTP" {
+                        p.http_auth = aliases.clone()
+                    };
+                    unique(&mut p.transports, name, aliases)?;
                 }
                 "auth" => {
                     for a in n.args()? {
@@ -385,7 +412,7 @@ impl Program {
         if aliases.len() != p.auth.len() {
             return Err(fail("Duplicate auth alias"));
         };
-        for alias in &p.http_auth {
+        for alias in p.transports.values().flatten() {
             if !aliases.contains(alias) {
                 return Err(fail("Unknown HTTP auth alias"));
             };
@@ -468,27 +495,47 @@ impl Program {
             if mutation != n.option("atomic").is_some() {
                 return Err(fail("Mutations require atomic; queries cannot be atomic"));
             };
-            let http = opt(n, "http")?;
-            let method = http.arg(0)?.text()?.to_owned();
-            if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method.as_str())
-                || (!mutation && method != "GET")
-            {
-                return Err(fail("Invalid HTTP method"));
+            let websocket = n.option("websocket");
+            let (method, path, status, stream) = if let Some(ws) = websocket {
+                if mutation {
+                    return Err(fail("WebSocket subscriptions must be queries"));
+                };
+                let stream = opt(ws, "source")?.arg(0)?.text()?.to_owned();
+                if !p.streams.contains_key(&stream) {
+                    return Err(fail("Unknown WebSocket stream"));
+                };
+                (
+                    "WS".to_owned(),
+                    ws.arg(0)?.text()?.to_owned(),
+                    200,
+                    Some(stream),
+                )
+            } else {
+                let http = opt(n, "http")?;
+                let method = http.arg(0)?.text()?.to_owned();
+                if !["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method.as_str())
+                    || (!mutation && method != "GET")
+                {
+                    return Err(fail("Invalid HTTP method"));
+                };
+                let status = http
+                    .option("status")
+                    .map(|n| size(n.arg(0)?))
+                    .transpose()?
+                    .unwrap_or(200) as u16;
+                if !(200..300).contains(&status) {
+                    return Err(fail("Invalid success status"));
+                };
+                (method, http.arg(1)?.text()?.to_owned(), status, None)
             };
-            let path = http.arg(1)?.text()?.to_owned();
             if !path.starts_with('/') || path.contains(['?', '#']) {
-                return Err(fail("Invalid HTTP path"));
+                return Err(fail("Invalid endpoint path"));
             };
-            let status = http
-                .option("status")
-                .map(|n| size(n.arg(0)?))
-                .transpose()?
-                .unwrap_or(200) as u16;
-            if !(200..300).contains(&status) {
-                return Err(fail("Invalid success status"));
-            };
-            let output = ty(opt(n, "output")?.arg(0)?)?;
+            let mut output = ty(opt(n, "output")?.arg(0)?)?;
             p.check_type(&output, false, &mut BTreeSet::new())?;
+            if let Some(stream) = &stream {
+                output = Type::List(Box::new(output), 0, Some(p.streams[stream].max_messages));
+            }
             let mut inputs = BTreeMap::new();
             let mut bindings = BTreeMap::new();
             for part in &n.args()?[1..] {
@@ -506,8 +553,8 @@ impl Program {
                         }
                         unique(&mut inputs, key, (t, default))?;
                     }
-                    "output" | "http" | "atomic" | "result" => {}
-                    "on" | "websocket" | "when" => {
+                    "output" | "http" | "atomic" | "result" | "websocket" => {}
+                    "on" | "when" => {
                         return Err(fail("Only HTTP operations supported in this runtime"));
                     }
                     _ => {
@@ -530,6 +577,9 @@ impl Program {
             }
             let result = opt(n, "result")?.arg(0)?.clone();
             check_expr(&result, false)?;
+            if stream.is_some() && result.head() != "live" {
+                return Err(fail("WebSocket result requires live collection"));
+            };
             if !mutation && has_effect(&result) {
                 return Err(fail("Query cannot write"));
             };
@@ -562,15 +612,17 @@ impl Program {
                 .map(|s| if s.starts_with('{') { "{}" } else { s })
                 .collect::<Vec<_>>()
                 .join("/");
-            if p.operations.iter().any(|o| {
-                o.method == method
-                    && o.path
-                        .split('/')
-                        .map(|s| if s.starts_with('{') { "{}" } else { s })
-                        .collect::<Vec<_>>()
-                        .join("/")
-                        == pattern
-            }) {
+            if method != "WS"
+                && p.operations.iter().any(|o| {
+                    o.method == method
+                        && o.path
+                            .split('/')
+                            .map(|s| if s.starts_with('{') { "{}" } else { s })
+                            .collect::<Vec<_>>()
+                            .join("/")
+                            == pattern
+                })
+            {
                 return Err(fail("Duplicate route"));
             };
             p.operations.push(Operation {
@@ -583,6 +635,7 @@ impl Program {
                 method,
                 path,
                 status,
+                stream,
             });
         }
         for (entity, rows) in &p.seeds {
@@ -853,7 +906,8 @@ fn check_expr(n: &Node, policy: bool) -> Result<()> {
                 return Ok(());
             }
             "list" | "and" | "or" | "concat" => (0, 100000),
-            "not" | "entity" | "new" | "entities" | "single" | "count" | "ago" | "delete" => (1, 1),
+            "not" | "entity" | "new" | "entities" | "single" | "count" | "ago" | "delete"
+            | "live" => (1, 1),
             "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "add" | "sub" | "mul" | "div"
             | "contains" | "can" | "as" | "set" | "create" | "publish" | "last" | "first"
             | "since" | "creates" => (2, 2),
