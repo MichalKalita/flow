@@ -18,8 +18,9 @@ bunx playwright install chromium
 bun run test:e2e
 ```
 
-Commit `runtime/src/admin-assets/` together with frontend source changes. Restart
-the runtime after building: assets are embedded at Rust compile time.
+Commit `runtime/src/admin-assets/` together with frontend source changes. `./start.sh`
+from the repository root runs `bun run build` before compiling the runtime, so
+the embedded assets match the current frontend sources.
 
 Playwright starts the actual Rust executable with temporary SQLite and telemetry
 files, test-only signing credentials, and loopback ports 18081 (HTTP), 11884
