@@ -136,7 +136,7 @@ pub fn number(text: &str) -> Result<Number> {
             ))
         })
         .unwrap_or(Ok((text, 0)))?;
-    if exponent.abs() > 1000 {
+    if exponent.unsigned_abs() > 1000 {
         return Err(Error::new("invalid_input", "Exponent out of bounds"));
     }
     let (digits, scale) = match mantissa.split_once('.') {
@@ -155,6 +155,9 @@ pub fn number(text: &str) -> Result<Number> {
     })
 }
 pub fn decimal(n: &Number) -> Result<String> {
+    if n.numer().bits() > 65536 || n.denom().bits() > 65536 {
+        return Err(Error::new("limit", "Number precision limit"));
+    }
     let mut denominator = n.denom().clone();
     let mut scale = 0u32;
     while denominator.clone() % 2 == BigInt::zero() {

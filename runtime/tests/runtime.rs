@@ -255,3 +255,12 @@ fn sqlite_survives_restart_and_rejects_implicit_schema_change() {
     assert!(Runtime::open(&format!("{APP}\n# changed"), path_str, config()).is_err());
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn extreme_exponents_and_constants_return_errors_without_panicking() {
+    assert!(number("1e-2147483648").is_err());
+    assert!(
+        Program::compile("[type Huge [integer [range 0 [pow [pow [pow 10 100] 100] 100]]]]")
+            .is_err()
+    );
+}

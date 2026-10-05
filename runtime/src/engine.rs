@@ -1316,6 +1316,9 @@ impl Session<'_> {
     }
 }
 fn duration(s: &str) -> Result<i64> {
+    if !s.is_ascii() {
+        return Err(err("invalid_input"));
+    }
     let (n, unit) = s.split_at(s.len().checked_sub(1).ok_or_else(|| err("invalid_input"))?);
     let amount = n.parse::<i64>().map_err(|_| err("invalid_input"))?;
     let multiplier = match unit {

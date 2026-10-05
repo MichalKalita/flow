@@ -105,7 +105,7 @@ fn constant(n: &Node) -> Result<Number> {
     };
     let a = constant(n.arg(0)?)?;
     let b = constant(n.arg(1)?)?;
-    Ok(match n.head() {
+    let value = match n.head() {
         "add" => a + b,
         "sub" => a - b,
         "mul" => a * b,
@@ -118,7 +118,9 @@ fn constant(n: &Node) -> Result<Number> {
             a.pow(e)
         }
         _ => return Err(fail("Invalid numeric constant")),
-    })
+    };
+    crate::value::decimal(&value)?;
+    Ok(value)
 }
 fn size(n: &Node) -> Result<usize> {
     constant(n)?
@@ -613,6 +615,9 @@ impl Program {
         Ok(t)
     }
     fn check_type(&self, t: &Type, relation: bool, seen: &mut BTreeSet<String>) -> Result<()> {
+        if seen.len() > 256 {
+            return Err(fail("Type chain exceeds 256"));
+        }
         match t {
             Type::Named(n) => {
                 if self.entities.contains_key(n) {
