@@ -100,10 +100,13 @@ test("issue JWT, call endpoint and record committed mutation audit", async ({
   await page.getByRole("button", { name: /send request/i }).click();
   await expect(page.locator(".response-body")).toContainText("Petra");
   await expect(page.locator(".response-body")).not.toContainText("David");
+  const users = JSON.parse(await page.locator(".response-body").innerText());
+  expect(users[0].id).toBe(1);
+  expect(typeof users[0].id).toBe("number");
   await page
     .getByLabel("Operation", { exact: true })
     .selectOption("SendCommand");
-  await page.getByLabel("Request path").fill("/api/devices/mower1/commands");
+  await page.getByLabel("Request path").fill("/api/devices/1/commands");
   await page.getByLabel("JSON body").fill('{"action":"START"}');
   await page.getByRole("button", { name: /send request/i }).click();
   await expect(page.locator(".response-body")).toContainText("START");
@@ -148,9 +151,7 @@ test("audit detail exposes decoded values for historical seed records", async ({
 }) => {
   const response = await request.get("/api/audit?entity=User", { headers });
   const rows = await response.json();
-  const user = rows.find(
-    (row: { entity_id: string }) => row.entity_id === "u1",
-  );
+  const user = rows.find((row: { entity_id: number }) => row.entity_id === 1);
   expect(user.after.country).toBe("CZ");
   expect(user.after.roles).toEqual([]);
   await page.getByRole("link", { name: "Mutation audit", exact: true }).click();
@@ -158,7 +159,7 @@ test("audit detail exposes decoded values for historical seed records", async ({
   await expect(page.locator("tbody tr")).toHaveCount(4);
   await page
     .locator("tbody tr")
-    .filter({ has: page.locator(".table-subtitle", { hasText: /^u1$/ }) })
+    .filter({ has: page.locator(".table-subtitle", { hasText: /^1$/ }) })
     .click();
   await expect(page.locator(".drawer")).toContainText('"country": "CZ"');
   await expect(page.locator(".drawer")).not.toContainText('\\"CZ\\"');

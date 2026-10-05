@@ -582,6 +582,9 @@ fn numeric_sequence_survives_delete_restart_and_allocates_before_insert() {
  [result [list first second]]]
 [mutate Delete [input id NoteID] [output Bool] [http DELETE "/notes/{id}"] [atomic]
  [removed [delete [entity $id]]] [result true]]
+[mutate Boost [output [list Output [max 2]]] [http POST "/boost"] [atomic]
+ [first [create Note [record [id 100]]]]
+ [second [create Note [record [id [new NoteID]]]]] [result [list first second]]]
 "#;
     let path = std::env::temp_dir().join(format!("flow-numeric-{}.sqlite", uuid::Uuid::new_v4()));
     let mut runtime = Runtime::open(source, path.to_str().unwrap(), Config::default()).unwrap();
@@ -598,6 +601,10 @@ fn numeric_sequence_survives_delete_restart_and_allocates_before_insert() {
     );
     let pair = runtime.execute("Pair", json!({}), None).unwrap();
     assert_eq!(pair, json!([{"id":13},{"id":14}]));
+    assert_eq!(
+        runtime.execute("Boost", json!({}), None).unwrap(),
+        json!([{"id":100},{"id":101}])
+    );
     let db = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(
         db.query_row("SELECT typeof(id) FROM Note WHERE id=12", [], |row| row

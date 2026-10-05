@@ -22,7 +22,7 @@ if [ "${#FLOW_ADMIN_TOKEN}" -lt 32 ]; then
 fi
 
 : "${FLOW_APPLICATION:=runtime/application.flow}"
-: "${FLOW_DATABASE:=data/flow.sqlite}"
+: "${FLOW_DATABASE:=data/flow-numeric.sqlite}"
 : "${FLOW_HTTP_BIND:=127.0.0.1:8080}"
 : "${FLOW_MQTT_BIND:=127.0.0.1:1883}"
 : "${FLOW_ADMIN_BIND:=127.0.0.1:9090}"

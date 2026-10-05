@@ -30,3 +30,11 @@ Rust API `syntax::parse(&str)` vrací `Result<Vec<Node>>`. AST obsahuje pouze `N
 Parser používá explicitní zásobník. Limity jsou 4 MiB zdroje, 256 úrovní a 100 000 průchodů scanneru. Soubor se musí načíst jako UTF-8. Runtime má samostatný rozpočet 100 000 vyhodnocovacích kroků v požadavku. Přesná čísla mají omezenou délku a exponent; dělení s nekonečným desetinným rozvojem se odmítne, nezaokrouhluje se potichu.
 
 Podporu doménových konstrukcí a omezení aktuální HTTP verze popisuje [README.md](README.md). Plný původní návrh je v [examples/application.flow](../examples/application.flow). Zvýraznění syntaxe pro VS Code je v [editors/vscode](../editors/vscode).
+
+## Numeric identity values
+
+`[type UserID [id User]]` declares a branded numeric identity. Seeds use `[id 1]`,
+references use integer values such as `[owner 1]`, and JSON clients send
+`{"userId":1}`. Quoted, fractional, zero, negative and unsafe integer IDs are
+rejected. `[new UserID]` reserves the next transactional ID for that entity.
+Entity brands are part of runtime values, not encoded into prefixes in the ID.

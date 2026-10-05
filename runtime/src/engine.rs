@@ -827,16 +827,16 @@ fn request_id() -> i64 {
     .max(now - 1)
         + 1
 }
-fn next_id(db: &Connection, entity: &str) -> Result<i64> {
+fn next_id(db: &Connection, entity: &str, floor: i64) -> Result<i64> {
     if entity == "Request" {
         return Ok(request_id());
     }
     let sql = format!(
-        "INSERT INTO _flow_id_sequences(entity,value) VALUES(?1,(SELECT COALESCE(MAX(id),0)+1 FROM {})) ON CONFLICT(entity) DO UPDATE SET value=MAX(value,(SELECT COALESCE(MAX(id),0) FROM {}))+1 RETURNING value",
+        "INSERT INTO _flow_id_sequences(entity,value) VALUES(?1,(SELECT MAX(COALESCE(MAX(id),0),?2)+1 FROM {})) ON CONFLICT(entity) DO UPDATE SET value=MAX(value,(SELECT COALESCE(MAX(id),0) FROM {}),?2)+1 RETURNING value",
         q(entity),
         q(entity)
     );
-    let id: i64 = db.query_row(&sql, [entity], |row| row.get(0))?;
+    let id: i64 = db.query_row(&sql, rusqlite::params![entity, floor], |row| row.get(0))?;
     if id > 9_007_199_254_740_991 {
         return Err(err("limit"));
     }
@@ -1037,6 +1037,16 @@ fn wire(p: &Program, t: &Type, v: Value) -> Result<Value> {
     })
 }
 impl Session<'_> {
+    fn allocate_id(&self, entity: &str) -> Result<i64> {
+        let floor = self
+            .changes
+            .keys()
+            .filter(|(kind, _)| kind == entity)
+            .map(|(_, id)| *id)
+            .max()
+            .unwrap_or(0);
+        next_id(self.db, entity, floor)
+    }
     fn step(&mut self) -> Result<()> {
         self.steps += 1;
         if self.steps > 100000 {
@@ -1475,7 +1485,7 @@ impl Session<'_> {
                 let Type::Id(entity) = self.p.resolve(&t)? else {
                     return Err(err("invalid_program"));
                 };
-                Ok(Value::Id(entity.clone(), next_id(self.db, entity)?))
+                Ok(Value::Id(entity.clone(), self.allocate_id(entity)?))
             }
             "as" => {
                 let value = self.eval(arg(1)?, scope, policy)?;
@@ -1545,7 +1555,7 @@ impl Session<'_> {
                         else {
                             return Err(err("invalid_input"));
                         };
-                        let id = next_id(self.db, "File")?;
+                        let id = self.allocate_id("File")?;
                         let reference = self.create(
                             "File",
                             BTreeMap::from([
@@ -1801,7 +1811,7 @@ impl Session<'_> {
                     return Err(err("invalid_input"));
                 };
                 let v = if name == "id" {
-                    Value::Id(entity.into(), next_id(self.db, entity)?)
+                    Value::Id(entity.into(), self.allocate_id(entity)?)
                 } else {
                     Value::Str(self.now.clone())
                 };

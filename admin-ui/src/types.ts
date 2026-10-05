@@ -107,7 +107,7 @@ export type Audit = {
   transport: string;
   actor: unknown;
   entity: string;
-  entity_id: string;
+  entity_id: number;
   action: string;
   transaction_id: string;
   before: unknown;

@@ -1,34 +1,75 @@
-# Flow runtime v Rustu
+# Flow runtime in Rust
 
-Jeden proces načte Flow soubor, zkontroluje deklarace, otevře SQLite a automaticky zaregistruje HTTP trasy, MQTT streamy a WebSocket odběry z `[http ...]`. Business operace zůstávají deklarativní. Permissions se vyhodnocují při čtení a před zápisem celé transakce; žádná route nemá vlastní kopii autorizačních pravidel.
+A single process loads a Flow program, validates declarations, opens SQLite and
+registers HTTP, MQTT and WebSocket operations. Business operations are declarative.
+Central permissions govern reads and complete transactions across all transports.
 
-## Spuštění
+## Running
+
+Run `./start.sh` from the repository root. The script loads `.env`, builds the
+embedded admin frontend and starts a release runtime. The default database is
+`data/flow-numeric.sqlite`. For a direct invocation:
 
 ```sh
 cd runtime
 cargo run -- --check application.flow
 export FLOW_ADMIN_TOKEN="$(openssl rand -hex 32)"
-FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' FLOW_AUTOMATION_KEY='automation-key-long-enough-123456789' cargo run -- application.flow flow.sqlite 127.0.0.1:8080
+FLOW_JWT_SECRET='development-key-32-bytes-minimum-123456' FLOW_AUTOMATION_KEY='automation-key-long-enough-123456789' cargo run -- application.flow flow-numeric.sqlite 127.0.0.1:8080
 ```
 
-Výchozí argumenty jsou `application.flow`, `flow.sqlite`, HTTP `127.0.0.1:8080` a MQTT `127.0.0.1:1883`. Čtvrtý argument mění MQTT adresu. WebSocket používá stejný listener jako HTTP. Server nepoužívá TLS. SQLite je přibalené do Rust závislosti, není potřeba databázový server. Program a databáze jsou svázané otiskem zdroje; změna schématu vyžaduje explicitní migraci nebo novou databázi. Seed se doplní pouze pro dosud neexistující ID, při restartu se data nepřepisují.
+Arguments are the program, database, HTTP bind address and optional MQTT bind
+address. HTTP defaults to `127.0.0.1:8080`, MQTT to `127.0.0.1:1883`; WebSocket
+uses the HTTP listener. SQLite is bundled. TLS is not implemented. Program and
+schema versions are checked at startup; incompatible databases fail without
+rewriting application data. Seed rows only fill missing IDs.
+
+## Numeric IDs
+
+Every application entity ID and reference is a positive integer between 1 and
+9,007,199,254,740,991, stored in SQLite as `INTEGER`. This limit preserves exact
+values in JavaScript clients. JSON input and output use numbers, not quoted IDs.
+HTTP path/query parameters and MQTT topic segments are parsed as numeric IDs.
+JWT subjects remain external identity strings, independent of local entity IDs.
+WebSocket subscription labels and audit transaction correlation tokens are also
+protocol metadata rather than entity IDs.
+
+IDs retain their entity brand inside the runtime: `UserID(1)` and `ProductID(1)`
+are different typed values. A plain integer is branded by its declared input or
+field type. A value already carrying another entity's brand is rejected. This
+check does not depend on textual prefixes. Full static inference for every
+expression is still pending; computed values are validated at runtime.
+
+`[new OrderID]` reserves an integer using a SQLite sequence in the enclosing
+transaction, before records are inserted. Multiple reservations are distinct.
+Committed allocations survive restarts and deletion, and rollback also rolls
+back allocation. Sequences start above existing seeded IDs. `request.id` is a
+numeric time-based correlation value; it is not an entity sequence.
+
+Legacy text-ID databases are not migrated in this step. Use a new database;
+existing databases remain available unchanged. `start.sh` and `.env.example`
+use `data/flow-numeric.sqlite` to keep the previous database separate.
 
 ```sh
 curl http://127.0.0.1:8080/api/products
-curl http://127.0.0.1:8080/api/users
-```
-
-Produkty jsou veřejné. Anonymní čtení uživatelů vrátí `[]`; přihlášený uživatel vidí pouze sebe. JWT používá HS256, klíč z `FLOW_JWT_SECRET`, issuer `https://identity.example.com`, audience `application` a subject `idp:u1`, `idp:u2` nebo `idp:u3` pro seedované identity. Kontroluje se podpis, algoritmus, issuer, audience, expirace a případné `nbf`. Identita a role se načítají z databáze, nikoliv z klientských parametrů. Neplatný token nikdy nespadne do anonymního přístupu. API klíče používají `Authorization: ApiKey ...` a SHA-256 lookup podle deklarace v `[auth]`.
-
-```sh
 curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"userId":"u1","items":[{"productId":"p1","quantity":2}],"paymentMethod":"CARD"}' \
+  -d '{"userId":1,"items":[{"productId":1,"quantity":2}],"paymentMethod":"CARD"}' \
   http://127.0.0.1:8080/api/orders
 ```
 
-`application.flow` je spustitelná HTTP varianta: produkty, uživatelé, objednávky, sklad, historie zařízení a uložení příkazů. Obsahuje deset HTTP operací a dva WebSocket odběry a eventový automat. Vytvoření objednávky seskupí duplicitní položky košíku, sníží sklad a vytvoří objednávku v jedné transakci. Payment URL je pouze lokální výpočet.
+Products are public. Anonymous user reads return `[]`; a signed-in user sees only
+that user's record. HS256 JWT validation checks the configured key, issuer,
+audience, expiration and optional `nbf`. The example uses issuer
+`https://identity.example.com`, audience `application` and subjects `idp:u1`,
+`idp:u2`, `idp:u3` and `idp:catalog-admin`. User IDs are respectively 1, 2, 3 and 4.
+Roles come from SQLite, not client claims or request parameters. API keys use
+`Authorization: ApiKey ...` and a SHA-256 lookup through the declared adapter.
 
-Původní širší deklarace z Elixir prototypu je zachována v [examples/application.flow](../examples/application.flow). Externí fronta ještě není přenesena. Volání externích pluginů se zatím odmítá. Nativní pluginy `Payment.createUrl`, `Image.resize` a `Files.put` už fungují podle deklarovaných kontraktů. `[publish]` uloží streamový záznam do SQLite, odkud se doručí aktuálně autorizovaným MQTT/WebSocket odběrům. Certifikátová autentizace se přes nezabezpečené HTTP nepřijímá. Elixir checkpoint je dostupný v historii Gitu.
+The runnable example covers products, users, orders, stock, device histories,
+commands and an event automation. Orders group duplicate cart rows, decrease
+stock and insert the order atomically. Payment URLs are local calculations.
+Native plugins implement `Payment.createUrl`, `Image.resize` and `Files.put`;
+external plugin implementations are not yet supported. Certificate authentication
+is rejected over the unsecured public transport.
 
 ## Fotografie a pluginy
 
@@ -36,25 +77,41 @@ Původní širší deklarace z Elixir prototypu je zachována v [examples/applic
 
 Seedovaný katalogový administrátor má JWT subject `idp:catalog-admin`. Uživatel bez role `CATALOG_ADMIN` nemůže fotografii uložit. Výsledné `File.url` vede na `/api/files/{id}`; download znovu ověří aktuální `READ File` před čtením BLOBu. Neautorizovaný upload nezanechá metadata ani soubor.
 
-## MQTT a WebSocket
+## MQTT and WebSocket
 
-MQTT listener implementuje MQTT 3.1.1 s čistou session: CONNECT, PUBLISH s QoS 0/1, SUBSCRIBE, UNSUBSCRIBE, PING a DISCONNECT. Odběry doručuje s QoS 0, podporuje `+` a `#`. Username je alias adaptéru z `[auth]`, password jeho credential. Seedované zařízení `mower1` používá alias `deviceKey` a vývojový klíč `device-key-32-bytes-minimum-123456789`. Může publikovat do `devices/mower1/status` a `devices/mower1/position` a číst své příkazy. Topic určuje brandovanou vazbu `device`; nesmí odporovat payloadu. ID a čas příjmu generuje runtime. Retence respektuje deklarovanou dobu a maximum zpráv pro konkrétní topic.
+MQTT 3.1.1 supports clean sessions, CONNECT, QoS 0/1 PUBLISH, SUBSCRIBE,
+UNSUBSCRIBE, PING and DISCONNECT. Delivery uses QoS 0 and `+`/`#` topic filters.
+Username is the auth adapter alias and password its credential. Seeded device 1
+uses `deviceKey` and the development key
+`device-key-32-bytes-minimum-123456789`. It can publish `devices/1/status` and
+`devices/1/position` and read its commands. Numeric topic references must agree
+with the payload. Stream IDs and receipt timestamps are generated by the runtime.
 
-WebSocket upgrade `/ws` přijímá stejný `Authorization` header jako HTTP, ale ověřuje adaptéry povolené transportem `WebSocket`. Klient posílá například:
+WebSocket upgrade `/ws` uses the Authorization header and adapters permitted by
+its transport declaration. Subscribe with:
 
 ```json
-{"id":"status","query":"LiveDeviceStatus","input":{"deviceId":"mower1"}}
+{"id":"status","query":"LiveDeviceStatus","input":{"deviceId":1}}
 ```
 
-Odpověď je `{"id":"status","data":{"online":true,"battery":12}}`. Ukončení odběru používá `{"id":"status","unsubscribe":true}`. Odběr doručí dostupnou historii a potom nové zprávy. Interní ID rozlišují i zprávy se stejným obsahem, do výstupu se přitom vybírají pouze pole výstupního typu.
+Replies contain `{"id":"status","data":{"online":true,"battery":12}}`.
+Unsubscribe with `{"id":"status","unsubscribe":true}`. The subscription label
+is client protocol metadata; the `deviceId` is a numeric, branded application ID.
+History precedes live messages; current permissions are rechecked for delivery.
 
-Oba transporty čtou stejnou SQLite databázi každých 100 ms a při každém průchodu znovu ověřují credentials a aktuální permissions. Odebrání přístupu zastaví další doručování; WebSocket vrátí chybu pro zasažený odběr. Odběry mají omezený počet a paměť. Durable MQTT sessions, QoS 2, retain flag a Last Will zatím nejsou implementované.
+## Event automations
 
-## Eventové automaty
+`[on DeviceStatus [actor [service 1]]]` runs a mutation after a stream record is
+created. `[when ...]` supplies a pure condition. The verified service credential
+comes from trusted `Config.event_credentials` under `service:1`, never from the
+message payload. Identity and permissions are checked for the automation, and
+its actor configuration is validated at startup.
 
-`[on DeviceStatus [actor [service "device-automation"]]]` spouští operaci po vytvoření streamového záznamu. `[when ...]` určuje čistou podmínku. Runtime používá samostatné credentials z důvěryhodné konfigurace `Config.event_credentials`, s klíčem `service:device-automation`; klient je nemůže dodat v payloadu. Service se znovu autentizuje a její aktuální permissions se vynucují pro čtení eventu i všechny změny automatu. Konfigurace a vazba na deklarované ID se ověří už při startu.
-
-Hlavní aplikace obsahuje `LowBattery`: pod 20 % vytvoří `DeviceAlert`. Seedovaná service má vývojový klíč `automation-key-long-enough-123456789`, předaný CLI přes `FLOW_AUTOMATION_KEY`. Stream a navazující automat se potvrzují atomicky; odmítnutí permissions vrátí celou publikaci zpět. Eventové řetězení má limit 256 událostí na transakci.
+The example `LowBattery` creates a DeviceAlert below 20% battery. The seeded
+service key is `automation-key-long-enough-123456789`, configured by
+`FLOW_AUTOMATION_KEY`. Stream and automation commit atomically; denied automation
+permissions roll back the entire publish. Event chains are capped at 256 per
+transaction.
 
 ## Jádro
 

@@ -48,7 +48,7 @@ export function ConsolePage({
                     ? []
                     : i.type === "Bool"
                       ? false
-                      : i.type.includes("Number")
+                      : i.type.includes("Number") || i.type.startsWith("Id(")
                         ? 1
                         : ""),
               ]),

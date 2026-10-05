@@ -1,9 +1,7 @@
-# Spustitelná HTTP varianta původního příkladu.
-# Externí pluginy, obrázky a eventy jsou v examples/application.flow.
-# Payment je pouze lokální návrh URL, nikoli integrace platební brány.
-# Jedna syntaxe: [název argumenty...]. Všechny výrazy jsou prefixové.
-# Symboly včetně referencí jsou text. Význam kontroluje až budoucí validátor.
-# Ceny jsou v CZK, se dvěma desetinnými místy; ID jsou brandované typy.
+# Runnable application with HTTP, MQTT, WebSocket and transactional automations.
+# Payment computes a local URL; it does not integrate a payment gateway.
+# Forms and expressions use prefix syntax: [name arguments...].
+# Prices are in CZK with two decimal places; entity IDs are branded integers.
 
 [type UserID [id User]]
 [type ServiceID [id Service]]
@@ -146,7 +144,7 @@
   [field device Device]
   [field action MowerAction]]
 
-# Ověření credentials dodává hostitel, nikoliv parser.
+# The host verifies credentials; the parser never authenticates requests.
 [auth
   [user User
     [jwt [issuer "https://identity.example.com"] [audience "application"]]
@@ -160,7 +158,7 @@
 [transport MQTT [auth device deviceKey service]]
 [transport WebSocket [auth user service]]
 
-# Pozitivní práva ze strany aktéra. actor je identita, target cílová entita.
+# Positive actor grants: actor is the identity and target is the entity.
 [permissions *
   [Product [READ [when true]]]]
 
@@ -228,13 +226,13 @@
   [DeviceStatus [CREATE [when [eq actor after.device]]]]
   [DevicePosition [CREATE [when [eq actor after.device]]]]]
 
-# Kontrakty pluginů. Parser nic nevolá ani nevykonává.
+# Plugin contracts are declarative; the parser never executes them.
 
 
 
 
 
-# Výstupní typy určují projekci. Význam a typovou správnost ověří až validátor.
+# Output types define projections and are validated by the runtime.
 [type UserSummary [record [field id UserID] [field name String]]]
 [type ProductSummary [record [field id ProductID] [field name String]]]
 [type OrderSummary [record
@@ -264,7 +262,7 @@
 [type CommandOutput [record [field id CommandID] [field action MowerAction]]]
 [type CartItem [record [field productId ProductID] [field quantity Quantity]]]
 
-# Samostatné deklarativní operace s typovaným výstupem, bez resolverů a příkazů.
+# Declarative operations have typed outputs and no imperative resolvers.
 [query Order
   [input orderId OrderID]
   [output OrderOutput]

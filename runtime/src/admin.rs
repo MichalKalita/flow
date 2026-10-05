@@ -110,7 +110,7 @@ async fn overview(State(state): State<Admin>) -> Response {
         let mut endpoints=runtime.program.operations.iter().filter(|op|op.event.is_none()).map(|op| {
             let inputs=op.inputs.iter().map(|(name,(ty,default))| {
                 let default=default.as_ref().and_then(|n|crate::program::literal(n).ok()).and_then(|v|v.json().ok());
-                json!({"name":name,"type":format!("{ty:?}"),"default":default})
+                json!({"name":name,"type":format!("{:?}", runtime.program.resolve(ty).unwrap_or(ty)),"default":default})
             }).collect::<Vec<_>>();
             json!({"name":op.name,"method":op.method,"path":op.path,"mutation":op.mutation,"status":op.status,"inputs":inputs})
         }).collect::<Vec<_>>();

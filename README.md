@@ -15,7 +15,9 @@ runs a release build with one cargo job. Relative configuration paths are
 resolved from the repository root. Bun must be on `PATH`.
 Application HTTP defaults to `127.0.0.1:8080`, MQTT to `127.0.0.1:1883`, and the
 admin dashboard to `127.0.0.1:9090`. The local `.env` and generated `data/` are
-excluded from Git. Credentials in the example are for development.
+excluded from Git. Credentials in the example are for development. Application
+IDs are numeric; the default database is `data/flow-numeric.sqlite`. Legacy
+text-ID databases are kept separate and are not migrated.
 
 Direct Cargo invocation:
 
