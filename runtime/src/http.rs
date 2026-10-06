@@ -110,9 +110,18 @@ fn parameter(
         .find(|op| op.name == operation)
         .and_then(|op| op.inputs.get(key))
         .map(|(ty, _)| ty);
-    if let Some(ty) = ty
-        && matches!(guard.program.resolve(ty)?, crate::program::Type::Id(_))
-    {
+    let id_type = if let Some(mut ty) = ty {
+        loop {
+            match guard.program.resolve(ty)? {
+                crate::program::Type::Optional(inner) => ty = inner,
+                crate::program::Type::Id(_) => break true,
+                _ => break false,
+            }
+        }
+    } else {
+        false
+    };
+    if id_type {
         let text = value
             .as_str()
             .ok_or_else(|| Error::new("invalid_input", "Invalid numeric ID"))?;
@@ -159,7 +168,11 @@ pub(crate) async fn dispatch(
     };
     let mut active = observer.gauge_guard("http_inflight");
     active.set(1);
-    let mut response = dispatch_inner(State(runtime), request).await;
+    let mut response = if let Some(response) = crate::frontend::dispatch(&runtime, &request) {
+        response
+    } else {
+        dispatch_inner(State(runtime), request).await
+    };
     observer.request(&endpoint, response.status().as_u16(), start.elapsed(), &id);
     response
         .headers_mut()
@@ -303,6 +316,7 @@ async fn dispatch_inner(State(runtime): State<Arc<Mutex<Runtime>>>, request: Req
                 "not_found" => 404,
                 "invalid_input" | "invalid_output" | "limit" => 400,
                 "conflict" => 409,
+                "unavailable" => 503,
                 _ => 500,
             };
             if status == 500 {

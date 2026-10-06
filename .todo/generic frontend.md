@@ -51,3 +51,7 @@ Use the shared [settings/defaults and setup-wizard contract](variables-and-secre
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
+
+## Delivered initial slice
+
+An initial explicit string-field CRUD renderer is implemented on the public project listener. It uses ordinary application credentials, version-checked mutations, and bounded cursor pages. Contacts exercises it in real-runtime browser tests. Arbitrary schema forms, relationships, broader authentication flows, and the full frontend specification remain outstanding.

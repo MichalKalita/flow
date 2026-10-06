@@ -15,6 +15,10 @@ pub enum Type {
         height: u32,
     },
     String,
+    Text {
+        min_bytes: usize,
+        max_bytes: usize,
+    },
     Bool,
     DateTime,
     Named(String),
@@ -202,6 +206,21 @@ fn ty(n: &Node) -> Result<Type> {
         });
     };
     Ok(match n.head() {
+        "string" => {
+            let min_bytes = n
+                .option("minBytes")
+                .map(|n| size(n.arg(0)?))
+                .transpose()?
+                .unwrap_or(0);
+            let max_bytes = size(opt(n, "maxBytes")?.arg(0)?)?;
+            if min_bytes > max_bytes || max_bytes > 1024 * 1024 {
+                return Err(fail("Invalid string byte limits"));
+            }
+            Type::Text {
+                min_bytes,
+                max_bytes,
+            }
+        }
         "image" => {
             let max_bytes = constant(opt(n, "maxBytes")?.arg(0)?)?
                 .to_integer()
@@ -962,6 +981,13 @@ impl Program {
                     bytes, *max_bytes, *width, *height,
                 )?)
             }
+            Type::Text {
+                min_bytes,
+                max_bytes,
+            } => match value {
+                Value::Str(s) if (*min_bytes..=*max_bytes).contains(&s.len()) => Value::Str(s),
+                _ => return Err(invalid()),
+            },
             Type::String => match value {
                 Value::Str(s) => Value::Str(s),
                 _ => return Err(invalid()),
@@ -1123,9 +1149,9 @@ fn check_expr(n: &Node, policy: bool) -> Result<()> {
             | "live" => (1, 1),
             "eq" | "ne" | "gt" | "ge" | "lt" | "le" | "add" | "sub" | "mul" | "div"
             | "contains" | "can" | "as" | "set" | "create" | "publish" | "last" | "first"
-            | "since" | "creates" | "invoke" => (2, 2),
+            | "since" | "creates" | "invoke" | "expectVersion" => (2, 2),
             "only" => (1, 1000),
-            "any" | "all" | "where" | "flatMap" | "sum" | "order" => (3, 3),
+            "any" | "all" | "where" | "flatMap" | "sum" | "order" | "page" => (3, 3),
             "map" => (3, 1000),
             "groupSum" => (4, 4),
             _ => return Err(fail(format!("Unsupported expression {h}"))),
@@ -1134,7 +1160,12 @@ fn check_expr(n: &Node, policy: bool) -> Result<()> {
         if argc < min || argc > max {
             return Err(fail(format!("Wrong arity for {h}")));
         };
-        if policy && matches!(h, "create" | "set" | "delete" | "publish" | "new" | "map") {
+        if policy
+            && matches!(
+                h,
+                "create" | "set" | "delete" | "publish" | "new" | "map" | "expectVersion"
+            )
+        {
             return Err(fail("Permission must be pure"));
         };
         // Permission recursion under negation is deliberately rejected rather than assigned unsafe semantics.

@@ -51,3 +51,9 @@ pub mod projects;
 pub(crate) mod dashboard;
 
 pub mod server_state;
+
+pub mod backups;
+
+pub mod frontend;
+
+pub mod catalog;

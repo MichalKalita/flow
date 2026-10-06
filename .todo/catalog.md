@@ -55,3 +55,7 @@ Use the shared [settings/defaults and setup-wizard contract](variables-and-secre
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
+
+## Delivered initial slice
+
+The bundled Contacts template now installs from protected administration with one click and opens a usable permission-checked CRUD frontend. Install retries are idempotent; separate instances have isolated databases, identities, and generated keys. Runtime integration and browser tests cover installation, edits, backup, restoration, and restart. Additional templates, update/migration lifecycle, remote catalogs, and HA remain outstanding.

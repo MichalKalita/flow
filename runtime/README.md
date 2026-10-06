@@ -308,3 +308,24 @@ Server settings support name, bounded local-backup retention, revision-checked u
 ```
 
 The protected `POST /api/settings/secret` API sets a secret using `project`, `name`, and `value`. Reading settings returns only masked previews, never full values or password hashes. Environment-variable mappings continue to work. Peer identity is preparation for the planned HA feature; generation of keys alone does not implement replication or failover.
+
+## Application catalog and frontend
+
+The protected Applications page installs the bundled Contacts template with one click. Each installation has its own folder, database, owner identity, and generated signing key. Retry identifiers prevent duplicate installations. Templates are compiled and validated before publication. Contacts supports creation, editing, deletion, and bounded numeric cursor pagination. Writes use normal application permissions and transactional audit; stale edits return HTTP 409.
+
+The application opens at `/<project>/app` on the public listener. Administration passes a short-lived ordinary application credential to the opened window without placing it in the URL. The public application never receives the admin credential. A project can opt into the small explicit frontend contract in `project.json`: title, item label, string fields, and declared CRUD operation aliases. This initial renderer supports text, email, telephone, and multiline text fields; it is not yet a complete arbitrary-schema frontend. Launch links currently use the browser's server hostname and the public listener port.
+
+## Local backup and recovery
+
+Set up an owner password before creating backups. The Backups page captures all active hosted projects, their validated programs/manifests, complete SQLite databases (including audit, allocation sequences, and blobs), encrypted server settings, and password-encrypted recovery keys. All project locks define a common capture boundary. Completed backups are published only after files are synchronized. A signed versioned manifest contains sizes and SHA-256 checksums. Local copies live in `backups/` beside the server directory; the default retains seven completed backups. Business databases in this directory are not encrypted: protect the private directory and destination disk. Secret settings and recovery keys remain encrypted.
+
+“Check restore” reconstructs and validates an isolated temporary copy using the owner password from capture time. It checks signatures, checksums, supported runtime version, database integrity, schemas, types/references, and secret recovery. “Restore this backup” shows the selected capture time and requires confirmation. It prepares a current backup, pauses application work, preserves current directories as recovery copies, and restarts the runtime into the validated generation. A durable journal allows interrupted activation to complete or roll back on startup. Known committed ID sequence boundaries are carried forward so historical restoration does not reuse later allocated IDs. Logs are not replaced by business restoration.
+
+For recovery to an empty directory on a replacement host:
+
+```sh
+flow-runtime --restore /safe/backups/BACKUP_ID /safe/owner-password.txt /safe/restored
+FLOW_SERVER_DIR=/safe/restored/server flow-runtime /safe/restored/projects /safe/restored/databases 127.0.0.1:8080
+```
+
+The password file contains the capture-time owner password. Protect it separately. Do not run two active installations with the same recovered server identity. A local exclusive runtime lease prevents competing processes sharing the same server state location. Historical restore intentionally reverts business state; it cannot recover writes newer than the available backup or undo external actions. Remote destinations, scheduling, off-server continuous history, HA recovery, and single-project restoration remain planned. Resource acceptance on the minimum production host still needs a deployment recovery drill.

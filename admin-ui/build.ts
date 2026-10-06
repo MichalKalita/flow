@@ -25,3 +25,14 @@ const css = Bun.spawn(
 if ((await css.exited) !== 0) throw new Error("Tailwind build failed");
 await copyFile("index.html", `${out}index.html`);
 console.log("Embedded control-plane assets built.");
+
+const application = await Bun.build({
+  entrypoints: ["./src/application.tsx"],
+  outdir: out,
+  naming: "application.js",
+  target: "browser",
+  minify: true,
+});
+if (!application.success) throw new Error(application.logs.join("\n"));
+await copyFile("src/application.css", `${out}application.css`);
+await copyFile("application.html", `${out}application.html`);

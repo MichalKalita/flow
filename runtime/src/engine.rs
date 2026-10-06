@@ -9,6 +9,15 @@ use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicBool, Ordering},
+};
+#[derive(Default)]
+pub struct RuntimeGate {
+    pub stopped: AtomicBool,
+    pub lock: RwLock<()>,
+}
 
 fn err(code: &'static str) -> Error {
     Error::new(code, code)
@@ -27,6 +36,9 @@ pub struct Runtime {
     pub(crate) db: Connection,
     config: Config,
     pub observability: crate::observability::Observability,
+    pub(crate) frontend: Option<serde_json::Value>,
+    pub(crate) suspended: bool,
+    pub(crate) gate: Option<Arc<RuntimeGate>>,
 }
 #[derive(Clone, Debug)]
 struct Change {
@@ -62,6 +74,7 @@ impl Runtime {
         Self::open_inner(source, path, config, false)
     }
     pub fn reload(&mut self, source: &str, config: Config) -> Result<()> {
+        self.require_available()?;
         let program = Program::compile(source)?;
         for (name, entity) in &self.program.entities {
             let next = program.entities.get(name).ok_or_else(|| {
@@ -120,6 +133,7 @@ impl Runtime {
         }
         let mut candidate = Self::open_inner(source, &path, config, true)?;
         candidate.observability = self.observability.clone();
+        candidate.gate = self.gate.clone();
         *self = candidate;
         Ok(())
     }
@@ -333,7 +347,117 @@ impl Runtime {
             db,
             config,
             observability: Default::default(),
+            frontend: None,
+            suspended: false,
+            gate: None,
         })
+    }
+    pub(crate) fn suspend(&mut self) -> Result<()> {
+        self.suspended = true;
+        self.db = Connection::open_in_memory()?;
+        Ok(())
+    }
+    pub(crate) fn require_available(&self) -> Result<()> {
+        if self.suspended
+            || self
+                .gate
+                .as_ref()
+                .is_some_and(|gate| gate.stopped.load(Ordering::Acquire))
+        {
+            Err(Error::new("unavailable", "This project is restarting"))
+        } else {
+            Ok(())
+        }
+    }
+    pub fn snapshot_to(&self, path: &std::path::Path) -> Result<()> {
+        self.db.execute(
+            "VACUUM INTO ?1",
+            [path
+                .to_str()
+                .ok_or_else(|| Error::new("invalid_input", "Invalid snapshot path"))?],
+        )?;
+        Ok(())
+    }
+    pub(crate) fn configuration(&self) -> Config {
+        self.config.clone()
+    }
+    pub fn validate_storage(&self) -> Result<()> {
+        let integrity: String = self
+            .db
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(Error::new(
+                "database",
+                "Snapshot failed integrity validation",
+            ));
+        }
+        let foreign_key_problem: bool = self
+            .db
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some();
+        if foreign_key_problem {
+            return Err(Error::new(
+                "database",
+                "Snapshot contains invalid references",
+            ));
+        }
+        for (name, entity) in &self.program.entities {
+            let fields = entity
+                .fields
+                .iter()
+                .filter(|(_, field)| field.relation.is_none())
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>();
+            let columns = fields
+                .iter()
+                .map(|field| q(field))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sizes = fields
+                .iter()
+                .map(|field| format!("coalesce(length({}),0)", q(field)))
+                .collect::<Vec<_>>()
+                .join("+");
+            let oversized: i64 = self.db.query_row(
+                &format!("SELECT count(*) FROM {} WHERE {sizes}>16777216", q(name)),
+                [],
+                |row| row.get(0),
+            )?;
+            if oversized > 0 {
+                return Err(Error::new(
+                    "limit",
+                    "Stored record exceeds validation limits",
+                ));
+            }
+            let mut statement = self
+                .db
+                .prepare(&format!("SELECT {columns} FROM {}", q(name)))?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let mut values = BTreeMap::new();
+                for (index, field) in fields.iter().enumerate() {
+                    let value = match row.get_ref(index)? {
+                        rusqlite::types::ValueRef::Integer(n) => {
+                            Value::from_json(&serde_json::json!(n))?
+                        }
+                        rusqlite::types::ValueRef::Text(bytes) => {
+                            Value::from_json(&serde_json::from_slice(bytes)?)?
+                        }
+                        rusqlite::types::ValueRef::Null => Value::Null,
+                        _ => return Err(Error::new("database", "Invalid stored field encoding")),
+                    };
+                    values.insert((*field).clone(), value);
+                }
+                self.program.validate(
+                    &stored_type(&self.program, name)?,
+                    Value::record(values),
+                    None,
+                )?;
+            }
+        }
+        Ok(())
     }
     pub fn jwt_adapters(&self) -> Result<serde_json::Value> {
         let mut adapters = vec![];
@@ -497,6 +621,7 @@ impl Runtime {
         result
     }
     fn file_bytes_inner(&self, id: &i64, credential: Option<&str>) -> Result<Vec<u8>> {
+        self.require_available()?;
         if !self.program.plugins.contains_key("Files.put") {
             return Err(err("not_found"));
         };
@@ -532,6 +657,7 @@ impl Runtime {
             .ok_or_else(|| err("not_found"))
     }
     pub fn authenticate_transport(&self, credential: Option<&str>, transport: &str) -> Result<()> {
+        self.require_available()?;
         authenticate(&self.program, &self.db, &self.config, credential, transport).map(|_| ())
     }
     pub fn mqtt_credential(&self, alias: &str, secret: &str) -> Result<String> {
@@ -576,6 +702,17 @@ impl Runtime {
         credential: Option<&str>,
         transport: &str,
     ) -> Result<String> {
+        self.require_available()?;
+        let gate = self.gate.clone();
+        let _activity = gate
+            .as_ref()
+            .map(|gate| {
+                gate.lock
+                    .read()
+                    .map_err(|_| Error::new("internal", "Runtime activity lock failed"))
+            })
+            .transpose()?;
+        self.require_available()?;
         if !self.program.streams.contains_key(stream) {
             return Err(err("not_found"));
         };
@@ -765,6 +902,17 @@ impl Runtime {
         authorization: Option<&str>,
         transport: &str,
     ) -> Result<(serde_json::Value, Vec<String>, Vec<String>)> {
+        self.require_available()?;
+        let gate = self.gate.clone();
+        let _activity = gate
+            .as_ref()
+            .map(|gate| {
+                gate.lock
+                    .read()
+                    .map_err(|_| Error::new("internal", "Runtime activity lock failed"))
+            })
+            .transpose()?;
+        self.require_available()?;
         let op = self
             .program
             .operations
@@ -1558,18 +1706,80 @@ impl Session<'_> {
                 };
                 Ok(Value::reference(&entity, &id))
             }
+            "page" => {
+                let entity = arg(0)?.text()?;
+                if !self.p.entities.contains_key(entity) {
+                    return Err(err("invalid_program"));
+                }
+                let cursor = self.eval(arg(1)?, scope, policy)?;
+                let after = match cursor {
+                    Value::Null => 0,
+                    Value::Id(ref brand, id) if brand == entity => id,
+                    _ => return Err(err("invalid_input")),
+                };
+                let limit = count(&self.eval(arg(2)?, scope, policy)?)?;
+                if limit == 0 || limit > 1000 {
+                    return Err(err("limit"));
+                }
+                let mut output = Vec::new();
+                let mut cursor = after;
+                loop {
+                    let sql = format!(
+                        "SELECT id FROM {} WHERE id>?1 ORDER BY id LIMIT 256",
+                        q(entity)
+                    );
+                    self.sql.push(sql.clone());
+                    let ids = self
+                        .db
+                        .prepare(&sql)?
+                        .query_map([cursor], |row| row.get::<_, i64>(0))?
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    if ids.is_empty() {
+                        break;
+                    }
+                    for id in &ids {
+                        self.step()?;
+                        cursor = *id;
+                        let reference = Value::reference(entity, id);
+                        if policy || self.allowed("READ", &reference, None)? {
+                            output.push(reference);
+                        }
+                        if output.len() == limit {
+                            break;
+                        }
+                    }
+                    if output.len() == limit || ids.len() < 256 {
+                        break;
+                    }
+                }
+                for ((kind, id), change) in &self.changes.clone() {
+                    if kind == entity
+                        && *id > after
+                        && change.action == "CREATE"
+                        && (policy || self.allowed("READ", &change.reference, None)?)
+                    {
+                        output.push(change.reference.clone());
+                    }
+                }
+                output.sort_by_key(|value| value.id().unwrap_or(0));
+                output.truncate(limit);
+                Ok(Value::List(output))
+            }
             "entities" => {
                 let entity = arg(0)?.text()?;
                 if !self.p.entities.contains_key(entity) {
                     return Err(err("invalid_program"));
                 };
-                let sql = format!("SELECT id FROM {} ORDER BY id", q(entity));
+                let sql = format!("SELECT id FROM {} ORDER BY id LIMIT 100001", q(entity));
                 self.sql.push(sql.clone());
                 let mut span = self.observer.span("io", "sqlite.scan_entities");
                 let mut statement = self.db.prepare(&sql)?;
                 let ids = statement
                     .query_map([], |r| r.get::<_, i64>(0))?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
+                if ids.len() > 100000 {
+                    return Err(err("limit"));
+                }
                 span.success();
                 let mut values = ids
                     .iter()
@@ -1846,6 +2056,18 @@ impl Session<'_> {
                 let entity = arg(0)?.text()?.to_owned();
                 let values = self.eval(arg(1)?, scope, policy)?.fields()?.clone();
                 self.create(&entity, values)
+            }
+            "expectVersion" => {
+                let target = self.eval(arg(0)?, scope, policy)?;
+                let expected = self.eval(arg(1)?, scope, policy)?;
+                let original = self.field(&target.pin(), "version", false)?;
+                if !equal(&original, &expected) {
+                    return Err(Error::new(
+                        "conflict",
+                        "This record changed; reload before saving",
+                    ));
+                }
+                Ok(target)
             }
             "set" => {
                 let path = arg(0)?.text()?;
@@ -2303,6 +2525,7 @@ impl Runtime {
         search: &str,
         exact: Option<i64>,
     ) -> Result<serde_json::Value> {
+        self.require_available()?;
         let schema = self
             .program
             .entities
@@ -2396,6 +2619,17 @@ impl Runtime {
         input: serde_json::Value,
         expected: Option<&str>,
     ) -> Result<serde_json::Value> {
+        self.require_available()?;
+        let gate = self.gate.clone();
+        let _activity = gate
+            .as_ref()
+            .map(|gate| {
+                gate.lock
+                    .read()
+                    .map_err(|_| Error::new("internal", "Runtime activity lock failed"))
+            })
+            .transpose()?;
+        self.require_available()?;
         if !["CREATE", "UPDATE", "DELETE"].contains(&action) {
             return Err(err("invalid_input"));
         }

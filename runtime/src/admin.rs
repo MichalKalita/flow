@@ -43,6 +43,12 @@ pub fn router_projects_with_setup(
         .route("/api/overview", get(overview))
         .route("/api/settings", get(settings).post(save_settings))
         .route("/api/settings/secret", post(save_secret))
+        .route("/api/catalog", get(catalog_index).post(catalog_install))
+        .route("/api/catalog/launch", post(catalog_launch))
+        .route("/api/backups", get(backup_list).post(backup_create))
+        .route("/api/backups/verify", post(backup_verify))
+        .route("/api/backups/restore", post(backup_restore))
+        .route("/api/backups/status", get(backup_status))
         .route("/api/projects", get(project_list))
         .route("/api/data", get(data_tables).post(data_write))
         .route("/api/data/rows", get(data_rows))
@@ -50,10 +56,6 @@ pub fn router_projects_with_setup(
         .route("/api/call", post(call))
         .route("/api/logs", get(logs))
         .route("/api/jwt", get(jwt_adapters).post(issue_jwt))
-        .layer(middleware::from_fn_with_state(
-            Arc::new(tokio::sync::Semaphore::new(4)),
-            admit,
-        ))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
         .route("/api/setup", get(setup_status).post(enroll))
         .route("/api/login", post(owner_login))
@@ -79,6 +81,10 @@ pub fn router_projects_with_setup(
                 )
             }),
         )
+        .layer(middleware::from_fn_with_state(
+            Arc::new(tokio::sync::Semaphore::new(4)),
+            admit,
+        ))
         .layer(middleware::from_fn(headers))
         .with_state(state)
 }
@@ -378,6 +384,7 @@ fn failure(error: crate::Error) -> Response {
     let status = match error.code {
         "unauthenticated" => 401,
         "forbidden" => 403,
+        "unavailable" => 503,
         "not_found" => 404,
         "invalid_input" | "invalid_output" | "limit" => 400,
         "conflict" | "database" => 409,
@@ -584,5 +591,96 @@ async fn owner_login(State(state): State<Admin>, Json(input): Json<Value>) -> Re
         Ok(Ok(token)) => Json(json!({"token":token})).into_response(),
         Ok(Err(error)) => failure(error),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn catalog_index(State(state): State<Admin>) -> Response {
+    match crate::catalog::index(&state.projects) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => failure(error),
+    }
+}
+async fn catalog_install(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        crate::catalog::install(
+            &state.projects,
+            input["template"].as_str().unwrap_or(""),
+            input["request_id"].as_str().unwrap_or(""),
+        )
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn catalog_launch(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        crate::catalog::launch(&state.projects, input["project"].as_str().unwrap_or(""))
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn backup_list(State(state): State<Admin>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::backups::list(&state.projects)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn backup_create(State(state): State<Admin>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::backups::create(&state.projects)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+async fn backup_verify(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    match tokio::task::spawn_blocking(move || {
+        crate::backups::verify(
+            &state.projects,
+            input["id"].as_str().unwrap_or(""),
+            input["password"].as_str().unwrap_or(""),
+        )
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn backup_restore(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    if input["confirm"] != true {
+        return failure(crate::Error::new(
+            "invalid_input",
+            "Confirm the selected backup and replacement of current applications",
+        ));
+    }
+    match tokio::task::spawn_blocking(move || {
+        crate::backups::request_restore(
+            &state.projects,
+            input["id"].as_str().unwrap_or(""),
+            input["password"].as_str().unwrap_or(""),
+        )
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn backup_status(State(state): State<Admin>) -> Response {
+    match crate::backups::restore_status(&state.projects) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => failure(error),
     }
 }

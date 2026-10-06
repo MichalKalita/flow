@@ -55,7 +55,7 @@ fn private_permissions(path: &Path, directory: bool) -> Result<()> {
     let _ = (path, directory);
     Ok(())
 }
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut options = OpenOptions::new();
@@ -92,7 +92,17 @@ impl ServerState {
         let path = directory.join("server.sqlite");
         let database = Connection::open(&path)?;
         private_permissions(&path, false)?;
-        database.execute_batch("PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, document BLOB NOT NULL); BEGIN IMMEDIATE;")?;
+        database.busy_timeout(std::time::Duration::from_secs(5))?;
+        // SQLite journal-mode changes can report BUSY without invoking its busy
+        // handler during concurrent first opens. Retry that bootstrap boundary.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match database.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, document BLOB NOT NULL); BEGIN IMMEDIATE;") {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(error, _)) if matches!(error.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) && std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => return Err(error.into()),
+            }
+        }
         let initialized: bool =
             database.query_row("SELECT EXISTS(SELECT 1 FROM state)", [], |r| r.get(0))?;
         let keys_path = directory.join("server.keys");
@@ -403,6 +413,74 @@ impl ServerState {
         private_permissions(path, false)
     }
 
+    pub fn snapshot_with_secrets(
+        &self,
+        path: &Path,
+        secrets: &[(String, String, String)],
+    ) -> Result<()> {
+        self.snapshot(path)?;
+        let database = Connection::open(path)?;
+        let (revision, mut document) = self.read_document(&database)?;
+        for (namespace, name, value) in secrets {
+            document["secrets"][format!("{namespace}/{name}")] = json!(value);
+        }
+        self.write_document(
+            &database,
+            revision.checked_add(1).ok_or_else(crypto)?,
+            &document,
+        )?;
+        Ok(())
+    }
+    pub fn catalog_entry(&self, request: &str) -> Result<Option<Value>> {
+        let database = self.database.lock().map_err(storage)?;
+        let document = self.read_document(&database)?.1;
+        Ok(document["catalog"].get(request).cloned())
+    }
+    pub fn reserve_catalog(
+        &self,
+        request: &str,
+        template: &str,
+        project: &str,
+        signing_key: &str,
+    ) -> Result<Value> {
+        uuid::Uuid::parse_str(request)
+            .map_err(|_| Error::new("invalid_input", "Invalid installation request"))?;
+        if !crate::projects::name_valid(project) {
+            return Err(Error::new("invalid_input", "Invalid project name"));
+        }
+        let document = self.change(None, |document| {
+            if document["catalog"].get(request).is_some() {
+                return Ok(());
+            }
+            if document["catalog"]
+                .as_object()
+                .is_some_and(|entries| entries.len() >= 128)
+            {
+                return Err(Error::new("limit", "Installation history is full"));
+            }
+            document["catalog"][request] = json!({"template":template,"project":project});
+            document["secrets"][format!("{project}/signing")] = json!(signing_key);
+            Ok(())
+        })?;
+        Ok(document["catalog"][request].clone())
+    }
+    pub fn sign_backup_manifest(&self, bytes: &[u8]) -> Result<String> {
+        let keys: Value =
+            serde_json::from_slice(&fs::read(self.directory.join("server.keys")).map_err(storage)?)
+                .map_err(|_| crypto())?;
+        let private = STANDARD
+            .decode(keys["identity_key"].as_str().ok_or_else(crypto)?)
+            .map_err(|_| crypto())?;
+        let pair = Ed25519KeyPair::from_pkcs8(&private).map_err(|_| crypto())?;
+        let mut message = b"flow.backup.manifest.v1\0".to_vec();
+        message.extend_from_slice(bytes);
+        Ok(STANDARD.encode(pair.sign(&message).as_ref()))
+    }
+    pub fn close(&self) -> Result<()> {
+        let mut database = self.database.lock().map_err(storage)?;
+        *database = Connection::open_in_memory()?;
+        Ok(())
+    }
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -504,4 +582,42 @@ pub fn unlock_recovery(package: &[u8], password: &str) -> Result<Vec<u8>> {
             )
         })?;
     Ok(decrypted.to_vec())
+}
+
+pub struct RuntimeLease {
+    _database: Connection,
+}
+impl RuntimeLease {
+    pub fn acquire(directory: &Path) -> Result<Self> {
+        let parent = directory.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent).map_err(storage)?;
+        let path = parent.join("server.lease.sqlite");
+        let database = Connection::open(&path)?;
+        private_permissions(&path, false)?;
+        database
+            .execute_batch("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE;")
+            .map_err(|_| {
+                Error::new(
+                    "conflict",
+                    "Another Flow process is using this server directory",
+                )
+            })?;
+        Ok(Self {
+            _database: database,
+        })
+    }
+}
+
+pub fn verify_backup_manifest(keys: &[u8], bytes: &[u8], signature: &str) -> Result<()> {
+    let keys: Value = serde_json::from_slice(keys).map_err(|_| crypto())?;
+    let private = STANDARD
+        .decode(keys["identity_key"].as_str().ok_or_else(crypto)?)
+        .map_err(|_| crypto())?;
+    let pair = Ed25519KeyPair::from_pkcs8(&private).map_err(|_| crypto())?;
+    let signature = STANDARD.decode(signature).map_err(|_| crypto())?;
+    let mut message = b"flow.backup.manifest.v1\0".to_vec();
+    message.extend_from_slice(bytes);
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pair.public_key().as_ref())
+        .verify(&message, &signature)
+        .map_err(|_| Error::new("invalid_input", "Backup manifest signature is not valid"))
 }

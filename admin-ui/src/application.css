@@ -1,0 +1,171 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #182a3b;
+  background: #f4f6f8;
+  font-size: 16px;
+  line-height: 1.5;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0 0 12px;
+}
+h1 {
+  font-size: 32px;
+}
+h2 {
+  font-size: 21px;
+}
+h3 {
+  font-size: 19px;
+}
+button,
+input,
+textarea {
+  font: inherit;
+}
+button {
+  border: 1px solid #2459bb;
+  background: #2459bb;
+  color: white;
+  border-radius: 8px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+button.secondary {
+  background: white;
+  color: #2459bb;
+  border-color: #ccd7e6;
+}
+button.danger {
+  background: white;
+  color: #a12634;
+  border-color: #e3c9cf;
+}
+input,
+textarea {
+  display: block;
+  width: 100%;
+  border: 1px solid #bbc8d8;
+  border-radius: 8px;
+  background: white;
+  padding: 11px;
+}
+label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+form {
+  display: grid;
+  gap: 16px;
+}
+header,
+footer {
+  max-width: 1200px;
+  margin: auto;
+  padding: 28px 24px;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+header h1 {
+  margin: 0;
+}
+header small {
+  color: #63778e;
+}
+.application main {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 24px;
+  max-width: 1200px;
+  margin: auto;
+  padding: 0 24px;
+}
+section,
+.signin {
+  background: white;
+  border: 1px solid #dce3eb;
+  border-radius: 12px;
+  padding: 24px;
+}
+.editor {
+  align-self: start;
+}
+.actions,
+.section-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.section-header {
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.section-header h2 {
+  margin: 0;
+}
+.contact-list article {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 20px;
+  padding: 18px 0;
+  border-top: 1px solid #e3e8ee;
+  overflow-wrap: anywhere;
+}
+.contact-list article p {
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.error,
+[role="alert"] {
+  color: #a12634;
+}
+[role="status"] {
+  color: #176142;
+}
+footer {
+  color: #63778e;
+}
+.signin {
+  max-width: 460px;
+  margin: 80px auto;
+}
+.signin p {
+  margin-top: 18px;
+}
+@media (max-width: 760px) {
+  .application main {
+    grid-template-columns: 1fr;
+    padding: 0 16px;
+  }
+  header {
+    padding: 20px 16px;
+  }
+  section {
+    padding: 18px;
+  }
+  .contact-list article {
+    flex-direction: column;
+    gap: 10px;
+  }
+  .signin {
+    margin: 30px 16px;
+  }
+}

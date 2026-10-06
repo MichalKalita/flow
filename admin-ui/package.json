@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "bun run build.ts",
-    "format": "prettier --write src e2e build.ts e2e-server.ts playwright.config.ts package.json tsconfig.json index.html",
-    "check": "tsc --noEmit && prettier --check src e2e build.ts e2e-server.ts playwright.config.ts package.json tsconfig.json index.html",
+    "format": "prettier --write src e2e build.ts e2e-server.ts playwright.config.ts package.json tsconfig.json index.html application.html",
+    "check": "tsc --noEmit && prettier --check src e2e build.ts e2e-server.ts playwright.config.ts package.json tsconfig.json index.html application.html",
     "test": "bun test src",
     "test:e2e": "bun run build && playwright test"
   },

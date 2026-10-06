@@ -25,11 +25,17 @@ pub struct Projects {
     config: Config,
     pub system: Observability,
     pub server: Option<Arc<crate::server_state::ServerState>>,
+    pub(crate) maintenance: Mutex<()>,
+    pub public_address: RwLock<Option<std::net::SocketAddr>>,
+    pub restart: tokio::sync::Notify,
+    pub shutdown: tokio::sync::Notify,
+    pub gate: Arc<crate::engine::RuntimeGate>,
+    pub(crate) restore_lock: Mutex<()>,
 }
 fn io(error: std::io::Error) -> Error {
     Error::new("storage", error.to_string())
 }
-fn name_valid(name: &str) -> bool {
+pub(crate) fn name_valid(name: &str) -> bool {
     !["all", "system"].contains(&name)
         && !name.is_empty()
         && name.len() <= 64
@@ -46,6 +52,8 @@ impl Projects {
         server: Option<Arc<crate::server_state::ServerState>>,
     ) -> Arc<Self> {
         let system = runtime.lock().unwrap().observability.clone();
+        let gate = runtime.lock().unwrap().gate.clone().unwrap_or_default();
+        runtime.lock().unwrap().gate = Some(gate.clone());
         Arc::new(Self {
             entries: RwLock::new(BTreeMap::from([(
                 "application".into(),
@@ -61,6 +69,12 @@ impl Projects {
             config: Config::default(),
             system,
             server,
+            maintenance: Mutex::new(()),
+            public_address: RwLock::new(None),
+            restart: tokio::sync::Notify::new(),
+            shutdown: tokio::sync::Notify::new(),
+            gate,
+            restore_lock: Mutex::new(()),
         })
     }
     pub fn load(
@@ -79,6 +93,7 @@ impl Projects {
         server: Option<Arc<crate::server_state::ServerState>>,
     ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(data).map_err(io)?;
+        let gate = Arc::new(crate::engine::RuntimeGate::default());
         let registry = Arc::new(Self {
             entries: RwLock::new(BTreeMap::new()),
             root: Some(root.into()),
@@ -86,6 +101,12 @@ impl Projects {
             config,
             system,
             server,
+            maintenance: Mutex::new(()),
+            public_address: RwLock::new(None),
+            restart: tokio::sync::Notify::new(),
+            shutdown: tokio::sync::Notify::new(),
+            gate,
+            restore_lock: Mutex::new(()),
         });
         registry.scan()?;
         Ok(registry)
@@ -116,6 +137,13 @@ impl Projects {
         json!(self.entries.read().unwrap().iter().map(|(name,entry)|json!({"name":name,"active":entry.runtime.is_some(),"status":if entry.error.is_some() {if entry.runtime.is_some(){"stale"}else{"failed"}}else{"running"},"error":entry.error,"generation":entry.generation,"base_path":format!("/{name}")})).collect::<Vec<_>>())
     }
     pub fn scan(&self) -> Result<()> {
+        let _maintenance = self
+            .maintenance
+            .lock()
+            .map_err(|_| Error::new("internal", "Project maintenance lock failed"))?;
+        self.scan_inner()
+    }
+    pub(crate) fn scan_inner(&self) -> Result<()> {
         let Some(root) = &self.root else {
             return Ok(());
         };
@@ -131,6 +159,9 @@ impl Projects {
                 continue;
             }
             let name = folder.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
             if !name_valid(&name) {
                 let path = root.join(format!("{name}-error.txt"));
                 let message = "Project names must contain 1–64 ASCII letters, digits, underscores or hyphens; all and system are reserved\n";
@@ -189,6 +220,15 @@ impl Projects {
                     json!({})
                 };
                 let config = self.project_config(&name, &source, &settings_value)?;
+                let frontend = settings_value
+                    .get("frontend")
+                    .map(|value| {
+                        crate::frontend::validate(
+                            &crate::program::Program::compile(&source)?,
+                            value,
+                        )
+                    })
+                    .transpose()?;
                 let cache = json!({"source":source,"manifest":settings_value});
                 let cache_path = self.data.join(format!("{name}-active.json"));
                 let save_cache = || -> Result<()> {
@@ -198,7 +238,12 @@ impl Projects {
                     Ok(())
                 };
                 if let Some(runtime) = previous.as_ref().and_then(|e| e.runtime.clone()) {
-                    runtime.lock().unwrap().reload(&source, config)?;
+                    {
+                        let mut runtime = runtime.lock().unwrap();
+                        runtime.reload(&source, config)?;
+                        runtime.gate = Some(self.gate.clone());
+                        runtime.frontend = frontend.clone();
+                    }
                     save_cache()?;
                     return Ok(runtime);
                 }
@@ -213,6 +258,8 @@ impl Projects {
                             .ok_or_else(|| Error::new("configuration", "Invalid database path"))?,
                         config.clone(),
                     ) {
+                        runtime.gate = Some(self.gate.clone());
+                        runtime.frontend = frontend.clone();
                         runtime.observability =
                             Observability::disk(self.data.join(format!("{name}-observability")))
                                 .map_err(io)?;
@@ -236,6 +283,8 @@ impl Projects {
                         active_config,
                     )?;
                     runtime.reload(&source, config)?;
+                    runtime.gate = Some(self.gate.clone());
+                    runtime.frontend = frontend.clone();
                     runtime.observability =
                         Observability::disk(self.data.join(format!("{name}-observability")))
                             .map_err(io)?;
@@ -249,6 +298,8 @@ impl Projects {
                         .ok_or_else(|| Error::new("configuration", "Invalid database path"))?,
                     config,
                 )?;
+                runtime.gate = Some(self.gate.clone());
+                runtime.frontend = frontend.clone();
                 runtime.observability =
                     Observability::disk(self.data.join(format!("{name}-observability")))
                         .map_err(io)?;
@@ -297,6 +348,12 @@ impl Projects {
                                     config,
                                 )
                                 .ok()?;
+                                runtime.gate = Some(self.gate.clone());
+                                runtime.frontend = cache["manifest"]
+                                    .get("frontend")
+                                    .map(|value| crate::frontend::validate(&runtime.program, value))
+                                    .transpose()
+                                    .ok()?;
                                 runtime.observability = Observability::disk(
                                     self.data.join(format!("{name}-observability")),
                                 )
@@ -337,11 +394,20 @@ impl Projects {
         let fields = manifest
             .as_object()
             .ok_or_else(|| Error::new("configuration", "Manifest must be an object"))?;
-        if fields
-            .keys()
-            .any(|key| !["jwt_secrets", "event_credentials"].contains(&key.as_str()))
-        {
+        if fields.keys().any(|key| {
+            !["jwt_secrets", "event_credentials", "frontend", "catalog"].contains(&key.as_str())
+        }) {
             return Err(Error::new("configuration", "Unknown manifest setting"));
+        }
+        if let Some(catalog) = manifest.get("catalog")
+            && (!catalog.is_object()
+                || catalog["template"] != "contacts"
+                || catalog["version"] != 1
+                || !catalog["request"]
+                    .as_str()
+                    .is_some_and(|request| uuid::Uuid::parse_str(request).is_ok()))
+        {
+            return Err(Error::new("configuration", "Invalid catalog metadata"));
         }
         for (section, mode) in [("jwt_secrets", true), ("event_credentials", false)] {
             if let Some(values) = manifest.get(section) {
@@ -387,6 +453,14 @@ impl Projects {
             }
         }
         Ok(config)
+    }
+    pub fn roots(&self) -> Result<(&Path, &Path)> {
+        Ok((
+            self.root.as_deref().ok_or_else(|| {
+                Error::new("configuration", "This operation requires hosted projects")
+            })?,
+            &self.data,
+        ))
     }
     pub fn sample(&self, sample: Value) {
         self.system.sample(sample.clone());

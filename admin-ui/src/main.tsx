@@ -1,3 +1,5 @@
+import { ApplicationsPage } from "./applications";
+import { BackupsPage } from "./backups";
 import { ServerPage, Welcome } from "./server";
 import { DatabasePage } from "./database";
 import { render } from "preact";
@@ -14,6 +16,13 @@ import { AuditPage, LogsPage } from "./logs";
 import { ConsolePage, TokensPage } from "./tools";
 import type { Api, Overview } from "./types";
 const pages = [
+  {
+    id: "backups",
+    title: "Backups",
+    description: "Keep a recoverable copy of your applications.",
+    icon: "audit",
+    group: "YOUR SERVER",
+  },
   {
     id: "applications",
     title: "Applications",
@@ -468,12 +477,8 @@ function Authenticated(props: AuthenticatedProps) {
                   <DatabasePage api={api} />
                 ))}
               {page === "server" && <ServerPage api={api} />}
-              {page === "applications" && (
-                <Empty
-                  title="Your applications"
-                  text="Your catalog will appear here."
-                />
-              )}
+              {page === "applications" && <ApplicationsPage api={api} />}
+              {page === "backups" && <BackupsPage api={api} />}
               {page === "overview" && <OverviewPage {...pageProps} />}{" "}
               {page === "traffic" && <TrafficPage {...pageProps} />}{" "}
               {page === "streaming" && <StreamingPage {...pageProps} />}{" "}

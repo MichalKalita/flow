@@ -79,3 +79,7 @@ Use the shared [settings/defaults and setup-wizard contract](variables-and-secre
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
+
+## Delivered initial slice
+
+Local whole-server capture, signed manifests, password-key recovery, isolated validation, offline fresh restoration, and crash-journaled administrative restoration are implemented. Integration tests cover data/audit/secrets, corruption, restart, and preserved known ID sequence boundaries. Remote destinations, scheduled jobs, continuous off-server recovery, HA, and minimum-host recovery acceptance remain outstanding.

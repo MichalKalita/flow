@@ -2,7 +2,7 @@
 
 ## Purpose and decision status
 
-This is the recommended dependency order for the full `.todo` scope. Prioritize reliable system operation, then public access and reusable runtime mechanisms, then applications and integrations. The product goal is reliable, simple software for companies on inexpensive servers, for users without infrastructure expertise, with preserving data ahead of throughput, not Kubernetes-like orchestration or thousands-node scaling. This is a design plan; no feature implementation is claimed by these documents.
+This is the recommended dependency order for the full `.todo` scope. Prioritize reliable system operation, then public access and reusable runtime mechanisms, then applications and integrations. The product goal is reliable, simple software for companies on inexpensive servers, for users without infrastructure expertise, with preserving data ahead of throughput, not Kubernetes-like orchestration or thousands-node scaling. This is a delivery plan; implemented slices and remaining acceptance gates are recorded below.
 
 Each topic distinguishes requested outcomes, current implementation, recommendations, and open decisions. Answer questions in conversation; record accepted decisions back in the corresponding English document. Unanswered recommendations must not be treated as approved product requirements.
 
@@ -173,3 +173,7 @@ Capacity and mail interoperability need explicit bounded operational validation 
 ## Implementation progress
 
 Persistent server identity/key generation, authenticated-encrypted settings, masked secrets, project secret references, protected local enrollment, owner password login, and the initial settings UI are implemented. Restart/concurrent initialization/corrupt-key tests and real-runtime listener/authentication tests pass. The first-run browser flow passes through restart; existing dashboard E2E flows pass. Password-encrypted key recovery is implemented and being integrated with complete backup/restore. Catalog installation, application frontend, and full backup/restore remain in progress; HA and subsequent features are not implemented yet.
+
+## Implementation progress
+
+Persistent generated server keys, encrypted settings, masked secrets, owner enrollment, and the short setup wizard are delivered. Local whole-server backup/validation/restoration and the initial Contacts catalog/frontend are implemented and covered by runtime and browser tests. Minimum-host capacity and recovery acceptance is still pending; the complete first usable release acceptance is not yet claimed. The next implementation is server-wide operational log ownership and configurable local retention. Remote storage, universal durable events, and HA remain outstanding.

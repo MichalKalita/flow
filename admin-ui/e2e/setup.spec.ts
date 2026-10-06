@@ -47,6 +47,78 @@ test("first setup creates a persistent owner without a manual admin token", asyn
     await expect(
       page.getByRole("heading", { name: "Applications", exact: true }),
     ).toBeVisible();
+    const popup = page.waitForEvent("popup");
+    await page
+      .getByRole("button", { name: "Use Contacts", exact: true })
+      .click();
+    const contacts = await popup;
+    await expect(
+      contacts.getByRole("heading", { name: "Contacts", level: 1 }),
+    ).toBeVisible();
+    await contacts.getByLabel("Name", { exact: true }).fill("Ada Lovelace");
+    await contacts
+      .getByLabel("Email", { exact: true })
+      .fill("ada@example.test");
+    await contacts
+      .getByRole("button", { name: "Add contact", exact: true })
+      .click();
+    await expect(
+      contacts.getByRole("heading", { name: "Ada Lovelace", exact: true }),
+    ).toBeVisible();
+    await contacts.getByRole("button", { name: "Edit", exact: true }).click();
+    await contacts.getByLabel("Phone", { exact: true }).fill("12345");
+    await contacts
+      .getByRole("button", { name: "Save changes", exact: true })
+      .click();
+    await expect(contacts.getByText("12345", { exact: true })).toBeVisible();
+    await page.getByRole("link", { name: "Backups", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Create backup", exact: true })
+      .click();
+    await expect(
+      page.getByText("Backup saved.", { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Check restore", exact: true })
+      .click();
+    await page
+      .getByLabel("Recovery password", { exact: true })
+      .fill("fictional setup password");
+    await page
+      .getByRole("button", { name: "Verify restoration", exact: true })
+      .click();
+    await expect(
+      page.getByText(
+        "Backup restored and verified in a separate temporary copy. Your running data is unchanged.",
+      ),
+    ).toBeVisible();
+    await contacts.getByLabel("Name", { exact: true }).fill("Later contact");
+    await contacts
+      .getByRole("button", { name: "Add contact", exact: true })
+      .click();
+    await expect(
+      contacts.getByRole("heading", { name: "Later contact", exact: true }),
+    ).toBeVisible();
+    await page
+      .getByLabel("Recovery password", { exact: true })
+      .fill("fictional setup password");
+    page.once("dialog", (dialog) => dialog.accept());
+    await page
+      .getByRole("button", { name: "Restore this backup", exact: true })
+      .click();
+    await expect(
+      page.getByText(
+        "Server restored. A recovery copy of the previous data was kept.",
+        { exact: true },
+      ),
+    ).toBeVisible({ timeout: 30000 });
+    await contacts.reload();
+    await expect(
+      contacts.getByRole("heading", { name: "Ada Lovelace", exact: true }),
+    ).toBeVisible();
+    await expect(
+      contacts.getByRole("heading", { name: "Later contact", exact: true }),
+    ).toHaveCount(0);
     await page
       .getByRole("link", { name: "Server settings", exact: true })
       .click();
@@ -83,6 +155,11 @@ test("first setup creates a persistent owner without a manual admin token", asyn
       .getByRole("link", { name: "Server settings", exact: true })
       .click();
     await expect(page.getByLabel("Server name")).toHaveValue("Office renamed");
+    await contacts.reload();
+    await expect(
+      contacts.getByRole("heading", { name: "Ada Lovelace", exact: true }),
+    ).toBeVisible();
+    await expect(contacts.getByText("12345", { exact: true })).toBeVisible();
   } finally {
     server.kill("SIGINT");
     await stopped(server);

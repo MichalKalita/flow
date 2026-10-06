@@ -38,3 +38,11 @@ references use integer values such as `[owner 1]`, and JSON clients send
 `{"userId":1}`. Quoted, fractional, zero, negative and unsafe integer IDs are
 rejected. `[new UserID]` reserves the next transactional ID for that entity.
 Entity brands are part of runtime values, not encoded into prefixes in the ID.
+
+## Bounded text, pagination, and edit conflicts
+
+`[string [minBytes 1] [maxBytes 200]]` constrains UTF-8 byte length. Bounds are checked for inputs and stored fields. The maximum supported string bound is 1 MiB.
+
+`[page Contact $after 50]` reads records ordered by positive numeric entity ID. The cursor is a matching branded ID or null; the page size is between 1 and 1000. Central READ permissions filter records before they count toward the page. Work remains bounded; extremely sparse permitted results can reach the execution limit. Staged creates participate in ID order.
+
+`[expectVersion [entity $contactId] $version]` requires normal READ permission and compares the stored numeric `version` field before a mutation. A mismatch returns `conflict` (HTTP 409) and rolls back the transaction, including audit. Applications must increment the version under their normal UPDATE rules; the expression does not grant mutation permission.

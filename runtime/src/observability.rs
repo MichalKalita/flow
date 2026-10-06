@@ -133,6 +133,13 @@ impl Metric {
     }
 }
 impl Observability {
+    pub fn close(&self) {
+        if let Ok(mut data) = self.0.lock() {
+            data.writer = None;
+            data.directory = None;
+        }
+    }
+
     pub fn disk(path: impl Into<PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
         fs::create_dir_all(&path)?;

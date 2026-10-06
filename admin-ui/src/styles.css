@@ -1330,3 +1330,28 @@ td strong {
   display: block;
   overflow-wrap: anywhere;
 }
+
+.catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+.catalog-card {
+  padding: 20px;
+  border: 1px solid #dce3eb;
+  border-radius: 12px;
+}
+.catalog-card h3 {
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+.catalog-card p {
+  margin-bottom: 16px;
+}
+.backup-list article {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}

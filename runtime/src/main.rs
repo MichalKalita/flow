@@ -15,10 +15,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_blocking_threads(blocking)
         .enable_all()
         .build()?
-        .block_on(run())
+        .block_on(async {
+            let args = std::env::args().skip(1).collect::<Vec<_>>();
+            let _lease = if args
+                .first()
+                .is_some_and(|argument| argument.starts_with("--"))
+            {
+                None
+            } else {
+                Some(flow_runtime::server_state::RuntimeLease::acquire(
+                    &state_directory(&args),
+                )?)
+            };
+            while run().await? {}
+            Ok(())
+        })
 }
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
+async fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|s| s == "--restore") {
+        if args.len() != 4 {
+            return Err("Usage: flow-runtime --restore BACKUP_DIRECTORY RECOVERY_PASSWORD_FILE EMPTY_DESTINATION".into());
+        }
+        let password_file = std::path::Path::new(&args[2]);
+        if std::fs::metadata(password_file)?.len() > 512 {
+            return Err("Recovery password file exceeds its limit".into());
+        }
+        let password = std::fs::read_to_string(password_file)?;
+        let result = flow_runtime::backups::restore_fresh(
+            std::path::Path::new(&args[1]),
+            password.trim_end_matches(['\r', '\n']),
+            std::path::Path::new(&args[3]),
+        )?;
+        println!(
+            "Restored {} projects to {}",
+            result["projects"].as_array().map_or(0, Vec::len),
+            args[3]
+        );
+        return Ok(false);
+    }
     if args.first().is_some_and(|s| s == "--check") {
         let path = args
             .get(1)
@@ -38,7 +73,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|o| o.method == "WS")
                 .count()
         );
-        return Ok(());
+        return Ok(false);
     }
     let source = args.first().map(String::as_str).unwrap_or("projects");
     let database = args.get(1).map(String::as_str).unwrap_or("data/projects");
@@ -52,15 +87,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .event_credentials
             .insert("service:1".into(), format!("ApiKey {secret}"));
     }
-    let state_directory = std::env::var_os("FLOW_SERVER_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let parent = std::path::Path::new(database)
-                .parent()
-                .filter(|path| !path.as_os_str().is_empty())
-                .unwrap_or(std::path::Path::new("data"));
-            parent.join("server")
-        });
+    let state_directory = state_directory(&args);
+    flow_runtime::backups::activate_pending(&state_directory)?;
     let server = Arc::new(flow_runtime::server_state::ServerState::open(
         &state_directory,
     )?);
@@ -127,6 +155,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    *projects.public_address.write().unwrap() = Some(listener.local_addr()?);
     let mqtt_bind = args.get(3).map(String::as_str).unwrap_or("127.0.0.1:1883");
     let mqtt_listener = tokio::net::TcpListener::bind(mqtt_bind).await?;
     let admin_listener = tokio::net::TcpListener::bind(admin_bind).await?;
@@ -139,7 +168,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         admin_token,
         admin_bind.ip().is_loopback() && std::env::var_os("FLOW_ADMIN_TOKEN").is_none(),
     );
-    let admin_task = tokio::spawn(async move { axum::serve(admin_listener, admin_router).await });
+    let shutdown_projects = projects.clone();
+    let admin_task = tokio::spawn(async move {
+        axum::serve(admin_listener, admin_router)
+            .with_graceful_shutdown(async move {
+                shutdown_projects.shutdown.notified().await;
+            })
+            .await
+    });
     println!("Flow MQTT listening on {}", mqtt_listener.local_addr()?);
     let mqtt_projects = projects.clone();
     let mqtt_task = tokio::spawn(async move {
@@ -164,15 +200,63 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         http::router_shared_with_admission(projects.get("application").unwrap(), admission)
     };
-    axum::serve(listener, public)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let restarting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_started = Arc::new(tokio::sync::Notify::new());
+    let shutdown_signal = shutdown_started.clone();
+    let restart_signal = restarting.clone();
+    let shutdown_projects = projects.clone();
+    let mut public_task = tokio::spawn(async move {
+        axum::serve(listener,public).with_graceful_shutdown(async move {
+            tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=shutdown_projects.restart.notified()=>{ restart_signal.store(true,std::sync::atomic::Ordering::Release); } }
+            shutdown_projects.gate.stopped.store(true,std::sync::atomic::Ordering::Release);
+            shutdown_signal.notify_one();
+        }).await
+    });
+    tokio::select! {
+        result=&mut public_task=>{result??;},
+        _=shutdown_started.notified()=>{
+            if tokio::time::timeout(std::time::Duration::from_secs(10),&mut public_task).await.is_err() { public_task.abort(); let _=public_task.await; }
+        }
+    }
+    let restarting = restarting.load(std::sync::atomic::Ordering::Acquire);
     sampler.abort();
     watcher.abort();
     mqtt_task.abort();
-    admin_task.abort();
-    tokio::task::spawn_blocking(move || projects.flush()).await??;
-    Ok(())
+    let _ = sampler.await;
+    let _ = watcher.await;
+    let _ = mqtt_task.await;
+    projects.shutdown.notify_one();
+    let mut admin_task = admin_task;
+    if tokio::time::timeout(std::time::Duration::from_secs(10), &mut admin_task)
+        .await
+        .is_err()
+    {
+        admin_task.abort();
+        let _ = admin_task.await;
+    }
+    if restarting {
+        flow_runtime::backups::freeze_for_restore(&projects)?;
+    }
+    projects.flush()?;
+    for (_, runtime) in projects.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+    projects.system.close();
+    if restarting {
+        server.close()?;
+    }
+    Ok(restarting)
+}
+
+fn state_directory(args: &[String]) -> std::path::PathBuf {
+    let database = args.get(1).map(String::as_str).unwrap_or("data/projects");
+    std::env::var_os("FLOW_SERVER_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let parent = std::path::Path::new(database)
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("data"));
+            parent.join("server")
+        })
 }
