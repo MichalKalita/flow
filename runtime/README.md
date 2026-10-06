@@ -323,3 +323,9 @@ FLOW_SERVER_DIR=/safe/restored/server flow-runtime /safe/restored/projects /safe
 ```
 
 The password file contains the capture-time owner password. Protect it separately. Do not run two active installations with the same recovered server identity. A local exclusive runtime lease prevents competing processes sharing the same server state location. Historical restore intentionally reverts business state; it cannot recover writes newer than the available backup or undo external actions. Remote destinations, scheduling, off-server continuous history, HA recovery, and single-project restoration remain planned. Resource acceptance on the minimum production host still needs a deployment recovery drill.
+
+## Passive capacity guidance
+
+Server settings show usable CPUs, the host/cgroup memory limit, available disk space, and suggested local log limits. Inventory uses filesystem blocks available to ordinary users and includes live SQLite/WAL sizes. New server initialization selects log defaults from observed disk headroom; unavailable measurements retain baseline defaults. Existing settings and explicit worker/admission environment overrides are preserved.
+
+The suggestion reserves at least 2 GiB or two current database copies, then allows at most one tenth of remaining log-volume capacity, capped at 1 GiB. It is a conservative storage heuristic, not a throughput estimate. Administrators can populate suggested values, review them, and save through revision-checked settings. Passive inventory writes no application data and runs no synthetic load. Active calibration, measured workload bottlenecks, and minimum-host production acceptance remain outstanding.

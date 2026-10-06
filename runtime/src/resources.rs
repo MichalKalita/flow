@@ -336,6 +336,38 @@ impl Runtime {
     }
 }
 
+/// Available space excludes filesystem blocks reserved from ordinary users.
+/// See https://pubs.opengroup.org/onlinepubs/007904975/basedefs/sys/statvfs.h.html.
+pub fn disk_space(path: &Path) -> Option<Value> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let mut existing = path;
+        while !existing.exists() {
+            existing = existing.parent()?;
+        }
+        let path = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
+        let mut result = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: the CString is terminated and lives through the call. The output
+        // is read only when statvfs reports that it initialized the full structure.
+        if unsafe { libc::statvfs(path.as_ptr(), result.as_mut_ptr()) } != 0 {
+            return None;
+        }
+        let result = unsafe { result.assume_init() };
+        let fragment = u128::from(result.f_frsize);
+        let total = u64::try_from(u128::from(result.f_blocks).checked_mul(fragment)?).ok()?;
+        let available = u64::try_from(u128::from(result.f_bavail).checked_mul(fragment)?).ok()?;
+        Some(
+            json!({"total_bytes":total,"available_bytes":available,"source":"statvfs available blocks"}),
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

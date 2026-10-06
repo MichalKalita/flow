@@ -59,3 +59,7 @@ Verify cancellation, isolated data, bounded allocation, cleanup after restart, d
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
+
+## Delivered passive slice
+
+Protected administration now inventories CPUs, memory, application/WAL bytes, and free space on the application/log/backup volumes. It shows current overrides and reviewable log-storage suggestions with their calculation, uncertainty, and low-headroom notices. First-start log defaults use the same storage recommendation function; later inventory never overwrites existing settings. Runtime and browser tests prove read-only inventory and reviewed application of values. Active diagnostics, cancellation, measured bottleneck analysis, and minimum-host workload/recovery acceptance remain outstanding.

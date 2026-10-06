@@ -168,6 +168,18 @@ export function Welcome({
 
 export function ServerPage({ api }: { api: Api }) {
   const settings = usePolling<ServerSettings>(api, "/api/settings");
+  const capacity = usePolling<{
+    cpus: number;
+    memory: { limit_bytes: number | null };
+    disk: { logs: { available_bytes: number } | null };
+    recommendations: {
+      log_target_bytes: number | null;
+      log_chunk_bytes: number | null;
+      basis: string;
+      uncertainty: string;
+    };
+    notices: string[];
+  }>(api, "/api/capacity", 0);
   const [name, setName] = useState("");
   const [keep, setKeep] = useState(7);
   const [logTarget, setLogTarget] = useState(1024);
@@ -182,7 +194,7 @@ export function ServerPage({ api }: { api: Api }) {
       setLogTarget(settings.data.log_target_bytes / 1048576);
       setLogChunk(settings.data.log_chunk_bytes / 1048576);
     }
-  }, [settings.data]);
+  }, [settings.data?.revision]);
   const save = async (event: Event) => {
     event.preventDefault();
     if (!settings.data) return;
@@ -268,6 +280,62 @@ export function ServerPage({ api }: { api: Api }) {
           {saved && <p role="status">Settings saved.</p>}
         </form>
       </Panel>
+      {capacity.data && (
+        <Panel
+          title="Suggested settings"
+          description="Based on your hardware and available disk space. No load test is needed."
+        >
+          <div class="capacity-guidance">
+            <p>
+              {capacity.data.cpus} CPUs ·{" "}
+              {capacity.data.memory.limit_bytes == null
+                ? "Memory unavailable"
+                : `${(capacity.data.memory.limit_bytes / 1073741824).toFixed(1)} GiB memory`}{" "}
+              ·{" "}
+              {capacity.data.disk.logs == null
+                ? "Disk space unavailable"
+                : `${(capacity.data.disk.logs.available_bytes / 1073741824).toFixed(1)} GiB available on the log disk`}
+            </p>
+            {capacity.data.notices.map((notice) => (
+              <p key={notice} role="status">
+                {notice}
+              </p>
+            ))}
+            {capacity.data.recommendations.log_target_bytes != null && (
+              <>
+                <p>
+                  Suggested logs:{" "}
+                  {capacity.data.recommendations.log_target_bytes / 1048576} MiB
+                  total,{" "}
+                  {capacity.data.recommendations.log_chunk_bytes! / 1048576} MiB
+                  chunks.
+                </p>
+                <button
+                  class="button-secondary"
+                  onClick={() => {
+                    setLogTarget(
+                      capacity.data!.recommendations.log_target_bytes! /
+                        1048576,
+                    );
+                    setLogChunk(
+                      capacity.data!.recommendations.log_chunk_bytes! / 1048576,
+                    );
+                    setSaved(false);
+                  }}
+                >
+                  Use suggested log settings
+                </button>
+                <small>Review the values above, then save your settings.</small>
+              </>
+            )}
+            <details>
+              <summary>How this suggestion is calculated</summary>
+              <p>{capacity.data.recommendations.basis}</p>
+              <p>{capacity.data.recommendations.uncertainty}</p>
+            </details>
+          </div>
+        </Panel>
+      )}
       {settings.data && (
         <>
           <Panel

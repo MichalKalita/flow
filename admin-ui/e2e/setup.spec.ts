@@ -127,6 +127,22 @@ test("first setup creates a persistent owner without a manual admin token", asyn
       .getByRole("link", { name: "Server settings", exact: true })
       .click();
     await expect(page.getByLabel("Server name")).toHaveValue("Office server");
+    await expect(
+      page.getByRole("heading", { name: "Suggested settings", exact: true }),
+    ).toBeVisible();
+    const suggestion = await page.getByText(/^Suggested logs:/).textContent();
+    const proposed = suggestion!.match(
+      /Suggested logs: (\d+) MiB total, (\d+) MiB chunks/,
+    )!;
+    await page
+      .getByRole("button", { name: "Use suggested log settings", exact: true })
+      .click();
+    await expect(page.getByLabel("Local log storage (MiB)")).toHaveValue(
+      proposed[1],
+    );
+    await expect(page.getByLabel("Log chunk size (MiB)")).toHaveValue(
+      proposed[2],
+    );
     await page.getByLabel("Server name").fill("Office renamed");
     await page.getByLabel("Local log storage (MiB)").fill("8");
     await page.getByLabel("Log chunk size (MiB)").fill("1");

@@ -164,7 +164,16 @@ impl ServerState {
                 state.read_document(&database)?;
             } else {
                 let short = &state.instance[..8];
-                let defaults = json!({"name":format!("flow-{short}"),"setup_complete":false,"admin_token":STANDARD.encode(random::<48>()?),"secrets":{},"variables":{},"backup_keep":7,"log_target_bytes":crate::observability::LOG_DISK_LIMIT_BYTES,"log_chunk_bytes":crate::observability::LOG_CHUNK_BYTES});
+                let available = crate::resources::disk_space(directory)
+                    .and_then(|disk| disk["available_bytes"].as_u64());
+                let recommended = crate::capacity::recommendations(available, 0, 0);
+                let log_target = recommended["log_target_bytes"]
+                    .as_u64()
+                    .unwrap_or(crate::observability::LOG_DISK_LIMIT_BYTES);
+                let log_chunk = recommended["log_chunk_bytes"]
+                    .as_u64()
+                    .unwrap_or(crate::observability::LOG_CHUNK_BYTES);
+                let defaults = json!({"name":format!("flow-{short}"),"setup_complete":false,"admin_token":STANDARD.encode(random::<48>()?),"secrets":{},"variables":{},"backup_keep":7,"log_target_bytes":log_target,"log_chunk_bytes":log_chunk});
                 state.write_document(&database, 1, &defaults)?;
             }
             database.execute_batch("COMMIT")?;

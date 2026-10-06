@@ -42,6 +42,7 @@ pub fn router_projects_with_setup(
     Router::new()
         .route("/api/overview", get(overview))
         .route("/api/settings", get(settings).post(save_settings))
+        .route("/api/capacity", get(capacity))
         .route("/api/settings/secret", post(save_secret))
         .route("/api/catalog", get(catalog_index).post(catalog_install))
         .route("/api/catalog/launch", post(catalog_launch))
@@ -701,5 +702,13 @@ async fn backup_status(State(state): State<Admin>) -> Response {
     match crate::backups::restore_status(&state.projects) {
         Ok(value) => Json(value).into_response(),
         Err(error) => failure(error),
+    }
+}
+
+async fn capacity(State(state): State<Admin>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::capacity::inventory(&state.projects)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

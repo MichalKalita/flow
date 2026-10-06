@@ -57,3 +57,5 @@ pub mod backups;
 pub mod frontend;
 
 pub mod catalog;
+
+pub mod capacity;
