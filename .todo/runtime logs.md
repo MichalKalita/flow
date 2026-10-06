@@ -1,44 +1,64 @@
-# Runtime logs
+# Server-wide runtime logs
 
-## Requested outcome
+## Requested outcome and confirmed scope
 
-Configure a server-wide log storage limit, rather than only independent project limits. The admin interface must provide search, severity labels, and a log histogram. Project verbosity and logging settings must be editable in administration.
+All operational logs belong to the server as a whole. Provide one server-level logging service, archive set, storage budget, retention policy, and optional S3 archival configuration. Projects are metadata for filtering and verbosity rules, not separate log stores or retention owners.
+
+The admin interface must provide search, severity labels, a histogram, and the timestamp/age of the oldest retained log. Logging settings are changed through protected server administration.
 
 ## Current implementation
 
-The runtime has a 200-event memory cache, a bounded 512-event writer queue, rotating JSONL files, and archived search. Rotation is fixed at 256 MiB with three archives per observer. Per-project archive search is bounded to 4 MiB scanned and 200 returned entries per query; system browsing currently uses recent buffers. The UI already filters severity, kind, endpoint, status, text, and time. A host-wide configurable retention budget and a log-count histogram still need implementation.
+The existing implementation uses separate project observers/directories plus a host observer. It has a 200-event memory cache and bounded 512-event writer queue per observer, rotating JSONL files at 256 MiB with three archives. Project archive queries scan at most 4 MiB and return at most 200 entries; combined system browsing uses recent buffers. The UI already filters severity, kind, endpoint, status, text, and time.
 
-See [observability](../runtime/src/observability.rs), [archive queries](../runtime/src/log_store.rs), [the log explorer](../admin-ui/src/logs.tsx), and [integration tests](../runtime/tests/observability.rs).
+This is the starting point, not the requested final storage model. Consolidate operational logs into the common server service; keep project identity in each record. Project application databases, mutation audit, and telemetry isolation remain separate concerns. See [observability](../runtime/src/observability.rs), [archive queries](../runtime/src/log_store.rs), [the explorer](../admin-ui/src/logs.tsx), and [tests](../runtime/tests/observability.rs).
 
-## Implementation options and recommendation
+## Confirmed retention behavior
 
-1. Split one host budget into fixed project allocations. Simple, but inactive projects reserve capacity that active projects could use.
-2. Keep separate project files with a shared retention coordinator. Recommend this: preserve isolation while enforcing one global budget, with optional project caps and a reserved allowance for host errors.
-3. Merge logs into a shared file/store. This complicates isolation and access filtering and is unnecessary for the requested result.
+- **LOG-1:** Overwrite old history by removing the oldest chunks as new logs arrive. The configured byte limit is a long-term target, not a strictly atomic write boundary. Exceeding it briefly for a few seconds is acceptable; a 1 GB setting should converge to approximately 1 GB retained locally over time.
+- **LOG-3:** Show the oldest locally retained log's timestamp and age in administration. The duration of retained history depends on traffic volume; report observed coverage rather than converting bytes into an assumed fixed number of days.
+- Optional export of old logs to S3-compatible storage is configured for the entire server, not per project. Archives can contain records from multiple projects under protected administrative access.
 
-Count the active files and archives across all observers. Bound queues in both entries and bytes, since entry count alone does not bound memory. At budget pressure, prune eligible operational archives according to an explicit policy; never prune application databases, audit, or accepted event payloads through log cleanup. Show dropped entries, storage failures, and budget pressure.
+## Proposed storage and cleanup
+
+Use append-only segments with a server-wide writer and background rotation/cleanup. Remove the oldest closed segments in chunks instead of deleting an individual line for every new line. Segment size and cleanup cadence should make overshoot small and temporary; prolonged inability to converge must be visible as a storage/retention problem.
+
+Count all local operational log segments, including files awaiting export, toward the target. Do not create an unbounded second spool outside the measured log budget. Bound memory queues by entries and bytes. Cleanup must never touch application data, mutation audit, or accepted business-event payloads. Log writes and cleanup need not form an atomic transaction with each other or with application writes.
+
+Maintain bounded segment metadata: byte count, first/last record timestamps, and lifecycle/export status. Derive the oldest retained record from actual surviving segments, handling empty files and cleanup/restart. For a filtered project view, optionally show that filter's coverage separately from the server-wide oldest log. A configured budget reduction should be followed by background cleanup toward the new target; it does not require stopping the server.
+
+Plan transition from existing per-project archives without destroying available history unexpectedly. Options are one-time ingestion into server segments or a temporary read-only legacy view during migration. New writes must have one server owner. Public applications must not gain access to server archives through project APIs.
+
+## Optional server-level S3 archival
+
+Configure endpoint, bucket, server-specific key prefix, secret references, and archival policy in protected server settings. Use the same S3 connector infrastructure as application storage, but with explicitly separate host credentials and namespace. No project decides the destination for other projects' logs.
+
+Upload closed immutable segments through the common job/external-effect mechanism. A segment that is about to leave local retention can be archived remotely; earlier upload on rotation is also possible. Use stable object names and completion metadata to make retries/restart safe. Verify successful storage before labeling an archive exported. Optional compression and manifests should remain bounded and should not introduce a separate scheduler or event engine.
+
+Show export enabled/disabled, queued bytes, progress/last success, and failures alongside local retained bytes, target, oldest timestamp, and age. The age display is for locally available history; do not imply older S3 archives are searchable locally. Remote retention and any later remote browsing require explicit configuration.
+
+The outcome when S3 is unavailable and local history needs eviction is still open. Retrying indefinitely while retaining all files would contradict the bounded server log target. Use the common configurable attempt/terminal policy, with clear storage-pressure behavior and visible gaps. Upload diagnostics must not create an uncontrolled feedback loop of more archives and more upload failures.
 
 ## Search, severity, and histogram
 
-Define one severity vocabulary such as ERROR, WARN, INFO, DEBUG, and TRACE; map “verbose” to a documented setting. Projects inherit a host default and can override verbosity within host resource ceilings. Greater verbosity must never expose credentials, tokens, request bodies, email contents, or plugin arguments.
+Use server-level archived search with project as an optional filter. Preserve bounded scans, pagination, and cursor expiry when old segments are removed. Histogram buckets use the same filters and label partial archive scans as partial.
 
-Use bounded time buckets for log counts by severity. Recommend a live bounded aggregate for the recent window and resumable archive scans for older filtered ranges. A partial scan must be labeled partial; it cannot claim an exact histogram for an unscanned archive. Histograms describe retained/emitted log counts, not request latency percentiles.
+Define one severity vocabulary such as ERROR, WARN, INFO, DEBUG, and TRACE; map “verbose” to a documented setting. Server configuration can set the default and override verbosity for a named project. These are filtering rules in one host service, not independent project log budgets. No severity may reveal credentials, tokens, request bodies, email contents, signed URLs, or plugin arguments.
 
-Persist settings through the protected configuration store. Validate a lower budget and show the retention effect before applying it. Runtime logging failures must not undo committed application writes or block requests indefinitely.
+Operational log storage or export failure must not undo committed business writes or block requests indefinitely. Persist settings using the protected configuration store.
 
 ## Open decisions
 
-- **LOG-1:** How should global pressure select archives for removal? Recommend oldest eligible archives first, with a small protected host-error allowance and optional project caps.
-- **LOG-2:** Which default time range should the histogram show? Recommend one hour, with bounded 15-minute and six-hour alternatives.
-- **LOG-3:** Should lowering the budget prune archives immediately? Recommend an explicit preview followed by pruning under the newly applied policy.
+- **LOG-2:** Which default histogram window should be shown? Recommend one hour, with bounded 15-minute and six-hour alternatives.
+- **LOG-4:** If S3 is unavailable when old segments must be removed, should the server evict them to maintain local retention or keep them and apply backpressure/drop new operational logs? Recommend bounded retries followed by local eviction with an explicit export-gap warning; the chosen policy must not grow disk usage indefinitely.
+- **LOG-5:** How long should remote archives remain in S3? Recommend an explicit server archival retention policy, independent of the local byte target, with clear ownership of remote deletion.
 
-Answers: Pending conversation.
+Remaining answers: Pending conversation. Server-wide ownership, approximate byte-target retention, oldest-log visibility, and optional S3 archival are confirmed.
 
 ## Dependencies and verification
 
-Depends on [live settings](variables-and-secrets.md). Feeds [capacity guidance](benchmark.md) and every later feature's operational visibility.
+Local logging depends on [live settings](variables-and-secrets.md) and feeds [capacity guidance](benchmark.md). Optional remote archival follows [the common event/effect infrastructure](external-integrations.md) and a minimal [S3 connector](s3.md); it does not delay delivery of bounded local logs.
 
-Verify the total budget across many projects, rotation, cursor expiry, project deletion/reload, concurrent setting changes, disk-full handling, bounded histogram scans, and redaction at every severity. Add admin E2E coverage for settings and filtered histogram behavior. Keep logs and telemetry outside application SQLite; audit retention is a separate concern.
+Verify server ownership across many projects, convergence after brief overshoot, rotation/deletion races, lowering the target, oldest-age accuracy, empty history, restart, legacy archives, filter/cursor behavior, bounded histogram scans, and redaction. Test S3 outages, duplicate/restarted uploads, bounded pending bytes, exported-state accuracy, and the selected pressure/remote-retention policy. Include admin E2E for local coverage and export status. Keep logs and telemetry outside application SQLite; audit retention is separate.
 
 ## Implementation order
 

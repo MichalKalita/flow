@@ -64,7 +64,7 @@ Recommend a transactional outbox for effects: commit the local business state, i
 
 Use stable idempotency identifiers when the destination supports them. A timeout after a remote success is an unknown outcome; check status or reconcile before blindly retrying. Compensation is another business operation, not a rollback guarantee. Deleting exhausted work cannot reverse an already performed effect.
 
-Recheck the intended actor's current authority before a delayed effect; do not treat an old queue entry as permission to bypass revocation. Source-specific protocol behavior belongs to the plugin, while dispatch, attempt limits, and terminal policy remain common runtime mechanisms.
+Recheck the intended actor's current authority before a delayed effect; do not treat an old queue entry as permission to bypass revocation. Source-specific protocol behavior belongs to the plugin, while dispatch, attempt limits, and terminal policy remain common runtime mechanisms. Server-log archival uses the same connector/job infrastructure with explicit host-level configuration and separate credentials/namespace; it does not create project-specific log stores or a second scheduler.
 
 ## External-data-only endpoints
 
@@ -79,7 +79,7 @@ Configure trusted destinations, redirect policy, timeouts, maximum response byte
 | Service | Typical use | Required behavior |
 | --- | --- | --- |
 | HTTP/REST APIs | Catalogs, CRM, ERP, geocoding | Typed reads/writes, bounded responses, auth, timeout and outcome handling |
-| S3-compatible object storage | Uploads, downloads, attachments | Scoped signing, upload intents, completion verification, cleanup |
+| S3-compatible object storage | Uploads, downloads, attachments, server-log archives | Scoped signing, upload intents, completion verification, cleanup |
 | MQTT brokers/devices | Device events and commands | Source verification, project routing, bounded connections, duplicate handling |
 | Built-in mail / SMTP relay | Incoming messages and outgoing mail | Email source plugin, durable acceptance, delivery state, common failure policy |
 | Mailbox access | Reading and managing mail | Typed mailbox operations, account permissions, protocol state |
