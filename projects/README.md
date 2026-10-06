@@ -81,3 +81,7 @@ changes return a conflict rather than overwrite newer data. The console retains
 normal application authentication and permissions. Internal runtime tables and
 arbitrary SQL are not exposed. Pages contain at most 50 records; individual records
 above 256 KiB are shown as oversized and cannot be edited through this browser.
+
+### Test seed profile
+
+Hosted projects exclude `[seed ... [group test] ...]` by default. Set `"test_seeds": true` in that project's `project.json` to enable declared demo/test initialization. The manifest value is a boolean. Normal bootstrap seeds remain enabled; changing the profile does not remove existing data or reinsert deleted seeds. Profile changes pass complete reload validation, and invalid candidates retain the working configuration. Backups preserve the project profile and the seed ledger.

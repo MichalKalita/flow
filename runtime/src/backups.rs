@@ -410,6 +410,10 @@ fn restored_config(name: &str, settings: &Value, server: &ServerState) -> Result
         base_path: format!("/{name}"),
         ..Config::default()
     };
+    config.test_seeds = match settings.get("test_seeds") {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(invalid)?,
+    };
     for (section, jwt) in [("jwt_secrets", true), ("event_credentials", false)] {
         if let Some(values) = settings.get(section) {
             for (alias, reference) in values.as_object().ok_or_else(invalid)? {

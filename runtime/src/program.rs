@@ -94,6 +94,17 @@ pub struct Auth {
     pub issuer: String,
     pub audience: String,
 }
+#[derive(Clone, Debug, PartialEq)]
+pub enum SeedGroup {
+    Production,
+    Test,
+}
+#[derive(Clone, Debug)]
+pub struct Seed {
+    pub entity: String,
+    pub rows: Vec<Node>,
+    pub group: SeedGroup,
+}
 #[derive(Clone, Debug)]
 pub struct Program {
     pub types: BTreeMap<String, Type>,
@@ -105,7 +116,7 @@ pub struct Program {
     pub http_auth: Vec<String>,
     pub transports: BTreeMap<String, Vec<String>>,
     pub streams: BTreeMap<String, Stream>,
-    pub seeds: Vec<(String, Vec<Node>)>,
+    pub seeds: Vec<Seed>,
     pub source: String,
 }
 fn fail(s: impl Into<String>) -> Error {
@@ -347,9 +358,30 @@ impl Program {
                 }
                 "permissions" => permission_nodes.push(n),
                 "query" | "mutate" => op_nodes.push(n),
-                "seed" => p
-                    .seeds
-                    .push((ident(n.arg(0)?.text()?)?, opt(n, "rows")?.args()?.to_vec())),
+                "seed" => {
+                    let mut seen = BTreeSet::new();
+                    for option in n.args()?.iter().skip(1) {
+                        if !["rows", "group"].contains(&option.head())
+                            || !seen.insert(option.head())
+                        {
+                            return Err(fail("Unknown or duplicate seed option"));
+                        }
+                    }
+                    let group = match n.option("group") {
+                        None => SeedGroup::Production,
+                        Some(group) if group.args()?.len() == 1 => match group.arg(0)?.text()? {
+                            "production" => SeedGroup::Production,
+                            "test" => SeedGroup::Test,
+                            _ => return Err(fail("Seed group must be production or test")),
+                        },
+                        _ => return Err(fail("Seed group requires one value")),
+                    };
+                    p.seeds.push(Seed {
+                        entity: ident(n.arg(0)?.text()?)?,
+                        rows: opt(n, "rows")?.args()?.to_vec(),
+                        group,
+                    });
+                }
                 "transport" => {
                     let name = ident(n.arg(0)?.text()?)?;
                     let aliases = opt(n, "auth")?
@@ -787,12 +819,28 @@ impl Program {
                 event,
             });
         }
-        for (entity, rows) in &p.seeds {
+        let mut seeded_ids = BTreeSet::new();
+        for seed in &p.seeds {
+            let entity = &seed.entity;
+            let rows = &seed.rows;
             let e = p
                 .entities
                 .get(entity)
                 .ok_or_else(|| fail("Unknown seed entity"))?;
             for row in rows {
+                let value = literal(row)?;
+                let id = valid_id(
+                    value
+                        .fields()?
+                        .get("id")
+                        .ok_or_else(|| fail("Seed row requires an ID"))?
+                        .clone(),
+                )?;
+                if !seeded_ids.insert((entity.clone(), id)) {
+                    return Err(fail(
+                        "Duplicate seed entity ID across declarations or groups",
+                    ));
+                }
                 p.validate(
                     &Type::Record(
                         e.fields

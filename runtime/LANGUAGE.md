@@ -46,3 +46,11 @@ Entity brands are part of runtime values, not encoded into prefixes in the ID.
 `[page Contact $after 50]` reads records ordered by positive numeric entity ID. The cursor is a matching branded ID or null; the page size is between 1 and 1000. Central READ permissions filter records before they count toward the page. Work remains bounded; extremely sparse permitted results can reach the execution limit. Staged creates participate in ID order.
 
 `[expectVersion [entity $contactId] $version]` requires normal READ permission and compares the stored numeric `version` field before a mutation. A mismatch returns `conflict` (HTTP 409) and rolls back the transaction, including audit. Applications must increment the version under their normal UPDATE rules; the expression does not grant mutation permission.
+
+## Production and test seeds
+
+A seed defaults to production/bootstrap data. Use `[seed Item [group production] [rows ...]]` explicitly, or `[seed Item [group test] [rows ...]]` for optional test/demo data. Both groups are compiled and type-checked; duplicate entity IDs across declarations/groups are rejected.
+
+Test seeds are disabled by default. A hosted project's `project.json` can explicitly enable them with `"test_seeds": true`; the value must be a boolean and affects only that project. Runtime callers use `Config.test_seeds`. Existing ungrouped seeds retain production behavior. Do not put demo credentials in an ungrouped production seed.
+
+Selected seeds insert once with data and audit in the same transaction. Deleted seeded rows are not recreated on reload/restart. A newly declared seed colliding with an existing untracked entity ID rejects the candidate instead of overwriting user data. Changing an already applied seed does not update its row; intentional updates require a migration. Disabling test seeds does not delete previously inserted test data or reset committed numeric sequence boundaries. Seeds do not dispatch business automations.

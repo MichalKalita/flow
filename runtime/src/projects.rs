@@ -472,10 +472,23 @@ impl Projects {
             .as_object()
             .ok_or_else(|| Error::new("configuration", "Manifest must be an object"))?;
         if fields.keys().any(|key| {
-            !["jwt_secrets", "event_credentials", "frontend", "catalog"].contains(&key.as_str())
+            ![
+                "jwt_secrets",
+                "event_credentials",
+                "frontend",
+                "catalog",
+                "test_seeds",
+            ]
+            .contains(&key.as_str())
         }) {
             return Err(Error::new("configuration", "Unknown manifest setting"));
         }
+        config.test_seeds = match manifest.get("test_seeds") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| Error::new("configuration", "test_seeds must be a boolean"))?,
+        };
         if let Some(catalog) = manifest.get("catalog")
             && (!catalog.is_object()
                 || catalog["template"] != "contacts"

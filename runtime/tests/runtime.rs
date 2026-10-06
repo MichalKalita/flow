@@ -12,6 +12,7 @@ const KEY: &[u8] = b"development-key-32-bytes-minimum-123456";
 fn config() -> Config {
     Config {
         base_path: String::new(),
+        test_seeds: false,
         jwt_keys: BTreeMap::from([("user".into(), KEY.to_vec())]),
         event_credentials: BTreeMap::from([(
             "service:1".into(),

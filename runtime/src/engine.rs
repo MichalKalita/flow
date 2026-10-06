@@ -28,6 +28,7 @@ fn q(name: &str) -> String {
 #[derive(Clone, Default)]
 pub struct Config {
     pub base_path: String,
+    pub test_seeds: bool,
     pub jwt_keys: BTreeMap<String, Vec<u8>>,
     pub event_credentials: BTreeMap<String, String>,
 }
@@ -261,8 +262,12 @@ impl Runtime {
             }
             crate::audit::install(&db, &program)?;
             db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_seed_rows(entity TEXT NOT NULL,id INTEGER NOT NULL,PRIMARY KEY(entity,id));")?;
-            for (entity, rows) in &program.seeds {
-                for node in rows {
+            for seed in &program.seeds {
+                if seed.group == crate::program::SeedGroup::Test && !config.test_seeds {
+                    continue;
+                }
+                let entity = &seed.entity;
+                for node in &seed.rows {
                     let fields = literal(node)?.fields()?.clone();
                     let id = crate::program::valid_id(
                         fields
@@ -274,9 +279,15 @@ impl Runtime {
                         "INSERT OR IGNORE INTO _flow_seed_rows(entity,id) VALUES(?1,?2)",
                         rusqlite::params![entity, id],
                     )? > 0;
-                    if !first || exists(&db, entity, &id)? {
+                    if !first {
                         continue;
-                    };
+                    }
+                    if exists(&db, entity, &id)? {
+                        return Err(Error::new(
+                            "configuration",
+                            "New seed conflicts with an existing entity ID",
+                        ));
+                    }
                     let reference = Value::reference(entity, &id);
                     let t = stored_type(&program, entity)?;
                     let row = program.validate(&t, Value::record(fields), Some(reference))?;

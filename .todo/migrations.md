@@ -76,3 +76,7 @@ Use the shared [settings/defaults and setup-wizard contract](variables-and-secre
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
+
+## Delivered seed groups
+
+Production/bootstrap and opt-in test/demo groups are implemented. Hosted manifests select a project-local boolean profile; both groups are statically validated. Duplicate seed IDs are rejected, first-use collisions reject activation, and initialization/audit/ledger writes are transactional. Disabled groups consume no numeric allocations. Restart/deletion/profile-change tests preserve once-only behavior and committed allocation boundaries. Versioned incompatible data/schema migrations and cross-project transfers remain outstanding.
