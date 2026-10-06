@@ -12,5 +12,5 @@ admin-ui/playwright-report/
 
 /projects/*-error.txt
 
-# Local product backlog.
-/TODO.md
+# Local product backlog and working plans.
+/.plan/
