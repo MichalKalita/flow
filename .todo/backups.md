@@ -16,7 +16,7 @@ Projects use SQLite with WAL, cached validated programs, separate application au
 2. Full snapshots plus incremental history. Useful later if measured backup costs require it, but not a prerequisite for the simple initial design.
 3. Storage-provider snapshots as an optional additional mechanism. Do not require a particular cloud or platform to restore Flow.
 
-Support a local destination and an optional S3-compatible destination through the common storage connector. Local staging/spool must be bounded. A backup becomes available for restoration only when all required parts and its integrity/manifest checks are complete; failed attempts must not look like usable backups.
+Support the common configurable [storage destinations](s3.md#confirmed-general-archive-and-backup-destinations): local disks, mounted remote disks, SMB/NFS shares, SFTP, FTP/FTPS, WebDAV, and S3-compatible storage. The user confirms ordinary standard-protocol destinations, not only S3. Local staging/spool must be bounded. A backup becomes available for restoration only when all required parts and its integrity/manifest checks are complete; failed attempts must not look like usable backups.
 
 Use a supported SQLite snapshot/backup mechanism rather than copying a live main database file alone. See [SQLite backup API](https://www.sqlite.org/backup.html). Capture a validated deployment generation and define a consistent point across its project databases, program/configuration, and durable jobs. A coordinated short write pause is a possible implementation option, not an assumed instantaneous snapshot across independent databases.
 
@@ -28,7 +28,7 @@ Protect recoverable encryption material as part of the recovery design, includin
 
 HA members run the same software and hold all project data. Recommend one scheduled deployment-backup owner, normally the primary, to avoid duplicate expensive captures; failover ownership follows the same simple primary/standby model. This is separate from log archival, where every server logs and uploads only for itself.
 
-Server names/identities, peer trust/private keys, and deployment settings need an explicit restore choice: restore the same instance or create a replacement instance and re-pair it. Do not accidentally start two active members with the same identity. Operational log history remains in the local/S3 logging lifecycle; restoring a business backup must not overwrite or relabel another server's logs.
+Server names/identities, peer trust/private keys, and deployment settings need an explicit restore choice: restore the same instance or create a replacement instance and re-pair it. Do not accidentally start two active members with the same identity. Operational log history remains in the local/configured-archive logging lifecycle; restoring a business backup must not overwrite or relabel another server's logs.
 
 ## Restoration workflow
 
@@ -58,17 +58,17 @@ Provide a guided restore and a documented minimal offline recovery command. Prot
 
 ## Open decisions
 
-- **BKP-1:** Which destinations are required initially? Recommend local backups plus optional S3-compatible storage, with the wizard encouraging an off-server copy.
-- **BKP-2:** What default schedule/retention is appropriate? Recommend an adjustable daily full backup and a small bounded retention preset, calibrated to storage and acceptable data loss; do not assume one policy fits all companies.
+- **BKP-1 (confirmed):** Support local and remote disks/shares plus common standard storage protocols through the shared destination adapters. The wizard collects destination facts and recommends an off-server copy; do not ask the user to choose protocol implementation details.
+- **BKP-2 (implementation default):** Provide a tested, storage-aware schedule/retention preset instead of requiring users to tune backup mechanics. Periodic snapshots can supplement continuous history where no-loss disaster recovery is required; a daily snapshot alone must not be presented as preserving all later acknowledged data. Let the wizard explain the recovery coverage and collect required destination/recovery details.
 - **BKP-3:** Should the first restore flow replace the whole deployment or also restore individual projects? Recommend whole-deployment recovery first, with explicit single-project restore later and no implicit merging.
 - **BKP-4:** How should backup recovery keys be supplied on a replacement server? Recommend a portable encrypted backup/recovery package that the administrator can safely retain independently of the failed host.
 - **BKP-5:** Must recovery preserve all acknowledged data even if all HA members are lost? Recommend defining this explicitly; it requires off-server durable change history in addition to snapshots.
 
-Answers: Pending conversation. Configurable backups and a functional restore path are confirmed; destinations, numeric defaults, key packaging, and restore granularity are not.
+Answers: Pending conversation. Configurable backups and a functional restore path are confirmed; standard local/network/S3 destination support is confirmed; numeric defaults, key packaging, and restore granularity still need design.
 
 ## Dependencies and verification
 
-Depends on [settings/key recovery](variables-and-secrets.md), [consistent snapshot and activation](migrations.md), and resource headroom. A local manual backup/restore validation should precede risky schema activation. Scheduling integrates with [common events/jobs](external-integrations.md); optional remote backups share the [S3 connector](s3.md). Full HA replication builds on a verified whole-deployment snapshot/restore format.
+Depends on [settings/key recovery](variables-and-secrets.md), [consistent snapshot and activation](migrations.md), and resource headroom. A local manual backup/restore validation should precede risky schema activation. Scheduling integrates with [common events/jobs](external-integrations.md); local/remote backup targets share the [destination adapters](s3.md). Full HA replication builds on a verified whole-deployment snapshot/restore format.
 
 Test restoration into a fresh isolated directory/runtime, not just backup file creation. Cover multiple projects, matching audit/data, numeric references/sequences, deleted IDs, seeds, blobs, secrets, pending/completed effects, corruption/missing parts, disk-full/interrupted capture, failed activation, identity replacement, stale standby reconnect, and repeated scheduled-job ownership. Confirm resource limits on the minimum host and perform an actual recovery drill.
 

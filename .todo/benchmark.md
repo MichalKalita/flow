@@ -2,7 +2,7 @@
 
 ## Product purpose
 
-Flow aims to provide reliable, easy-to-operate software for companies on inexpensive servers. Reliability and preserving data take priority over throughput. It is not a Kubernetes-style orchestrator or a platform intended for thousands of nodes. Capacity advice should improve the full server's reliability and use of available hardware rather than recommend sharding, scheduling clusters, or required infrastructure stacks.
+Flow aims to provide reliable, easy-to-operate software for companies on inexpensive servers. Reliability and preserving data take priority over throughput. It is not a Kubernetes-style orchestrator or a platform intended for thousands of nodes. The primary audience has no infrastructure expertise. Measure success by a working reliable deployment and understandable recovery workflows, not by the number of tuning controls exposed. Capacity advice should improve the full server's reliability and use of available hardware rather than recommend sharding, scheduling clusters, or required infrastructure stacks.
 
 ## Requested outcome
 
@@ -24,11 +24,11 @@ No single microbenchmark can determine the best settings for every Flow program.
 
 ## Confirmed default and wizard requirement
 
-Every setting has a defined default and guided configuration. The wizard recommends suitable values for the particular server, including worker/admission limits, server-wide log target and chunk size, storage headroom, and enabled HA/S3 capabilities. Recommendations complement defaults; the wizard is not mandatory for a valid standalone startup.
+Every setting has a good operational default and guided configuration. Users should not need performance expertise or a benchmark run just to obtain a reliable installation. The wizard recommends suitable values for the particular server, including worker/admission limits, server-wide log target and chunk size, storage headroom, and enabled HA/S3 capabilities. Recommendations complement defaults; the wizard is not mandatory for a valid standalone startup.
 
 Use a shared settings schema and recommendation service rather than separate hard-coded values in startup and the UI. Show detected facts, current/default values, proposed changes, reasons, and uncertainty. Retain deliberate administrator overrides. Required external details such as peer keys and storage credentials are collected explicitly; recommendations cannot fabricate them.
 
-Start with bounded passive inventory. Optional active diagnostics can refine estimates, but must not run saturation tests automatically merely because the wizard opened. A new installation still receives usable default guidance without prior traffic history. Defaults and numeric recommendation formulas remain to be calibrated; the general wizard requirement is confirmed.
+Start with bounded passive inventory. Optional active diagnostics can refine estimates, but must not run saturation tests automatically merely because the wizard opened. A new installation still receives usable default guidance without prior traffic history. Calibrate defaults and numeric formulas during implementation and validate them against representative workloads and the minimum host. The user confirms good defaults as a product priority; low-level tuning values should normally be selected by the system, with optional expert overrides.
 
 ## Proposed admin workflow
 
@@ -45,8 +45,8 @@ HA is a primary/standby copy of the entire deployment: identical software, all p
 ## Open decisions
 
 - **CAP-1:** May active calibration run while production traffic is present? Recommend passive guidance by default and opt-in active tests with strict limits or a maintenance window.
-- **CAP-2:** What latency/error target defines acceptable capacity? Recommend a project-specific target; provide a clearly labeled example, not an assumed global SLO.
-- **CAP-3:** Should guidance automatically change settings? Recommend suggestions plus explicit application, with version checks and a way to restore prior settings.
+- **CAP-2 (implementation guidance):** Ship a tested baseline reliability/headroom profile; workload-specific latency/error targets may be optional expert settings, not required setup questions.
+- **CAP-3 (implementation guidance):** Apply good host-derived defaults automatically on initialization. Show wizard recommendations before replacing existing explicit settings, with version checks and restoration of prior values.
 
 Answers: Pending conversation.
 
