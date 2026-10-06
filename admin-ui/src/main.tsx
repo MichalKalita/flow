@@ -1,3 +1,4 @@
+import { ServerPage, Welcome } from "./server";
 import { DatabasePage } from "./database";
 import { render } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
@@ -13,6 +14,19 @@ import { AuditPage, LogsPage } from "./logs";
 import { ConsolePage, TokensPage } from "./tools";
 import type { Api, Overview } from "./types";
 const pages = [
+  {
+    id: "applications",
+    title: "Applications",
+    description: "Ready-to-use tools for your everyday work.",
+    icon: "overview",
+    group: "YOUR SERVER",
+  },
+  {
+    id: "server",
+    title: "Server settings",
+    description: "Your server, with good defaults.",
+    icon: "resources",
+  },
   {
     id: "overview",
     title: "Overview",
@@ -92,90 +106,6 @@ function writeAdminToken(token: string) {
     /* sessionStorage can throw if the browser blocks it */
   }
 }
-function Login({
-  onLogin,
-  error: sessionError = "",
-}: {
-  onLogin: (key: string) => void;
-  error?: string;
-}) {
-  const [key, setKey] = useState(""),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
-  const login = async (e: Event) => {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const response = await fetch("/api/overview", {
-        headers: { Authorization: `Bearer ${key}` },
-      });
-      if (!response.ok)
-        throw Error(
-          response.status === 401
-            ? "The admin token is not valid."
-            : `Service returned HTTP ${response.status}.`,
-        );
-      onLogin(key);
-      setKey("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Unable to connect");
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div class="login-shell">
-      <div class="login-brand">
-        <span class="brand-mark">
-          f<span>.</span>
-        </span>
-        <span>
-          flow<span class="brand-divider">/</span>
-          <small>control plane</small>
-        </span>
-      </div>
-      <div class="login-card">
-        <span class="login-eyebrow">ONE SERVICE. FULL VISIBILITY.</span>
-        <h1>
-          Know your system.
-          <br />
-          Own your operations.
-        </h1>
-        <p>
-          Metrics, streaming, logs and developer tools.
-          <br />
-          Everything your runtime needs, in one place.
-        </p>
-        <form onSubmit={login}>
-          <label htmlFor="admin-token">Admin access token</label>
-          <input
-            id="admin-token"
-            type="password"
-            value={key}
-            onInput={(e) => setKey(e.currentTarget.value)}
-            placeholder="Enter FLOW_ADMIN_TOKEN"
-            autoComplete="off"
-            required
-            autoFocus
-          />
-          <ErrorBanner message={error || sessionError} />
-          <button class="button-primary w-full" disabled={busy || !key}>
-            {busy ? "Connecting…" : "Open control plane"}
-            <Icon name="arrow" size={17} />
-          </button>
-        </form>
-        <div class="login-foot">
-          <Icon name="audit" size={15} />
-          Internal listener · token stays in this tab
-        </div>
-      </div>
-      <p class="login-caption">
-        Built into Flow. No agents. No external monitoring stack.
-      </p>
-    </div>
-  );
-}
 function App() {
   const [token, setToken] = useState(readAdminToken),
     [authError, setAuthError] = useState(""),
@@ -250,7 +180,7 @@ function App() {
       setToast("Clipboard unavailable. Select the text to copy it.");
     }
   };
-  if (!token) return <Login onLogin={rememberToken} error={authError} />;
+  if (!token) return <Welcome onLogin={rememberToken} error={authError} />;
   return (
     <Authenticated
       key={token}
@@ -537,6 +467,13 @@ function Authenticated(props: AuthenticatedProps) {
                 ) : (
                   <DatabasePage api={api} />
                 ))}
+              {page === "server" && <ServerPage api={api} />}
+              {page === "applications" && (
+                <Empty
+                  title="Your applications"
+                  text="Your catalog will appear here."
+                />
+              )}
               {page === "overview" && <OverviewPage {...pageProps} />}{" "}
               {page === "traffic" && <TrafficPage {...pageProps} />}{" "}
               {page === "streaming" && <StreamingPage {...pageProps} />}{" "}

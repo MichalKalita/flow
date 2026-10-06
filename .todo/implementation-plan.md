@@ -169,3 +169,7 @@ bun run test:e2e
 Use the real runtime and isolated temporary databases for admin/application E2E. Commit small rebuilt assets in `runtime/src/admin-assets/` alongside frontend source. Do not commit databases, logs, secrets, or build directories.
 
 Capacity and mail interoperability need explicit bounded operational validation in addition to unit/integration tests. Report the workload and environment; green functional tests alone do not prove production capacity or external-service compatibility.
+
+## Implementation progress
+
+Persistent server identity/key generation, authenticated-encrypted settings, masked secrets, project secret references, protected local enrollment, owner password login, and the initial settings UI are implemented. Restart/concurrent initialization/corrupt-key tests and real-runtime listener/authentication tests pass. The first-run browser flow passes through restart; existing dashboard E2E flows pass. Password-encrypted key recovery is implemented and being integrated with complete backup/restore. Catalog installation, application frontend, and full backup/restore remain in progress; HA and subsequent features are not implemented yet.

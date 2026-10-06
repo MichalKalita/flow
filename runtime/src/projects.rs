@@ -24,6 +24,7 @@ pub struct Projects {
     data: PathBuf,
     config: Config,
     pub system: Observability,
+    pub server: Option<Arc<crate::server_state::ServerState>>,
 }
 fn io(error: std::io::Error) -> Error {
     Error::new("storage", error.to_string())
@@ -38,6 +39,12 @@ fn name_valid(name: &str) -> bool {
 }
 impl Projects {
     pub fn single(runtime: SharedRuntime) -> Arc<Self> {
+        Self::single_with_server(runtime, None)
+    }
+    pub fn single_with_server(
+        runtime: SharedRuntime,
+        server: Option<Arc<crate::server_state::ServerState>>,
+    ) -> Arc<Self> {
         let system = runtime.lock().unwrap().observability.clone();
         Arc::new(Self {
             entries: RwLock::new(BTreeMap::from([(
@@ -53,6 +60,7 @@ impl Projects {
             data: PathBuf::new(),
             config: Config::default(),
             system,
+            server,
         })
     }
     pub fn load(
@@ -61,6 +69,15 @@ impl Projects {
         config: Config,
         system: Observability,
     ) -> Result<Arc<Self>> {
+        Self::load_with_server(root, data, config, system, None)
+    }
+    pub fn load_with_server(
+        root: &Path,
+        data: &Path,
+        config: Config,
+        system: Observability,
+        server: Option<Arc<crate::server_state::ServerState>>,
+    ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(data).map_err(io)?;
         let registry = Arc::new(Self {
             entries: RwLock::new(BTreeMap::new()),
@@ -68,6 +85,7 @@ impl Projects {
             data: data.into(),
             config,
             system,
+            server,
         });
         registry.scan()?;
         Ok(registry)
@@ -330,18 +348,34 @@ impl Projects {
                 for (alias, env) in values.as_object().ok_or_else(|| {
                     Error::new("configuration", "Manifest settings must be objects")
                 })? {
-                    let env = env.as_str().ok_or_else(|| {
-                        Error::new(
+                    let secret = if let Some(variable) = env.as_str() {
+                        std::env::var(variable).map_err(|_| {
+                            Error::new(
+                                "configuration",
+                                format!("Missing environment variable {variable}"),
+                            )
+                        })?
+                    } else if let Some(reference) = env
+                        .as_object()
+                        .filter(|fields| fields.len() == 1)
+                        .and_then(|fields| fields.get("secret"))
+                        .and_then(Value::as_str)
+                    {
+                        self.server
+                            .as_ref()
+                            .ok_or_else(|| {
+                                Error::new("configuration", "Server secret storage is unavailable")
+                            })?
+                            .secret(name, reference)?
+                            .ok_or_else(|| {
+                                Error::new("configuration", "Required project secret is missing")
+                            })?
+                    } else {
+                        return Err(Error::new(
                             "configuration",
-                            "Secret settings name environment variables",
-                        )
-                    })?;
-                    let secret = std::env::var(env).map_err(|_| {
-                        Error::new(
-                            "configuration",
-                            format!("Missing environment variable {env}"),
-                        )
-                    })?;
+                            "Secret settings require an environment name or a secret reference",
+                        ));
+                    };
                     if mode {
                         config.jwt_keys.insert(alias.clone(), secret.into_bytes());
                     } else {

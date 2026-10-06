@@ -290,3 +290,21 @@ framework or frontend server. Bun, Tailwind and Playwright are development tools
 production needs only the Rust executable. Commit regenerated `src/admin-assets/`
 alongside frontend source changes. E2E tests start the real runtime on isolated
 ports and a temporary database; they never use the project's `.env` or production data.
+
+## Persistent server settings and first setup
+
+The runtime initializes a private server state directory on first startup. It generates a stable instance identity, an Ed25519 peer identity, an AES-256-GCM secret-storage key, and an administrative credential. Identity and key material persist across restarts. Missing or invalid keys for existing encrypted state fail startup instead of silently replacing keys.
+
+`FLOW_SERVER_DIR` overrides the directory. By default it is `server/` beside the configured database directory/file; a bare database filename uses `data/server/`. `server.keys` and the containing directory have restricted permissions. `server.sqlite` stores a versioned authenticated-encrypted settings document; it is separate from application databases and mutation audit. Protect keys and recoverable encrypted state. Owner enrollment also creates `recovery.keys`, a password-encrypted recovery package using an independent salt/key derivation. It can recover the original key material using the owner password without placing unencrypted keys in a backup.
+
+Without `FLOW_ADMIN_TOKEN`, open the loopback admin dashboard for first setup. Choose a server name and an owner password of at least 10 characters. The generated administrative credential is returned only to that setup session and remains in the tab's session storage. Later sign-ins verify the salted PBKDF2-HMAC-SHA256 owner password. A bounded server-wide login attempt budget protects the password verifier. Secrets and passwords are never written to operational logs.
+
+Initial enrollment is available only on a loopback admin listener and rejects non-local hosts/cross-origin requests. Explicit existing admin tokens remain supported, including configured network opt-in. An explicit token keeps the legacy token login path; it does not expose unauthenticated enrollment. Public application routes never expose setup/settings APIs.
+
+Server settings support name, bounded local-backup retention, revision-checked updates, and masked secret previews. Ordinary secrets are namespaced by project. A manifest can reference encrypted storage instead of an environment variable:
+
+```json
+{ "jwt_secrets": { "user": { "secret": "signing" } } }
+```
+
+The protected `POST /api/settings/secret` API sets a secret using `project`, `name`, and `value`. Reading settings returns only masked previews, never full values or password hashes. Environment-variable mappings continue to work. Peer identity is preparation for the planned HA feature; generation of keys alone does not implement replication or failover.

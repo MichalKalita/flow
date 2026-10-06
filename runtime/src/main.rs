@@ -52,11 +52,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             .event_credentials
             .insert("service:1".into(), format!("ApiKey {secret}"));
     }
-    let admin_token = std::env::var("FLOW_ADMIN_TOKEN")
-        .map_err(|_| "Set FLOW_ADMIN_TOKEN (at least 32 bytes) for the internal dashboard")?;
-    if admin_token.len() < 32 {
-        return Err("FLOW_ADMIN_TOKEN must have at least 32 bytes".into());
-    }
+    let state_directory = std::env::var_os("FLOW_SERVER_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let parent = std::path::Path::new(database)
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("data"));
+            parent.join("server")
+        });
+    let server = Arc::new(flow_runtime::server_state::ServerState::open(
+        &state_directory,
+    )?);
+    let admin_token = match std::env::var("FLOW_ADMIN_TOKEN") {
+        Ok(value) if value.len() >= 32 => value,
+        Ok(_) => return Err("FLOW_ADMIN_TOKEN must have at least 32 bytes".into()),
+        Err(std::env::VarError::NotPresent) => server.admin_token()?,
+        Err(_) => return Err("FLOW_ADMIN_TOKEN must be valid text".into()),
+    };
     let admin_bind = std::env::var("FLOW_ADMIN_BIND")
         .unwrap_or_else(|_| "127.0.0.1:9090".into())
         .parse::<std::net::SocketAddr>()?;
@@ -71,18 +84,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let observer = Observability::disk(
         std::env::var("FLOW_OBSERVABILITY_DIR").unwrap_or_else(|_| "data/observability".into()),
     )?;
+    if args.is_empty() {
+        std::fs::create_dir_all(source)?;
+    }
     let project_mode = std::path::Path::new(source).is_dir();
     let projects = if project_mode {
-        Projects::load(
+        Projects::load_with_server(
             std::path::Path::new(source),
             std::path::Path::new(database),
             config,
             observer.clone(),
+            Some(server.clone()),
         )?
     } else {
         let mut runtime = Runtime::open(&std::fs::read_to_string(source)?, database, config)?;
         runtime.observability = observer.clone();
-        Projects::single(Arc::new(Mutex::new(runtime)))
+        Projects::single_with_server(Arc::new(Mutex::new(runtime)), Some(server.clone()))
     };
     let watch_projects = projects.clone();
     let watcher = tokio::spawn(async move {
@@ -117,7 +134,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "Flow admin listening on http://{}",
         admin_listener.local_addr()?
     );
-    let admin_router = admin::router_projects(projects.clone(), admin_token);
+    let admin_router = admin::router_projects_with_setup(
+        projects.clone(),
+        admin_token,
+        admin_bind.ip().is_loopback() && std::env::var_os("FLOW_ADMIN_TOKEN").is_none(),
+    );
     let admin_task = tokio::spawn(async move { axum::serve(admin_listener, admin_router).await });
     println!("Flow MQTT listening on {}", mqtt_listener.local_addr()?);
     let mqtt_projects = projects.clone();

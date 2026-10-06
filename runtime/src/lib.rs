@@ -49,3 +49,5 @@ pub(crate) mod telemetry;
 pub mod projects;
 
 pub(crate) mod dashboard;
+
+pub mod server_state;

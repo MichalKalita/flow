@@ -18,18 +18,31 @@ use std::{
 struct Admin {
     projects: Arc<crate::projects::Projects>,
     token: Arc<String>,
+    enrollment_local: bool,
+    login_attempts: Arc<Mutex<std::collections::VecDeque<std::time::Instant>>>,
 }
 pub fn router(runtime: Arc<Mutex<Runtime>>, token: String) -> Router {
     router_projects(crate::projects::Projects::single(runtime), token)
 }
 pub fn router_projects(projects: Arc<crate::projects::Projects>, token: String) -> Router {
+    router_projects_with_setup(projects, token, false)
+}
+pub fn router_projects_with_setup(
+    projects: Arc<crate::projects::Projects>,
+    token: String,
+    enrollment_local: bool,
+) -> Router {
     assert!(token.len() >= 32, "Admin token must have at least 32 bytes");
     let state = Admin {
         projects,
         token: Arc::new(token),
+        enrollment_local,
+        login_attempts: Arc::new(Mutex::new(std::collections::VecDeque::new())),
     };
     Router::new()
         .route("/api/overview", get(overview))
+        .route("/api/settings", get(settings).post(save_settings))
+        .route("/api/settings/secret", post(save_secret))
         .route("/api/projects", get(project_list))
         .route("/api/data", get(data_tables).post(data_write))
         .route("/api/data/rows", get(data_rows))
@@ -42,6 +55,8 @@ pub fn router_projects(projects: Arc<crate::projects::Projects>, token: String) 
             admit,
         ))
         .layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .route("/api/setup", get(setup_status).post(enroll))
+        .route("/api/login", post(owner_login))
         .route(
             "/",
             get(|| async { Html(include_str!("admin-assets/index.html")) }),
@@ -361,6 +376,8 @@ async fn issue_jwt(
 }
 fn failure(error: crate::Error) -> Response {
     let status = match error.code {
+        "unauthenticated" => 401,
+        "forbidden" => 403,
         "not_found" => 404,
         "invalid_input" | "invalid_output" | "limit" => 400,
         "conflict" | "database" => 409,
@@ -427,6 +444,144 @@ async fn data_write(
     .await
     {
         Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn server(state: &Admin) -> crate::Result<Arc<crate::server_state::ServerState>> {
+    state.projects.server.clone().ok_or_else(|| {
+        crate::Error::new(
+            "configuration",
+            "Persistent server settings are unavailable",
+        )
+    })
+}
+
+async fn settings(State(state): State<Admin>) -> Response {
+    match server(&state).and_then(|server| server.status()) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => failure(error),
+    }
+}
+
+async fn save_settings(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    let server = match server(&state) {
+        Ok(server) => server,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || server.update_settings(&input)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn save_secret(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    let server = match server(&state) {
+        Ok(server) => server,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        server.set_secret(
+            input["project"].as_str().unwrap_or(""),
+            input["name"].as_str().unwrap_or(""),
+            input["value"].as_str().unwrap_or(""),
+        )?;
+        server.status()
+    })
+    .await
+    {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn setup_status(State(state): State<Admin>) -> Response {
+    match server(&state).and_then(|server| server.status()) {
+        Ok(value) => Json(json!({"name":value["name"],"setup_complete":value["setup_complete"],"enrollment_available":state.enrollment_local,"password_login":value["setup_complete"]})).into_response(),
+        Err(_) => Json(json!({"setup_complete":true,"enrollment_available":false,"password_login":false})).into_response(),
+    }
+}
+
+fn login_admission(state: &Admin) -> bool {
+    let now = std::time::Instant::now();
+    let mut attempts = state.login_attempts.lock().unwrap();
+    while attempts
+        .front()
+        .is_some_and(|time| now.duration_since(*time).as_secs() >= 60)
+    {
+        attempts.pop_front();
+    }
+    if attempts.len() >= 10 {
+        return false;
+    }
+    attempts.push_back(now);
+    true
+}
+
+fn same_origin_local(headers: &axum::http::HeaderMap) -> bool {
+    let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let hostname = if host.starts_with('[') {
+        host.split(']').next().map(|name| format!("{name}]"))
+    } else {
+        host.split(':').next().map(str::to_owned)
+    };
+    if !hostname.is_some_and(|name| ["localhost", "127.0.0.1", "[::1]"].contains(&name.as_str())) {
+        return false;
+    }
+    headers
+        .get("origin")
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|origin| origin == format!("http://{host}"))
+}
+
+async fn enroll(
+    State(state): State<Admin>,
+    headers: axum::http::HeaderMap,
+    Json(input): Json<Value>,
+) -> Response {
+    if !state.enrollment_local || !same_origin_local(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !login_admission(&state) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let server = match server(&state) {
+        Ok(server) => server,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        server.enroll(
+            input["name"].as_str().unwrap_or(""),
+            input["password"].as_str().unwrap_or(""),
+        )
+    })
+    .await
+    {
+        Ok(Ok(token)) => Json(json!({"token":token})).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn owner_login(State(state): State<Admin>, Json(input): Json<Value>) -> Response {
+    if !login_admission(&state) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let server = match server(&state) {
+        Ok(server) => server,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || {
+        server.login(input["password"].as_str().unwrap_or(""))
+    })
+    .await
+    {
+        Ok(Ok(token)) => Json(json!({"token":token})).into_response(),
         Ok(Err(error)) => failure(error),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

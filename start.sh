@@ -6,8 +6,7 @@ project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$project_dir"
 
 if [ ! -f .env ]; then
-    printf '%s\n' 'Missing .env. Copy .env.example to .env and configure FLOW_ADMIN_TOKEN.' >&2
-    exit 1
+    cp .env.example .env
 fi
 
 # Load trusted local configuration and export it to the runtime.
@@ -16,9 +15,12 @@ set -a
 set +a
 
 : "${FLOW_ADMIN_TOKEN:=}"
-if [ "${#FLOW_ADMIN_TOKEN}" -lt 32 ]; then
+if [ -n "$FLOW_ADMIN_TOKEN" ] && [ "${#FLOW_ADMIN_TOKEN}" -lt 32 ]; then
     printf '%s\n' 'FLOW_ADMIN_TOKEN must contain at least 32 bytes.' >&2
     exit 1
+fi
+if [ -z "$FLOW_ADMIN_TOKEN" ]; then
+    unset FLOW_ADMIN_TOKEN
 fi
 
 : "${FLOW_APPLICATION:=projects}"
