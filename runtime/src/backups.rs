@@ -110,7 +110,7 @@ pub fn create(projects: &Projects) -> Result<Value> {
         .maintenance
         .try_lock()
         .map_err(|_| Error::new("conflict", "Project maintenance is already running"))?;
-    let (_, data) = projects.roots()?;
+    let _ = projects.roots()?;
     let server = projects
         .server
         .as_ref()
@@ -153,9 +153,7 @@ pub fn create(projects: &Projects) -> Result<Value> {
         let mut names = Vec::new();
         let mut secrets = Vec::new();
         for ((name, _), runtime) in active.iter().zip(&guards) {
-            let cache: Value = serde_json::from_slice(
-                &fs::read(data.join(format!("{name}-active.json"))).map_err(storage)?,
-            )?;
+            let cache = runtime.generation()?;
             let source = cache["source"].as_str().ok_or_else(invalid)?;
             let mut settings = cache["manifest"].clone();
             let config = runtime.configuration();
@@ -408,6 +406,7 @@ pub fn prepare(path: &Path, password: &str, parent: &Path) -> Result<RestoredBac
 fn restored_config(name: &str, settings: &Value, server: &ServerState) -> Result<Config> {
     let mut config = Config {
         base_path: format!("/{name}"),
+        manifest: Some(settings.clone()),
         ..Config::default()
     };
     config.test_seeds = match settings.get("test_seeds") {

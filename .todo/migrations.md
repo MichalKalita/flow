@@ -80,3 +80,7 @@ See [the shared implementation plan](implementation-plan.md) for delivery order,
 ## Delivered seed groups
 
 Production/bootstrap and opt-in test/demo groups are implemented. Hosted manifests select a project-local boolean profile; both groups are statically validated. Duplicate seed IDs are rejected, first-use collisions reject activation, and initialization/audit/ledger writes are transactional. Disabled groups consume no numeric allocations. Restart/deletion/profile-change tests preserve once-only behavior and committed allocation boundaries. Versioned incompatible data/schema migrations and cross-project transfers remain outstanding.
+
+## Program-generation recovery prerequisite
+
+The active source and reference-only manifest now commit inside SQLite with schema/bootstrap activation. Restart and backup prefer that committed generation over the secondary filesystem cache. Integration tests cover an unavailable cache destination, a later invalid candidate, restart into the last committed program, and a backup using the current program. This removes the cross-file cache window before incompatible migration work; it does not yet implement schema versions or transformations.

@@ -59,3 +59,5 @@ pub mod frontend;
 pub mod catalog;
 
 pub mod capacity;
+
+mod generations;

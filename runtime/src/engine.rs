@@ -29,6 +29,7 @@ fn q(name: &str) -> String {
 pub struct Config {
     pub base_path: String,
     pub test_seeds: bool,
+    pub manifest: Option<serde_json::Value>,
     pub jwt_keys: BTreeMap<String, Vec<u8>>,
     pub event_credentials: BTreeMap<String, String>,
 }
@@ -317,6 +318,11 @@ impl Runtime {
                 "INSERT INTO _flow_schema(id,hash) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET hash=excluded.hash",
                 [hash],
             )?;
+            crate::generations::install(
+                &db,
+                source,
+                config.manifest.as_ref().unwrap_or(&serde_json::json!({})),
+            )?;
             Ok(())
         })();
         match result {
@@ -394,6 +400,10 @@ impl Runtime {
                 .ok_or_else(|| Error::new("invalid_input", "Invalid snapshot path"))?],
         )?;
         Ok(())
+    }
+    pub(crate) fn generation(&self) -> Result<serde_json::Value> {
+        crate::generations::read(&self.db)?
+            .ok_or_else(|| Error::new("configuration", "Active program metadata is unavailable"))
     }
     pub(crate) fn configuration(&self) -> Config {
         self.config.clone()

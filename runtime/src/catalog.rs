@@ -147,6 +147,7 @@ pub fn install(projects: &Projects, template: &str, request: &str) -> Result<Val
         fs::write(staging.join("project.json"), serde_json::to_vec(&manifest)?).map_err(storage)?;
         let mut config = Config {
             base_path: format!("/{name}"),
+            manifest: Some(manifest.clone()),
             ..Config::default()
         };
         config.jwt_keys.insert(

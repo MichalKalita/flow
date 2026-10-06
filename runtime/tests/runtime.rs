@@ -13,6 +13,7 @@ fn config() -> Config {
     Config {
         base_path: String::new(),
         test_seeds: false,
+        manifest: None,
         jwt_keys: BTreeMap::from([("user".into(), KEY.to_vec())]),
         event_credentials: BTreeMap::from([(
             "service:1".into(),

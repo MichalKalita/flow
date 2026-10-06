@@ -372,3 +372,99 @@ fn interrupted_preparation_retains_working_generation_and_damaged_manifest_is_re
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     assert!(backups::verify(&projects, id, "fictional recovery password").is_err());
 }
+
+#[test]
+fn committed_program_generation_survives_missing_cache_and_is_the_backup_source() {
+    let directory = Directory::new();
+    let projects = setup(&directory);
+    let changed =
+        format!("{APP}\n[query Generation [output Bool] [http GET \"/generation\"] [result true]]");
+    let cache = directory.0.join("data/one-active.json");
+    fs::remove_file(&cache).unwrap();
+    fs::create_dir(&cache).unwrap();
+    fs::write(directory.0.join("projects/one/application.flow"), &changed).unwrap();
+    projects.scan().unwrap();
+    assert_eq!(projects.list()[0]["status"], "running");
+    let runtime = projects.get("one").unwrap();
+    assert_eq!(
+        runtime
+            .lock()
+            .unwrap()
+            .execute("Generation", json!({}), None)
+            .unwrap(),
+        true
+    );
+    let saved = backups::create(&projects).unwrap();
+    assert!(
+        fs::read_to_string(
+            directory
+                .0
+                .join("backups")
+                .join(saved["id"].as_str().unwrap())
+                .join("projects/one/application.flow")
+        )
+        .unwrap()
+        .contains("query Generation")
+    );
+    let database = rusqlite::Connection::open(directory.0.join("data/one.sqlite")).unwrap();
+    let committed: String = database
+        .query_row(
+            "SELECT source FROM _flow_active_program WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(committed, changed);
+    let before: i64 = database
+        .query_row("SELECT count(*) FROM _flow_audit", [], |row| row.get(0))
+        .unwrap();
+    fs::write(directory.0.join("projects/one/application.flow"), "[broken").unwrap();
+    projects.scan().unwrap();
+    assert_eq!(projects.list()[0]["status"], "stale");
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT source FROM _flow_active_program WHERE id=1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        changed
+    );
+    assert_eq!(
+        database
+            .query_row("SELECT count(*) FROM _flow_audit", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        before
+    );
+    let server = projects.server.clone();
+    for (_, runtime) in projects.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+    drop(database);
+    drop(runtime);
+    drop(projects);
+    let restarted = Projects::load_with_server(
+        &directory.0.join("projects"),
+        &directory.0.join("data"),
+        Config::default(),
+        Observability::default(),
+        server,
+    )
+    .unwrap();
+    assert_eq!(restarted.list()[0]["status"], "stale");
+    assert_eq!(
+        restarted
+            .get("one")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute("Generation", json!({}), None)
+            .unwrap(),
+        true
+    );
+    for (_, runtime) in restarted.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+}

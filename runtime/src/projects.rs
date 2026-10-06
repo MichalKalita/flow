@@ -233,8 +233,18 @@ impl Projects {
                 let cache_path = self.data.join(format!("{name}-active.json"));
                 let save_cache = || -> Result<()> {
                     let temporary = cache_path.with_extension("tmp");
-                    std::fs::write(&temporary, serde_json::to_vec(&cache)?).map_err(io)?;
-                    std::fs::rename(temporary, &cache_path).map_err(io)?;
+                    let saved = (|| -> Result<()> {
+                        std::fs::write(&temporary, serde_json::to_vec(&cache)?).map_err(io)?;
+                        std::fs::File::open(&temporary)
+                            .and_then(|file| file.sync_all())
+                            .map_err(io)?;
+                        std::fs::rename(&temporary, &cache_path).map_err(io)?;
+                        Ok(())
+                    })();
+                    if saved.is_err() {
+                        let _ = std::fs::remove_file(&temporary);
+                        self.system.log(json!({"kind":"project","name":name,"action":"cache_write","success":false,"error":"Secondary program cache could not be updated; committed database generation remains authoritative"}));
+                    }
                     Ok(())
                 };
                 if let Some(runtime) = previous.as_ref().and_then(|e| e.runtime.clone()) {
@@ -248,7 +258,9 @@ impl Projects {
                     return Ok(runtime);
                 }
                 let database = self.data.join(format!("{name}.sqlite"));
-                if database.exists() && cache_path.exists() {
+                if database.exists()
+                    && (cache_path.exists() || crate::generations::read_file(&database)?.is_some())
+                {
                     // A crash between the SQLite commit and cache rename can leave an
                     // older cache. Prefer an exact current-source match before replaying it.
                     if let Ok(mut runtime) = Runtime::open(
@@ -269,11 +281,7 @@ impl Projects {
                         save_cache()?;
                         return Ok(Arc::new(Mutex::new(runtime)));
                     }
-                    if std::fs::metadata(&cache_path).map_err(io)?.len() > 5 * 1024 * 1024 {
-                        return Err(Error::new("limit", "Active program cache exceeds 5 MiB"));
-                    }
-                    let cached: Value =
-                        serde_json::from_str(&std::fs::read_to_string(&cache_path).map_err(io)?)?;
+                    let cached = self.recovery_generation(&name)?;
                     let active = cached["source"].as_str().ok_or_else(|| {
                         Error::new("configuration", "Invalid active program cache")
                     })?;
@@ -339,14 +347,7 @@ impl Projects {
                             .as_ref()
                             .and_then(|e| e.runtime.clone())
                             .or_else(|| {
-                                let cache_path = self.data.join(format!("{name}-active.json"));
-                                if std::fs::metadata(&cache_path).ok()?.len() > 5 * 1024 * 1024 {
-                                    return None;
-                                }
-                                let cache: Value = serde_json::from_str(
-                                    &std::fs::read_to_string(cache_path).ok()?,
-                                )
-                                .ok()?;
+                                let cache = self.recovery_generation(&name).ok()?;
                                 let source = cache["source"].as_str()?;
                                 let config = self
                                     .project_config(&name, source, &cache["manifest"])
@@ -392,6 +393,18 @@ impl Projects {
             .retain(|name, _| found.contains(name));
         Ok(())
     }
+    fn recovery_generation(&self, name: &str) -> Result<Value> {
+        if let Some(generation) =
+            crate::generations::read_file(&self.data.join(format!("{name}.sqlite")))?
+        {
+            return Ok(generation);
+        }
+        let cache = self.data.join(format!("{name}-active.json"));
+        if std::fs::metadata(&cache).map_err(io)?.len() > 5 * 1024 * 1024 {
+            return Err(Error::new("limit", "Active program cache exceeds 5 MiB"));
+        }
+        Ok(serde_json::from_slice(&std::fs::read(cache).map_err(io)?)?)
+    }
     pub fn set_project_secret(&self, project: &str, name: &str, value: &str) -> Result<()> {
         let _maintenance = self
             .maintenance
@@ -413,9 +426,7 @@ impl Projects {
         runtime.require_available()?;
         let mut config = runtime.configuration();
         if self.default_name().is_none() {
-            let cache: Value = serde_json::from_slice(
-                &std::fs::read(self.data.join(format!("{project}-active.json"))).map_err(io)?,
-            )?;
+            let cache = runtime.generation()?;
             for (section, jwt) in [("jwt_secrets", true), ("event_credentials", false)] {
                 if let Some(bindings) = cache["manifest"][section].as_object() {
                     for (alias, binding) in bindings {
@@ -468,6 +479,7 @@ impl Projects {
                 .any(|a| a.alias == *alias && a.mode == "jwt")
         });
         config.base_path = format!("/{name}");
+        config.manifest = Some(manifest.clone());
         let fields = manifest
             .as_object()
             .ok_or_else(|| Error::new("configuration", "Manifest must be an object"))?;
