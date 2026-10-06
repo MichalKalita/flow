@@ -8,6 +8,7 @@ Each topic distinguishes requested outcomes, current implementation, recommendat
 
 ## Confirmed decisions
 
+- Provide a predefined project catalog with actual one-click installation into a usable application.
 - A complete built-in email server is required, modeled as a hosted project whose program controls application storage and reactions.
 - Email input is an ordinary event, exactly like every other event. Only the source and typed payload differ. A source plugin handles mail-specific protocols, verification, and limits.
 - Events are accepted and durably stored before handlers run. All sources use one runtime event lifecycle, dispatcher, permission model, and failure mechanism. Existing synchronous stream automations must be migrated explicitly to this target.
@@ -36,6 +37,33 @@ Validate complete candidates before replacing active programs/configuration/rout
 
 Keep operational logs and telemetry outside application databases and exclude credentials, tokens, bodies, and plugin arguments. Keep the protected admin listener separate; its console uses normal application permissions. Maintain bounded memory, disk queues, retained work, and telemetry on a 1 CPU / 2 GB host, while allowing larger hosts to use more resources. No required external monitoring stack.
 
+## First programming work and first usable release
+
+The first implementation is persistent server initialization and settings. Build on the existing Rust runtime rather than creating a new platform. Then deliver a usable path from installation to one everyday catalog application. The full feature sequence below remains the final scope; the catalog must not wait for every advanced integration to be complete.
+
+### First implementation — persistent server state
+
+Add a host-owned state module integrated with runtime startup. Generate and persist a stable instance identity, readable default name, peer identity keys, and local secret-encryption material on first start. Reuse them on restart. Store typed, versioned host/project settings with good defaults and protected masked-secret access. Preserve existing explicit configuration during transition.
+
+Start from `runtime/src/main.rs`, `runtime/src/engine.rs`, `runtime/src/projects.rs`, and `runtime/src/resources.rs`. Existing cryptography and SQLite dependencies are available; this work must not require an external key service. Keep application databases, audit, permissions, and numeric entity allocation unchanged.
+
+The first delivery is complete when concurrent first starts cannot create conflicting identities, interrupted initialization recovers, secrets are encrypted, missing/corrupt existing keys fail safely, and reload/restart preserves the active settings. Add meaningful restart/failure/isolation integration tests and document state location and recovery. Do not claim the setup wizard is complete merely because keys are generated.
+
+### First usable release — delivery order
+
+1. Persistent server state and validated settings, as specified above.
+2. Protected first-run enrollment and a short setup wizard with working defaults. Preserve the separate admin listener, do not log bootstrap credentials, and do not expose unauthenticated setup publicly.
+3. A real local backup-and-restore path covering settings/keys, project data, audit, IDs, and payloads. Prove restoration in a fresh installation before destructive changes are shipped.
+4. A small application frontend with ordinary user login and permission-checked operations, reusing the generic frontend contract.
+5. A bundled initial catalog template with one-click installation to a usable screen. Recommend a simple contacts application as the first everyday demonstration; the initial catalog contents remain an open product decision.
+6. Verify install, use, restart, backup, and restore end to end on the minimum host. Only then call the first usable release delivered.
+
+Use the current local application authentication as a starting point. This release does not need all external login providers, every storage protocol, or the full email service before users can try an application. It must not introduce shortcuts that bypass permission/audit, produce unrecoverable data, or create separate settings/event engines. All requested HA, protocol, catalog, and email scope remains in the full delivery plan.
+
+### Next reliability release
+
+Deliver the universal durable event contract and full-server primary/standby replication with automatic safe takeover. Expand backup destinations and remote log exploration through the shared storage adapters. Catalog and frontend then expand to additional polished applications. Keep reliability gates explicit and do not label single-server operation as completed HA.
+
 ## Recommended sequence
 
 | Step | Deliverable | Prerequisites | Completion evidence |
@@ -54,10 +82,11 @@ Keep operational logs and telemetry outside application databases and exclude cr
 | 12 | [Delegated permissions](subpermissions.md): bounded scopes, expiry, revocation, issuance rights | 5 and stable actor contract; 10 only for shared parents | No escalation across fields, records, plugins, or transports; parent permission loss and expiry affect active access |
 | 13 | [Storage destinations and S3](s3.md): standard disk/network archive/backup adapters, S3 signing/listing/upload lifecycle and public URLs by policy | 1, 5, 9 | Required providers pass compatibility checks; incomplete uploads are not ready files; cross-project access is rejected |
 | 14 | [Generic frontend](generic%20frontend.md): project-controlled application UI and typed metadata | 6, stable metadata, 11 or another defined application login; 13 for S3 widgets | Enabled/disabled state, login, forms, validation, and permission changes pass E2E without admin privileges |
-| 15 | [Cross-project migration](migrations.md#cross-project-transfer): explicit mappings, provenance, resumable copy, optional deletion phase | 5, 7, 9 and explicit cross-project configuration | Numeric IDs/references remap correctly; retries deduplicate; partial completion and separately authorized source deletion recover safely |
-| 16 | [Complete email server](emails.md): source plugin, configurable receipt, submission/delivery, mailbox management, verification | 1, 2, 5, 6, 7, 9; 10 only if shared identities; 13 optional for object storage | Full receiving/sending/mailbox flows and project-defined handlers operate through universal events within bounded host resources |
+| 15 | [Project catalog](catalog.md): curated ready-to-use templates and one-click isolated installation | 1, 5, 14; application login; 8 for HA durability | One click opens a usable application with generated settings/credentials and normal owner permissions; failed/retried installs preserve data and replicate safely |
+| 16 | [Cross-project migration](migrations.md#cross-project-transfer): explicit mappings, provenance, resumable copy, optional deletion phase | 5, 7, 9 and explicit cross-project configuration | Numeric IDs/references remap correctly; retries deduplicate; partial completion and separately authorized source deletion recover safely |
+| 17 | [Complete email server](emails.md): source plugin, configurable receipt, submission/delivery, mailbox management, verification | 1, 2, 5, 6, 7, 9; 10 only if shared identities; 13 optional for object storage | Full receiving/sending/mailbox flows and project-defined handlers operate through universal events within bounded host resources |
 
-This table is a delivery order, not a claim that all earlier features are hard prerequisites for every later feature. After step 9, S3 and local-account delegation can proceed independently of shared accounts. Cross-project transfer does not require shared login. Standalone external login can precede shared account federation. Email can start after its hard foundations and must not require an S3 service; the complete server remains a later milestone because of protocol and operational scope.
+This table is the full dependency order; the first usable release above delivers a coherent initial slice of those same features sooner. It is not a claim that all earlier features are hard prerequisites for every later feature. After step 9, S3 and local-account delegation can proceed independently of shared accounts. Cross-project transfer does not require shared login. Standalone external login can precede shared account federation. Email can start after its hard foundations and must not require an S3 service; the complete server remains a later milestone because of protocol and operational scope.
 
 Server identity/key generation belongs to step 1. Protected peer transport can be prepared with step 6; replication/HA coordination in step 8 follows verified backup/migration and common event state; external connectors in step 9 then use that durability boundary. Single-server features remain usable without an HA deployment. Pairing alone is not considered completed high availability.
 
@@ -89,11 +118,11 @@ Full-server primary/standby replication, identical software/all projects/full da
 
 A central identity project works with explicit consumer bindings and local extensions. Multiple configured providers can coexist. Delegated credentials are bounded by current parent permissions and revocation. Include all named providers in the delivery backlog; a generic OIDC prototype alone does not finish that topic.
 
-### M5 — Application and storage workflows: steps 13–15
+### M5 — Application, catalog, and storage workflows: steps 13–16
 
-S3-compatible storage and an ordinary-user frontend are usable without admin credentials. Explicit cross-project transfer remaps references, resumes after failures, and records audit locally in each database. Optional source deletion is a separate reviewed operation, not an assumed distributed rollback.
+Standard storage destinations and an ordinary-user frontend are usable without admin credentials. A predefined catalog creates an isolated ready-to-use project with one click; it does not require source editing or a technical follow-up wizard. Explicit cross-project transfer remaps references, resumes after failures, and records audit locally in each database. Optional source deletion is a separate reviewed operation, not an assumed distributed rollback.
 
-### M6 — Full built-in mail and final capacity validation: step 16
+### M6 — Full built-in mail and final capacity validation: step 17
 
 Follow the email document's sub-milestones through receipt, submission/delivery, and complete mailbox management. A receive-only or SMTP-send-only prototype does not satisfy the full email server. Prove that email uses the same event infrastructure as other sources and that project configuration controls storage/handlers and receipt limits. Revalidate the whole system on the minimum host and scaling behavior on a larger host.
 
@@ -110,7 +139,8 @@ Resolve the earliest choices first, while continuing design work independent of 
 7. **INT-1–3:** additional event sources, plugin extension trust, and common policy placement/overrides. The universal event/failure model itself is confirmed.
 8. **ACC-1–3 / AUTH-1–3 / DEL-1–3:** provisioning, revocation, roles, provider/client priorities, and delegation defaults.
 9. **OBJ-1–3 / UI-1–3:** deployment providers, public/multipart objects, frontend exposure/customization/registration.
-10. **MAIL-1–3:** mailbox interfaces, raw-message retention, and direct/relay delivery. Complete built-in mail, the common event lifecycle, and configurable limits are already confirmed.
+10. **CAT-1–3:** initial everyday applications, multiple instances, and catalog delivery/updates. Actual one-click use is confirmed.
+11. **MAIL-1–3:** mailbox interfaces, raw-message retention, and direct/relay delivery. Complete built-in mail, the common event lifecycle, and configurable limits are already confirmed.
 
 The detailed English questions/recommendations live in their topic files. Ask them in Czech in conversation, record answers, and revise dependencies when a decision changes the implementation contract. Do not ask the user to choose the general implementation order; derive it from system needs and dependencies.
 

@@ -40,6 +40,10 @@ Depends on a stable type/operation metadata API, secure public routing, and an a
 
 Use Playwright E2E against the real runtime and isolated databases for anonymous, signed-in, restricted, and revoked users. Cover hidden fields, cross-project attempts, disabled UI, validation, numeric reference inputs, concurrent changes, and ordinary audited mutations. Run frontend format/check/tests/build and commit regenerated embedded assets if this frontend uses the runtime asset bundle.
 
+## Catalog integration
+
+The [predefined project catalog](catalog.md) must launch usable applications with one click. Templates should include the frontend metadata and a working owner/login path. Installing a template must not leave a non-expert with only an API or a requirement to write screens manually.
+
 ## Defaults and setup guidance
 
 Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
