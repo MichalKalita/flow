@@ -54,3 +54,20 @@ A seed defaults to production/bootstrap data. Use `[seed Item [group production]
 Test seeds are disabled by default. A hosted project's `project.json` can explicitly enable them with `"test_seeds": true`; the value must be a boolean and affects only that project. Runtime callers use `Config.test_seeds`. Existing ungrouped seeds retain production behavior. Do not put demo credentials in an ungrouped production seed.
 
 Selected seeds insert once with data and audit in the same transaction. Deleted seeded rows are not recreated on reload/restart. A newly declared seed colliding with an existing untracked entity ID rejects the candidate instead of overwriting user data. Changing an already applied seed does not update its row; intentional updates require a migration. Disabling test seeds does not delete previously inserted test data or reset committed numeric sequence boundaries. Seeds do not dispatch business automations.
+
+## Versioned field rename migrations
+
+Programs default to schema version 1. Declare a positive integer `[schema 2]` to advance the schema with an explicit contiguous migration chain:
+
+```flow
+[schema 2]
+[migration RenamePhone
+  [from 1] [to 2]
+  [rename Contact phone telephone]]
+```
+
+The target program declares and uses `telephone`. This initial implementation supports stored-field renames with unchanged logical types/constraints and explicit no-op version steps. It does not support renaming entity IDs, dropping entities/fields, arbitrary SQL, or type/data transformations. Migration identifiers are bounded ASCII names. Definitions have a stable checksum; recorded definitions cannot be edited or removed. Each step advances one version, with at most 256 declarations/steps in a chain and 128 renames per declaration.
+
+Existing installations run the selected renames, complete schema/seed changes, logical data/reference validation, migration history, and active program publication in one SQLite transaction. Failure rolls back the generation. Already applied steps do not run again. A fresh installation builds the final schema directly and records historical definitions as `applied: false`. Downgrading requires an explicit recovery procedure. Ordinary permissions and transactional audit remain in force for subsequent application writes. Historical audit field names are retained and their values decode normally.
+
+Activation uses the project lock and a five-second pause budget with SQLite interruption and rollback. Long preparation/reconciliation for transformations that exceed this budget remains planned. Keep a verified whole-server backup before changing deployed programs; this initial rename slice does not automatically create a migration recovery backup.

@@ -84,3 +84,9 @@ Production/bootstrap and opt-in test/demo groups are implemented. Hosted manifes
 ## Program-generation recovery prerequisite
 
 The active source and reference-only manifest now commit inside SQLite with schema/bootstrap activation. Restart and backup prefer that committed generation over the secondary filesystem cache. Integration tests cover an unavailable cache destination, a later invalid candidate, restart into the last committed program, and a backup using the current program. This removes the cross-file cache window before incompatible migration work; it does not yet implement schema versions or transformations.
+
+## Delivered initial versioned migration slice
+
+Explicit schema versions, contiguous immutable checksummed definitions, stored-field renames, and no-op version steps are implemented. The active project remains usable until its final lock/transaction boundary. Schema, logical data/reference validation, ledger, and authoritative source/manifest commit together. SQLite work and row validation have a five-second activation pause budget; interruption unregisters its callback before rollback. Tests cover failure after earlier renames, references/uniqueness, unchanged audit, historical field decoding, deleted ID allocations, restart without replay, fresh target-schema initialization, downgrade/history rejection, and recovery despite stale cache and an invalid candidate.
+
+This is a bounded in-place rename implementation. It does not complete the full migration design: automatic recovery capture, lengthy background transformation/preparation, concurrent-write reconciliation, arbitrary type/data transformations, HA, and cross-project transfer remain outstanding. A verified backup is available through the existing whole-server backup flow; migration activation does not yet automatically capture one.

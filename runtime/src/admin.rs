@@ -43,6 +43,7 @@ pub fn router_projects_with_setup(
         .route("/api/overview", get(overview))
         .route("/api/settings", get(settings).post(save_settings))
         .route("/api/capacity", get(capacity))
+        .route("/api/migrations", get(migration_status))
         .route("/api/settings/secret", post(save_secret))
         .route("/api/catalog", get(catalog_index).post(catalog_install))
         .route("/api/catalog/launch", post(catalog_launch))
@@ -181,7 +182,7 @@ pub(crate) fn overview_value(runtime: &Runtime) -> Value {
     let mut resources = runtime.storage_resources();
 
     resources["observability"] = runtime.observability.resources();
-    json!({"endpoints":endpoints,"streams":streams,"automations":automations,"metrics":runtime.observability.snapshot(),"resources":resources,"version":env!("CARGO_PKG_VERSION")})
+    json!({"endpoints":endpoints,"streams":streams,"automations":automations,"metrics":runtime.observability.snapshot(),"resources":resources,"schema_version":runtime.program.schema_version,"version":env!("CARGO_PKG_VERSION")})
 }
 async fn project_list(State(state): State<Admin>) -> Json<Value> {
     Json(
@@ -708,6 +709,21 @@ async fn backup_status(State(state): State<Admin>) -> Response {
 
 async fn capacity(State(state): State<Admin>) -> Response {
     match tokio::task::spawn_blocking(move || crate::capacity::inventory(&state.projects)).await {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(error)) => failure(error),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn migration_status(
+    State(state): State<Admin>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let runtime = match required(&state, &query) {
+        Ok(runtime) => runtime,
+        Err(error) => return failure(error),
+    };
+    match tokio::task::spawn_blocking(move || runtime.lock().unwrap().migration_status()).await {
         Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(error)) => failure(error),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

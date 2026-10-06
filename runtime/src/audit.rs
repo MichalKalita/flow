@@ -1,8 +1,4 @@
-use crate::{
-    Result,
-    engine::Runtime,
-    program::{Program, Type},
-};
+use crate::{Result, engine::Runtime, program::Program};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
@@ -121,24 +117,12 @@ pub(crate) fn context(
 // Entity columns contain one JSON-encoded value; audit triggers preserve that
 // storage representation. Decode each field once at the API boundary, including
 // historical records, without interpreting ordinary strings recursively.
-fn decode_snapshot(mut snapshot: Value, program: &Program, entity: &str) -> Value {
+fn decode_snapshot(mut snapshot: Value) -> Value {
     if let Some(fields) = snapshot.as_object_mut() {
-        for (name, value) in fields {
-            let stored_json = program
-                .entities
-                .get(entity)
-                .and_then(|e| e.fields.get(name))
-                .and_then(|f| program.resolve(&f.ty).ok())
-                .and_then(|t| {
-                    if let Type::Optional(inner) = t {
-                        program.resolve(inner).ok()
-                    } else {
-                        Some(t)
-                    }
-                })
-                .is_some_and(|t| !matches!(t, Type::Id(_) | Type::Named(_)));
-            if stored_json
-                && let Some(encoded) = value.as_str()
+        for value in fields.values_mut() {
+            // Text columns contain one JSON value, including historical field
+            // names that a later migration has renamed. Decode exactly once.
+            if let Some(encoded) = value.as_str()
                 && let Ok(decoded) = serde_json::from_str::<Value>(encoded)
             {
                 *value = decoded;
@@ -191,8 +175,8 @@ impl Runtime {
                         "entity": r.get::<_, String>(6)?,
                         "entity_id": r.get::<_, i64>(7)?,
                         "action": r.get::<_, String>(8)?,
-                        "before": decode_snapshot(parse(9)?, &self.program, &r.get::<_, String>(6)?),
-                        "after": decode_snapshot(parse(10)?, &self.program, &r.get::<_, String>(6)?)
+                        "before": decode_snapshot(parse(9)?),
+                        "after": decode_snapshot(parse(10)?)
                     }))
                 },
             )?

@@ -118,6 +118,8 @@ pub struct Program {
     pub streams: BTreeMap<String, Stream>,
     pub seeds: Vec<Seed>,
     pub source: String,
+    pub schema_version: u32,
+    pub migrations: Vec<crate::migrations::Migration>,
 }
 fn fail(s: impl Into<String>) -> Error {
     Error::new("invalid_program", s)
@@ -293,11 +295,27 @@ impl Program {
             streams: BTreeMap::new(),
             seeds: vec![],
             source: source.into(),
+            schema_version: 1,
+            migrations: vec![],
         };
+        let mut version_seen = false;
         let mut permission_nodes = vec![];
         let mut op_nodes = vec![];
         for n in &nodes {
             match n.head() {
+                "schema" => {
+                    if version_seen || n.args()?.len() != 1 {
+                        return Err(fail("Expected one schema version declaration"));
+                    }
+                    p.schema_version = crate::migrations::version(n.arg(0)?)?;
+                    version_seen = true;
+                }
+                "migration" => {
+                    if p.migrations.len() >= 256 {
+                        return Err(fail("Too many migration declarations"));
+                    }
+                    p.migrations.push(crate::migrations::parse(n)?);
+                }
                 "type" => {
                     let name = ident(n.arg(0)?.text()?)?;
                     unique(&mut p.types, name, ty(n.arg(1)?)?)?;
@@ -818,6 +836,32 @@ impl Program {
                 stream,
                 event,
             });
+        }
+        let mut migration_names = BTreeSet::new();
+        let mut migration_versions = BTreeSet::new();
+        for migration in &p.migrations {
+            if migration.to > p.schema_version
+                || !migration_names.insert(&migration.id)
+                || !migration_versions.insert(migration.from)
+            {
+                return Err(fail(
+                    "Duplicate migration or target beyond the declared schema version",
+                ));
+            }
+            let chain = crate::migrations::chain(&p, migration.from)
+                .map_err(|error| fail(error.message))?;
+            for rename in &migration.renames {
+                let final_name = crate::migrations::renamed(&chain, &rename.entity, &rename.from);
+                if p.entities
+                    .get(&rename.entity)
+                    .and_then(|entity| entity.fields.get(&final_name))
+                    .is_none_or(|field| field.relation.is_some())
+                {
+                    return Err(fail(
+                        "Migration target must be a stored field in the final schema",
+                    ));
+                }
+            }
         }
         let mut seeded_ids = BTreeSet::new();
         for seed in &p.seeds {

@@ -61,3 +61,5 @@ pub mod catalog;
 pub mod capacity;
 
 mod generations;
+
+pub mod migrations;

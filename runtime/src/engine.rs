@@ -78,12 +78,14 @@ impl Runtime {
     pub fn reload(&mut self, source: &str, config: Config) -> Result<()> {
         self.require_available()?;
         let program = Program::compile(source)?;
+        let migration_chain = crate::migrations::chain(&program, self.program.schema_version)?;
         for (name, entity) in &self.program.entities {
             let next = program.entities.get(name).ok_or_else(|| {
                 Error::new("configuration", "Removing an entity requires migration")
             })?;
             for (field, definition) in &entity.fields {
-                let other = next.fields.get(field).ok_or_else(|| {
+                let renamed = crate::migrations::renamed(&migration_chain, name, field);
+                let other = next.fields.get(&renamed).ok_or_else(|| {
                     Error::new("configuration", "Removing a field requires migration")
                 })?;
                 let describe = |p: &Program, f: &crate::program::Field| -> Result<String> {
@@ -95,7 +97,18 @@ impl Runtime {
                         f.generated
                     ))
                 };
-                if describe(&self.program, definition)? != describe(&program, other)? {
+                let mut previous = definition.clone();
+                if let Some((entity, field)) = &mut previous.relation {
+                    *field = crate::migrations::renamed(&migration_chain, entity, field);
+                }
+                if renamed != *field && (definition.relation.is_some() || other.relation.is_some())
+                {
+                    return Err(Error::new(
+                        "configuration",
+                        "Migration renames must refer to stored fields",
+                    ));
+                }
+                if describe(&self.program, &previous)? != describe(&program, other)? {
                     return Err(Error::new(
                         "configuration",
                         "Changing stored field types or constraints requires migration",
@@ -103,7 +116,10 @@ impl Runtime {
                 }
             }
             for (field, definition) in &next.fields {
-                if !entity.fields.contains_key(field)
+                if !entity
+                    .fields
+                    .keys()
+                    .any(|old| crate::migrations::renamed(&migration_chain, name, old) == *field)
                     && definition.relation.is_none()
                     && !matches!(program.resolve(&definition.ty)?, Type::Optional(_))
                 {
@@ -158,7 +174,8 @@ impl Runtime {
             };
         }
         let db = Connection::open(path)?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;")?;
+        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; BEGIN IMMEDIATE;")?;
+        let pause_limit = reload.then(|| crate::migrations::PauseLimit::new(&db));
         let result = (|| -> Result<()> {
             db.execute_batch("CREATE TABLE IF NOT EXISTS _flow_id_sequences(entity TEXT PRIMARY KEY, value INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS _flow_schema (id INTEGER PRIMARY KEY CHECK(id=1), hash TEXT NOT NULL);")?;
             let hash = format!("numeric-v1:{:x}", Sha256::digest(source));
@@ -174,12 +191,14 @@ impl Runtime {
                     "Database uses legacy text IDs; start with a new database",
                 ));
             }
-            if !reload && stored.is_some_and(|s| s != hash) {
+            let initialized = stored.is_some();
+            if !reload && stored.as_ref().is_some_and(|s| s != &hash) {
                 return Err(Error::new(
                     "configuration",
                     "Database belongs to a different Flow program; explicit migration required",
                 ));
             };
+            let migrated = crate::migrations::apply(&db, &program, initialized)?;
             for (name, entity) in &program.entities {
                 let existing = db
                     .prepare(&format!("PRAGMA table_info({})", q(name)))?
@@ -314,6 +333,12 @@ impl Runtime {
                     };
                 }
             }
+            if migrated {
+                validate_stored_data(&db, &program, pause_limit.as_ref())?;
+            }
+            if let Some(limit) = &pause_limit {
+                limit.check()?;
+            }
             db.execute(
                 "INSERT INTO _flow_schema(id,hash) VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET hash=excluded.hash",
                 [hash],
@@ -325,6 +350,18 @@ impl Runtime {
             )?;
             Ok(())
         })();
+        let result = if pause_limit
+            .as_ref()
+            .is_some_and(|limit| limit.check().is_err())
+        {
+            Err(Error::new(
+                "limit",
+                "Schema activation exceeded its five-second pause budget",
+            ))
+        } else {
+            result
+        };
+        drop(pause_limit);
         match result {
             Ok(()) => db.execute_batch("COMMIT;")?,
             Err(e) => {
@@ -409,82 +446,15 @@ impl Runtime {
         self.config.clone()
     }
     pub fn validate_storage(&self) -> Result<()> {
-        let integrity: String = self
-            .db
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-        if integrity != "ok" {
-            return Err(Error::new(
-                "database",
-                "Snapshot failed integrity validation",
-            ));
-        }
-        let foreign_key_problem: bool = self
-            .db
-            .prepare("PRAGMA foreign_key_check")?
-            .query([])?
-            .next()?
-            .is_some();
-        if foreign_key_problem {
-            return Err(Error::new(
-                "database",
-                "Snapshot contains invalid references",
-            ));
-        }
-        for (name, entity) in &self.program.entities {
-            let fields = entity
-                .fields
-                .iter()
-                .filter(|(_, field)| field.relation.is_none())
-                .map(|(name, _)| name)
-                .collect::<Vec<_>>();
-            let columns = fields
-                .iter()
-                .map(|field| q(field))
-                .collect::<Vec<_>>()
-                .join(",");
-            let sizes = fields
-                .iter()
-                .map(|field| format!("coalesce(length({}),0)", q(field)))
-                .collect::<Vec<_>>()
-                .join("+");
-            let oversized: i64 = self.db.query_row(
-                &format!("SELECT count(*) FROM {} WHERE {sizes}>16777216", q(name)),
-                [],
-                |row| row.get(0),
-            )?;
-            if oversized > 0 {
-                return Err(Error::new(
-                    "limit",
-                    "Stored record exceeds validation limits",
-                ));
-            }
-            let mut statement = self
-                .db
-                .prepare(&format!("SELECT {columns} FROM {}", q(name)))?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let mut values = BTreeMap::new();
-                for (index, field) in fields.iter().enumerate() {
-                    let value = match row.get_ref(index)? {
-                        rusqlite::types::ValueRef::Integer(n) => {
-                            Value::from_json(&serde_json::json!(n))?
-                        }
-                        rusqlite::types::ValueRef::Text(bytes) => {
-                            Value::from_json(&serde_json::from_slice(bytes)?)?
-                        }
-                        rusqlite::types::ValueRef::Null => Value::Null,
-                        _ => return Err(Error::new("database", "Invalid stored field encoding")),
-                    };
-                    values.insert((*field).clone(), value);
-                }
-                self.program.validate(
-                    &stored_type(&self.program, name)?,
-                    Value::record(values),
-                    None,
-                )?;
-            }
-        }
-        Ok(())
+        validate_stored_data(&self.db, &self.program, None)
+    }
+    pub fn migration_status(&self) -> Result<serde_json::Value> {
+        self.require_available()?;
+        let mut statement=self.db.prepare("SELECT target_version,migration_id,checksum,applied,time FROM _flow_migrations ORDER BY target_version DESC LIMIT 256")?;
+        let rows=statement.query_map([],|row|Ok(serde_json::json!({"to":row.get::<_,u32>(0)?,"id":row.get::<_,String>(1)?,"checksum":row.get::<_,String>(2)?,"applied":row.get::<_,bool>(3)?,"time":row.get::<_,String>(4)?})))?.collect::<std::result::Result<Vec<_>,_>>()?;
+        Ok(
+            serde_json::json!({"schema_version":self.program.schema_version,"migrations":rows,"activation_pause_limit_seconds":5}),
+        )
     }
     pub fn jwt_adapters(&self) -> Result<serde_json::Value> {
         let mut adapters = vec![];
@@ -1163,6 +1133,82 @@ fn lookup(db: &Connection, auth: &crate::program::Auth, value: &str) -> Result<O
         )
         .optional()?;
     Ok(id.map(|id| Value::reference(&auth.entity, &id)))
+}
+fn validate_stored_data(
+    database: &Connection,
+    program: &Program,
+    pause_limit: Option<&crate::migrations::PauseLimit<'_>>,
+) -> Result<()> {
+    let integrity: String = database.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(Error::new(
+            "database",
+            "Snapshot failed integrity validation",
+        ));
+    }
+    let foreign_key_problem: bool = database
+        .prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some();
+    if foreign_key_problem {
+        return Err(Error::new(
+            "database",
+            "Snapshot contains invalid references",
+        ));
+    }
+    for (name, entity) in &program.entities {
+        let fields = entity
+            .fields
+            .iter()
+            .filter(|(_, field)| field.relation.is_none())
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let columns = fields
+            .iter()
+            .map(|field| q(field))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sizes = fields
+            .iter()
+            .map(|field| format!("coalesce(length({}),0)", q(field)))
+            .collect::<Vec<_>>()
+            .join("+");
+        let oversized: i64 = database.query_row(
+            &format!("SELECT count(*) FROM {} WHERE {sizes}>16777216", q(name)),
+            [],
+            |row| row.get(0),
+        )?;
+        if oversized > 0 {
+            return Err(Error::new(
+                "limit",
+                "Stored record exceeds validation limits",
+            ));
+        }
+        let mut statement = database.prepare(&format!("SELECT {columns} FROM {}", q(name)))?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            if let Some(limit) = pause_limit {
+                limit.check()?;
+            }
+            let mut values = BTreeMap::new();
+            for (index, field) in fields.iter().enumerate() {
+                let value = match row.get_ref(index)? {
+                    rusqlite::types::ValueRef::Integer(n) => {
+                        Value::from_json(&serde_json::json!(n))?
+                    }
+                    rusqlite::types::ValueRef::Text(bytes) => {
+                        Value::from_json(&serde_json::from_slice(bytes)?)?
+                    }
+                    rusqlite::types::ValueRef::Null => Value::Null,
+                    _ => return Err(Error::new("database", "Invalid stored field encoding")),
+                };
+                values.insert((*field).clone(), value);
+            }
+            program.validate(&stored_type(program, name)?, Value::record(values), None)?;
+        }
+    }
+    Ok(())
 }
 fn validate_program_configuration(program: &Program, config: &Config) -> Result<()> {
     for (alias, key) in &config.jwt_keys {
