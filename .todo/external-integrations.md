@@ -74,6 +74,12 @@ Do network I/O outside the project's SQLite lock. Acquire a bounded permission/c
 
 Configure trusted destinations, redirect policy, timeouts, maximum response bytes, and pagination limits. Do not accept arbitrary caller-selected URLs with server credentials. Return stable typed error categories without exposing remote bodies or secrets. Caching, stale fallback, and synchronous external writes require declared policy rather than hidden adapter behavior.
 
+## HA event and effect ownership
+
+The confirmed peer address/public-key pairing authenticates servers; replication and failover behavior still need decisions. If peers share a replicated project, the common event/job mechanism must coordinate ownership so only the authorized owner dispatches a given effect. Replicate accepted input, processing state, application data/audit, numeric sequence high-water marks, and completed effect state according to the chosen consistency contract.
+
+Do not create one independent event queue per replica that sends the same email/payment twice. Worker takeover needs explicit ownership epochs or equivalent stale-owner protection and destination idempotency/reconciliation where available. HA recovery must use the same retry and terminal policy as single-server operation. Event/job/effect diagnostics include the executing server name and stable instance identity, while preserving the recorded origin of accepted events and committed mutations. Identity labels are diagnostic metadata, not authority grants. See [HA scope](variables-and-secrets.md#ha-scope-and-open-architecture).
+
 ## Real-world integration inventory
 
 | Service | Typical use | Required behavior |
@@ -104,6 +110,10 @@ Answers: Pending conversation. The universal event mechanism, plugin-specific so
 Depends on secure settings, schema migration/recovery, and bounded host resources. Deliver the universal event lifecycle before connectors that depend on it. The outbox and external-data endpoint contract follow, then S3 and the full email service.
 
 Verify typed connector rejection, missing INVOKE grants, bad remote responses, no-entity endpoints, delayed authority loss, timeout after remote success, retry exhaustion, failed-item retention/deletion, restart at acceptance/dispatch/completion boundaries, and audit atomicity. Rework existing automation tests to prove the explicitly changed transaction boundary: committed source events survive handler failure, while each failed handler attempt leaves no committed application changes or audit. No separate event scheduler or failure-policy engine is allowed for an individual connector.
+
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
 
 ## Implementation order
 

@@ -40,6 +40,10 @@ Depends on [migrations](migrations.md), [secrets](variables-and-secrets.md), [pu
 
 Verify two projects with the same local numeric ID but different accounts, audience/issuer rejection, explicit trust only, multi-issuer linkage, profile provisioning rollback/audit, local roles, disablement/deletion, unavailable identity service, and attempted cross-project escalation. UI/API surfaces must not reveal other projects' account data implicitly.
 
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
+
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.

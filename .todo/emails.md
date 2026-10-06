@@ -83,6 +83,10 @@ Depends on secrets, certificates, durable jobs/external-effect semantics, schema
 
 Integration coverage must prove that email uses the same event-input API, dispatcher, retry policy, and terminal disposition as other sources. It must also include project isolation, receipt across restart, processing failures and retries, duplicate delivery handling, mailbox permissions, atomic local audit, receipt and attachment limits, host-wide capacity enforcement, and delivery recovery. Verify that handlers never run before durable input acceptance and that handler failure cannot roll back acceptance. Verify both configured terminal outcomes: retention and deletion after retry exhaustion, including recovery across restart. Logs must exclude message bodies and credentials.
 
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
+
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.

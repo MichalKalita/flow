@@ -26,6 +26,12 @@ Resolve the target project before authentication and permission evaluation. A do
 
 Apply complete routing candidates atomically; failed reload retains the last working program/routes and writes the project error file. New routes requiring a certificate must remain inactive until usable TLS is ready. Keep the protected admin listener separate and outside public alias routing.
 
+## HA peer transport
+
+The user requires explicit server pairing through reciprocal peer addresses and public keys. Peer authentication is separate from public domain certificates: possession of a Let's Encrypt certificate alone does not grant membership. Use a protected encrypted inter-server surface with verification against configured peer identity keys; retain separation from public project routes and the protected admin listener. See [key generation and pairing](variables-and-secrets.md#confirmed-server-pairing).
+
+If TLS material or certificate jobs are coordinated across replicas, define ownership and renewal/failover behavior after the HA replication model is chosen. Avoid conflicting certificate controllers or implicit copying of private keys.
+
 ## Open decisions
 
 - **TLS-1:** Are aliases public alongside the existing project-prefixed paths? Recommend preserving canonical paths for compatibility and configuring additional aliases explicitly.
@@ -39,6 +45,10 @@ Answers: Pending conversation. Domain ownership and alias configuration are not 
 Depends on [secure live configuration](variables-and-secrets.md). Certificate scheduling and failure handling should use the common system policy; source-specific ACME behavior belongs in an adapter. Public login and mailbox TLS depend on this work.
 
 Verify alias precedence, boundary matching, unknown hosts, HTTP/WebSocket equivalence, absolute URL generation, certificate acquisition/renewal/restart, expired certificates, invalid candidate rollback, and admin listener isolation. Use a local certificate test service or ACME staging in explicit integration runs, not production issuance for every test.
+
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
 
 ## Implementation order
 

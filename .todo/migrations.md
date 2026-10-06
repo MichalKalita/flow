@@ -28,6 +28,12 @@ Keep the old database/program authoritative until cutover. Account for writes du
 
 Coordinate database, cached program, configuration, and routing activation with a durable recovery state. Recover to one known authoritative generation after a crash. On failure, retain the previous working project and its data/audit and write the project error file. Once the new version has accepted writes, switching back is not equivalent to restoring an old backup; require an explicit reverse migration or recovery procedure.
 
+## HA coordination
+
+Server pairing is configured through reciprocal addresses/public keys; the replication/failover model is still open. When a project is replicated, migration activation must coordinate with its writer ownership and replica schema/program versions. A replica must not resume writes or dispatch events using incompatible schema or stale committed sequence/event state. Apply the confirmed short final write pause consistently to the affected project across its participating replicas.
+
+Replication, if enabled, must preserve data and audit together and retain migration recovery state. Keep the original server identity on replicated audit entries; identify the executing server on migration diagnostics without rewriting mutation provenance. It is distinct from transferring entities between separate projects. See [HA scope](variables-and-secrets.md#ha-scope-and-open-architecture).
+
 ## Cross-project transfer
 
 Use an explicit source/target mapping and a versioned transfer job. Export only authorized fields and dependent records. Allocate target-local numeric IDs transactionally and maintain provenance separately as source project, entity, numeric source ID, and transfer version. Rewrite references through the mapping; never assume identical numeric IDs represent shared identity.
@@ -47,6 +53,7 @@ Seed-generated events, if enabled, must use the same committed-event lifecycle a
 - **MIG-1:** A short final pause of project writes is acceptable. The old version remains available during preparation; pause only the affected project for final reconciliation and activation.
 
 ## Open decisions
+
 - **MIG-2:** Should transfer remove source data automatically? Recommend copying first and making deletion a separate explicit phase.
 - **MIG-3:** Should seeds trigger ordinary project events? Recommend disabled by default, with explicit opt-in using the universal event mechanism.
 
@@ -57,6 +64,10 @@ Answers: Pending conversation.
 Local migration metadata and recovery precede [the unified event lifecycle](external-integrations.md). Transfers can follow the common job/plugin contract and an explicit general cross-project configuration model; they do not require shared accounts.
 
 Verify incompatible-schema rejection, candidate rollback, writes during preparation, crash at each cutover stage, audit lineage, deleted-ID sequence preservation, seed conflicts/restarts, transfer remapping, duplicate retries, and partial transfer recovery. Use isolated databases and include active HTTP/MQTT/WebSocket work during migration tests.
+
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
 
 ## Implementation order
 

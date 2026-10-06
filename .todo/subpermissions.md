@@ -38,6 +38,10 @@ Depends on [credential configuration](variables-and-secrets.md), local schema mi
 
 Integration tests must prove no escalation through roles, fields, ownership changes, plugin arguments/results, cross-project use, guessed IDs, or transport differences. Include issuance beyond scope, expiration/revocation on active streams, parent permission loss, restart, concurrent revoke/use, and atomic mutation audit/rollback.
 
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
+
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.

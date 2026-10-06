@@ -18,13 +18,21 @@ The repository has k6 traffic and breakpoint scripts. See [the workload guide](.
 
 No single microbenchmark can determine the best settings for every Flow program. Report the tested mix, data size, environment, bottleneck evidence, and uncertainty. Include read/write ratios, large payloads, audit overhead, event processing, and multi-project contention. A synthetic result is not a production capacity guarantee.
 
+## Confirmed default and wizard requirement
+
+Every setting has a defined default and guided configuration. The wizard recommends suitable values for the particular server, including worker/admission limits, server-wide log target and chunk size, storage headroom, and enabled HA/S3 capabilities. Recommendations complement defaults; the wizard is not mandatory for a valid standalone startup.
+
+Use a shared settings schema and recommendation service rather than separate hard-coded values in startup and the UI. Show detected facts, current/default values, proposed changes, reasons, and uncertainty. Retain deliberate administrator overrides. Required external details such as peer keys and storage credentials are collected explicitly; recommendations cannot fabricate them.
+
+Start with bounded passive inventory. Optional active diagnostics can refine estimates, but must not run saturation tests automatically merely because the wizard opened. A new installation still receives usable default guidance without prior traffic history. Defaults and numeric recommendation formulas remain to be calibrated; the general wizard requirement is confirmed.
+
 ## Proposed admin workflow
 
-Inventory usable CPUs, memory limit, filesystem free space, application/WAL/audit sizes, and server-wide operational-log usage. Include the configured local byte target, oldest retained timestamp/age, and pending S3 export bytes when export is enabled. Distinguish host facts from estimates and unavailable platform measurements.
+Inventory usable CPUs, memory limit, filesystem free space, application/WAL/audit sizes, and server-wide operational-log usage. Include the independently configured local byte target and chunk-size/export threshold, oldest retained timestamp/age, and pending S3 export bytes when export is enabled. Label measurements and recommendations with the readable server name and stable instance identity. Distinguish host facts from estimates and unavailable platform measurements.
 
 Show current worker/admission overrides and the bounded default. Offer an isolated calibration profile with progress and cancellation. Measure admitted throughput, rejected requests, errors, latency histograms, CPU/RSS, and temporary-disk usage at a small set of concurrency levels. Stop at configured resource limits; leave production data untouched.
 
-Produce recommendations with headroom, not a single universal “best” number. Let the administrator apply supported settings explicitly. Reserve space for databases, WAL, retained audit, accepted events, migrations, and backups before proposing the server-wide log budget. Treat that budget as an approximate long-term target with brief bounded overshoot, and report actual retained time coverage. Audit has no automatic retention today and must not be silently deleted to satisfy a benchmark recommendation.
+Produce recommendations with headroom, not a single universal “best” number. Let the administrator review and apply the recommended settings as a validated candidate. Reserve space for databases, WAL, retained audit, accepted events, migrations, and backups before proposing the server-wide log budget. Treat that budget as an approximate long-term target with brief bounded overshoot, and report actual retained time coverage. Audit has no automatic retention today and must not be silently deleted to satisfy a benchmark recommendation.
 
 ## Open decisions
 

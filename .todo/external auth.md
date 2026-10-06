@@ -42,6 +42,10 @@ Depends on [secret storage](variables-and-secrets.md), [TLS and callback routing
 
 Test multiple providers, mismatched issuer/audience, invalid signatures, stale keys, replayed callbacks, state/nonce/PKCE failures, linking collisions, provider outages, logout/revocation, and project isolation. Use local provider fixtures and admin/application E2E flows, excluding production credentials and provider tokens from logs.
 
+## Defaults and setup guidance
+
+Use the shared [settings/defaults and setup-wizard contract](variables-and-secrets.md#confirmed-defaults-and-guided-setup). Define defaults for configurable behavior and expose suitable-value recommendations through the wizard. Collect required external credentials, trust, destinations, or project policy explicitly; keep optional capabilities inactive until valid configuration exists. Numeric values and unconfirmed policy recommendations in this document remain proposals.
+
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
