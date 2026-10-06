@@ -1,15 +1,12 @@
-# External integrations
+# External integrations and the universal event mechanism
 
-This system should allow generic external integration
+## Requested outcome
 
-Core should be able to use it, plan with it.
+Provide generic typed integration capabilities that the core can validate and plan around. Define commit, failure, retry, and recovery semantics explicitly for external services. Support endpoints using only external data, with mandatory validation of both input and returned data. Cover services such as S3, REST APIs, MQTT, and email.
 
-External services should have exact behavior how its handled, like commit and rollback. In external services is not possible to rollback by definition, find some generic ways how to solve it.
-I want to find a way to work how standards works.
+## Current implementation
 
-Write list of real life needed external services, S3, REST API, MQTT, SMTP, ....
-
-It should be possible to write a rest endpoint, where only external data will be used, validation MUST be there in some way, find way how to implement it.
+The compiler declares typed plugin inputs/outputs and method modes. Runtime execution accepts only the built-in `Payment.createUrl`, `Image.resize`, and `Files.put` implementations. The first two are local computations; `Files.put` stores data in the same SQLite transaction. These examples are not an existing remote payment or generic external-plugin framework. See [plugin declarations](../runtime/src/program.rs), [execution](../runtime/src/engine.rs), and [runtime integration tests](../runtime/tests/runtime.rs).
 
 ## Confirmed email use case and automation foundation
 
@@ -50,3 +47,64 @@ Persist attempt count, next eligible attempt time, and terminal status with dura
 Treat retention or deletion as an explicit terminal transition. A crash during cleanup must not resurrect deleted work or lose retained work. Deleting a failed input must not delete committed mutation audit history. Define idempotency and ambiguous external outcomes separately; retries alone do not guarantee exactly-once external effects.
 
 Configuration placement, retry delays, defaults, manual replay, and the payload retention lifecycle remain to be specified. Integration tests must demonstrate identical event lifecycle and failure handling for existing stream sources and plugin sources, and cover zero retries, retry exhaustion, both terminal dispositions, restart recovery, project isolation, bounded storage, and atomic audit/rollback.
+
+## Plugin contract and implementation options
+
+1. Trusted in-process Rust implementations of a typed plugin/source API. Recommend this first for the smallest production footprint and integration with resource limits.
+2. Bundled supervised components behind the same contract when protocol implementation warrants a separate service boundary. Account for process memory and crash recovery on the minimum host.
+3. User-supplied external executable or remote plugins. Possible later, but require a trust, isolation, versioning, and capability model; do not quietly load arbitrary code as the initial implementation.
+
+Declare version/capabilities, typed input/output or event payload, secret references, permitted destinations, resource/time limits, and effect semantics. The compiler rejects unknown capabilities, illegal effects in pure expressions, and missing configuration before activation. Plugin INVOKE and event actors remain subject to central permissions, and plugin output cannot bypass field/entity checks.
+
+Separate local pure computation, local transactional work, remote reads, and remote effects. A remote read is not a deterministic pure calculation. An external write cannot inherit SQLite rollback merely by declaring itself transactional.
+
+## Commit and external effects
+
+Recommend a transactional outbox for effects: commit the local business state, its audit, and pending delivery intent together, then execute the external call with the common runtime scheduling and failure policy. Expose pending/succeeded/failed/unknown outcome explicitly. If an operation requires immediate external completion, define its timeout and partial-failure contract rather than promising atomic rollback.
+
+Use stable idempotency identifiers when the destination supports them. A timeout after a remote success is an unknown outcome; check status or reconcile before blindly retrying. Compensation is another business operation, not a rollback guarantee. Deleting exhausted work cannot reverse an already performed effect.
+
+Recheck the intended actor's current authority before a delayed effect; do not treat an old queue entry as permission to bypass revocation. Source-specific protocol behavior belongs to the plugin, while dispatch, attempt limits, and terminal policy remain common runtime mechanisms.
+
+## External-data-only endpoints
+
+Bind a declared HTTP operation to a typed connector read or explicitly defined effect. A local application entity is not required to serve a validated external result. Still authenticate the caller, enforce operation/plugin grants, validate input, validate the full remote response against its declared type, and project only authorized output. Reject malformed, oversized, missing, or unexpected fields according to the declared contract.
+
+Do network I/O outside the project's SQLite lock. Acquire a bounded permission/context snapshot where needed, perform the limited remote request, then revalidate current authority before delivering data or committing local writes. Never hold a database transaction open during an arbitrary network wait. Resolve any consistency requirement explicitly; do not assume the remote system and SQLite share a snapshot.
+
+Configure trusted destinations, redirect policy, timeouts, maximum response bytes, and pagination limits. Do not accept arbitrary caller-selected URLs with server credentials. Return stable typed error categories without exposing remote bodies or secrets. Caching, stale fallback, and synchronous external writes require declared policy rather than hidden adapter behavior.
+
+## Real-world integration inventory
+
+| Service | Typical use | Required behavior |
+| --- | --- | --- |
+| HTTP/REST APIs | Catalogs, CRM, ERP, geocoding | Typed reads/writes, bounded responses, auth, timeout and outcome handling |
+| S3-compatible object storage | Uploads, downloads, attachments | Scoped signing, upload intents, completion verification, cleanup |
+| MQTT brokers/devices | Device events and commands | Source verification, project routing, bounded connections, duplicate handling |
+| Built-in mail / SMTP relay | Incoming messages and outgoing mail | Email source plugin, durable acceptance, delivery state, common failure policy |
+| Mailbox access | Reading and managing mail | Typed mailbox operations, account permissions, protocol state |
+| Payment providers | Payments, refunds, payment notifications | Idempotent requests where supported, verified notifications, reconciliation |
+| Webhooks | Third-party notifications | Signature/replay verification, durable event acceptance, deduplication |
+| SMS/push providers | Notifications and one-time codes | Delivery identifiers, expiry, recipient limits, external-outcome handling |
+| Identity providers | Login and account linking | Verified identity assertions, explicit issuer trust, bounded key retrieval |
+| Search/reporting services | Indexes and exports | Projection of authorized data, durable updates, rebuild/checkpoint policy |
+
+These are concrete use cases for one contract, not a requirement to finish every connector in the first milestone. S3 and the full built-in email server have dedicated requested deliverables. MQTT already exists as a transport; external-broker integration still needs a distinct adapter implementation.
+
+## Open decisions
+
+- **INT-1:** What sources should be added after existing stream events and plugin inputs? Recommend entity create/update/delete and scheduled events through the same event contract, with explicit project subscriptions.
+- **INT-2:** Should user-provided plugin code be supported initially? Recommend trusted built-in implementations first, retaining a versioned interface for later extension.
+- **INT-3:** Where are common failure policies declared and overridden? Recommend declarative project defaults and per-handler overrides, with host ceilings and live administration of supported parameters.
+
+Answers: Pending conversation. The universal event mechanism, plugin-specific source work, retry limits, and terminal retain/delete choices are confirmed; syntax, defaults, and override rules are not.
+
+## Dependencies and verification
+
+Depends on secure settings, schema migration/recovery, and bounded host resources. Deliver the universal event lifecycle before connectors that depend on it. The outbox and external-data endpoint contract follow, then S3 and the full email service.
+
+Verify typed connector rejection, missing INVOKE grants, bad remote responses, no-entity endpoints, delayed authority loss, timeout after remote success, retry exhaustion, failed-item retention/deletion, restart at acceptance/dispatch/completion boundaries, and audit atomicity. Rework existing automation tests to prove the explicitly changed transaction boundary: committed source events survive handler failure, while each failed handler attempt leaves no committed application changes or audit. No separate event scheduler or failure-policy engine is allowed for an individual connector.
+
+## Implementation order
+
+See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.

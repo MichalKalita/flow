@@ -60,12 +60,29 @@ A processing failure cannot roll back receipt. Explicit deletion after exhaustin
 
 Retry delays, default attempt limits, configuration ownership, and manual recovery are still design decisions. See [the common failure contract](external-integrations.md#confirmed-common-failure-policy).
 
-## Pending decisions
+## Open decisions
 
-Resolve failure-policy defaults, configuration ownership, and administrator recovery behavior in conversation. Later decisions include mailbox protocol coverage, permanent raw-message retention, domain/account ownership, and direct delivery versus an external SMTP relay.
+- **MAIL-1:** Which mailbox-access interfaces are required for the complete server? Recommend standards-based mailbox access plus typed project operations; determine whether additional legacy interfaces are necessary. Incoming mail, outgoing mail, and mailbox management remain in the final scope.
+- **MAIL-2:** What raw-message retention should apply after successful processing? Recommend project-configured retention, separate from failed-input disposition and permanent application storage.
+- **MAIL-3:** Must outgoing delivery work directly to other mail servers, through a relay, or both? Recommend supporting both explicitly; delivery policies and credential requirements differ.
+
+Answers: Pending conversation. Receipt before dispatch, plugin-specific mail work, the universal event lifecycle, configurable limits, bounded retries, and terminal retain/delete choices are confirmed. Remaining common policy defaults and configuration ownership are tracked in [external integrations](external-integrations.md).
+
+## Delivery milestones
+
+1. Implement the generic event/plugin foundation; do not introduce a provisional email-only engine.
+2. Provide the receiving plugin with domain/recipient validation, configurable limits, durable acceptance through the common API, and project handlers controlling application storage.
+3. Add authenticated submission, direct outgoing delivery and relay configuration, delivery-status handling, and recovery through the common failure mechanism.
+4. Complete mailbox access, folders/message management, attachments, aliases/accounts, transport TLS, source verification/abuse controls, and administrative diagnosis. A receive-only or send-only release is an intermediate milestone, not completion of the requested full server.
+
+Mail-specific transport identity, authentication, and verification belong to the plugin; business authorization belongs to central runtime permissions. Operational diagnostics must never store message bodies in logs. Capacity validation must include mail payload storage, delivery work, and spam/connection pressure.
 
 ## Dependencies and verification
 
 Depends on secrets, certificates, durable jobs/external-effect semantics, schema migrations, and bounded host resource policies. Consult [external integrations](external-integrations.md) for the common event and delivery contract.
 
 Integration coverage must prove that email uses the same event-input API, dispatcher, retry policy, and terminal disposition as other sources. It must also include project isolation, receipt across restart, processing failures and retries, duplicate delivery handling, mailbox permissions, atomic local audit, receipt and attachment limits, host-wide capacity enforcement, and delivery recovery. Verify that handlers never run before durable input acceptance and that handler failure cannot roll back acceptance. Verify both configured terminal outcomes: retention and deletion after retry exhaustion, including recovery across restart. Logs must exclude message bodies and credentials.
+
+## Implementation order
+
+See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
