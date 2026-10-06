@@ -28,9 +28,11 @@ Apply complete routing candidates atomically; failed reload retains the last wor
 
 ## HA peer transport
 
-The user requires explicit server pairing through reciprocal peer addresses and public keys. Peer authentication is separate from public domain certificates: possession of a Let's Encrypt certificate alone does not grant membership. Use a protected encrypted inter-server surface with verification against configured peer identity keys; retain separation from public project routes and the protected admin listener. See [key generation and pairing](variables-and-secrets.md#confirmed-server-pairing).
+The user requires explicit server pairing through mutually configured public keys and a reachable endpoint on at least one member. The primary/standby pair must work when only one member accepts inbound connections; the other initiates an outbound, bidirectional authenticated channel. Peer authentication is separate from public domain certificates: possession of a Let's Encrypt certificate alone does not grant membership. Use a protected encrypted inter-server surface with verification against configured peer identity keys; retain separation from public project routes and the protected admin listener. See [key generation and pairing](variables-and-secrets.md#confirmed-server-pairing).
 
-If TLS material or certificate jobs are coordinated across replicas, define ownership and renewal/failover behavior after the HA replication model is chosen. Avoid conflicting certificate controllers or implicit copying of private keys.
+Public application ingress is a separate deployment contract: define how traffic reaches the standby if the only publicly reachable member fails. A stable public proxy/tunnel or another reachable fallback may be used; outbound peer synchronization alone does not solve that routing case. Listener/dialer roles must not be tied to primary/standby roles.
+
+All HA members host the same software and project route inventory. Coordinate TLS material and certificate job ownership with the full-server primary/standby model. Define certificate readiness and ingress behavior for promotion alongside the replication contract; do not run conflicting independent renewal controllers for the same deployment. Avoid conflicting certificate controllers or implicit copying of private keys.
 
 ## Open decisions
 

@@ -20,6 +20,7 @@ This is the starting point, not the requested final storage model. Consolidate o
 - **LOG-6:** Configure the chunk size/export threshold independently of the total local log target. Once a chunk is complete and closed, schedule its upload immediately, well before local retention is exhausted. A 50 MB chunk is an illustrative setting, not a fixed required default.
 - **LOG-7:** Each server, including every HA member, logs and exports only its own operational logs. Do not replicate log files or make another HA member their export owner.
 - **LOG-8:** Every record and exported segment identifies its originating server unambiguously. Multiple servers can write to the same S3 destination without namespace collisions.
+- **LOG-9:** The same log explorer filters and reads S3 history when logs are no longer local. In HA, every member returns its own local results and the request-receiving server gathers them, queries S3, and returns one combined answer.
 
 ## Proposed storage and cleanup
 
@@ -33,7 +34,7 @@ Plan transition from existing per-project archives without destroying available 
 
 ## Logs in HA deployments
 
-Each HA member owns its own server log service, local byte target, chunk/export threshold, oldest-log age, and archival status. Each member uploads only its own chunks. Pairing servers does not merge or replicate operational logs or transfer their export ownership. Use stable server-instance remote object prefixes so archives from different members cannot collide. Store readable name and stable instance identity in archive metadata/manifests as well as records. Preserve the identity recorded when a log was emitted; do not rewrite old records to a new name on rename. Any future cross-server log explorer must use explicitly authorized peer access.
+Each HA member owns its own server log service, local byte target, chunk/export threshold, oldest-log age, and archival status. Each member uploads only its own chunks. Pairing servers does not merge or replicate operational logs or transfer their export ownership. Use stable server-instance remote object prefixes so archives from different members cannot collide. Store readable name and stable instance identity in archive metadata/manifests as well as records. Preserve the identity recorded when a log was emitted; do not rewrite old records to a new name on rename. Cross-server log queries use authenticated, authorized peer requests; this shares query results for administration without replicating member log stores.
 
 ## Optional server-level S3 archival
 
@@ -41,9 +42,23 @@ Configure endpoint, bucket, server-specific key prefix, secret references, and a
 
 Upload closed immutable segments through the common job/external-effect mechanism. Closing a chunk triggers immediate scheduling of its upload; do not wait until that chunk is about to leave local retention. With a 1 GB local target and 50 MB chunks, export starts as each roughly 50 MB chunk becomes available, while local history continues toward the overall target. Successful upload does not itself evict the local copy; ordinary local retention still determines its removal. Use stable object names and completion metadata to make retries/restart safe. Verify successful storage before labeling an archive exported. Optional compression and manifests should remain bounded and should not introduce a separate scheduler or event engine.
 
-Show both the total local byte target and configured chunk-size threshold, plus export enabled/disabled, queued bytes, progress/last success, and failures alongside local retained bytes, target, oldest timestamp, and age. The age display is for locally available history; do not imply older S3 archives are searchable locally. Remote retention and any later remote browsing require explicit configuration.
+Show both the total local byte target and configured chunk-size threshold, plus export enabled/disabled, queued bytes, progress/last success, and failures alongside local retained bytes, target, oldest timestamp, and age. Show local oldest-log age separately from the oldest available S3 history, so administrators understand both retention tiers. Remote archival history is searchable through the same explorer when export/read access is configured. Remote retention still needs a policy.
 
 The outcome when S3 is unavailable and local history needs eviction is still open. Retrying indefinitely while retaining all files would contradict the bounded server log target. Use the common configurable attempt/terminal policy, with clear storage-pressure behavior and visible gaps. Upload diagnostics must not create an uncontrolled feedback loop of more archives and more upload failures.
+
+## Confirmed coordinated local and S3 log explorer
+
+The server receiving the protected administrative query coordinates the response. Send the same filters to each configured HA member; each member returns only its own bounded local log results. The coordinator also reads applicable S3 history and merges everything into one response. In a standalone deployment, this is the same flow with one local member.
+
+Use common filters for time, severity, kind, endpoint, status, text, project, and server identity. Query only configured deployment/member archive prefixes, not arbitrary buckets or keys supplied by the client. Upload credentials remain scoped to each server's own namespace; configure coordinator read authority explicitly for the participating members' archives.
+
+Prefer local records where available and deduplicate local/S3 overlap by stable originating-server and record identity. Preserve original server names/identifiers, order deterministically by timestamp with an identity tie-breaker, and paginate the combined result. A cursor must capture progress across members and remote chunks without causing duplicate/missing pages merely because a chunk was uploaded or evicted locally.
+
+Use bounded archive manifests with time coverage and server identity to select chunks. Stream remote reading/decompression with bounded bytes, memory, deadlines, cache size, and concurrency; do not download the full bucket for every filter operation or require an external search stack. A short recent query need not scan irrelevant historical S3 objects.
+
+Merge histogram counts under the same filter/time window, deduplicating overlap. Return completeness/coverage metadata: unavailable peer, inaccessible/missing S3 chunk, exceeded scan budget, or timeout. Return available results with explicit partial status rather than labeling an incomplete query complete. Continuation can resume a bounded scan. Operational status and oldest-history coverage distinguish local from remote availability.
+
+The request receiver is a temporary coordinator, not a permanent separate log server. Every member continues owning and exporting its own logs. Aggregation is a protected administration capability and does not grant ordinary applications access to mixed-project or peer archives.
 
 ## Server identity in operational views
 
@@ -65,13 +80,13 @@ Operational log storage or export failure must not undo committed business write
 - **LOG-4:** If S3 is unavailable when old segments must be removed, should the server evict them to maintain local retention or keep them and apply backpressure/drop new operational logs? Recommend bounded retries followed by local eviction with an explicit export-gap warning; the chosen policy must not grow disk usage indefinitely.
 - **LOG-5:** How long should remote archives remain in S3? Recommend an explicit server archival retention policy, independent of the local byte target, with clear ownership of remote deletion.
 
-Remaining answers: Pending conversation. Server-wide ownership, approximate byte-target retention, oldest-log visibility, optional S3 archival, upload on chunk completion, and per-server export ownership in HA are confirmed.
+Remaining answers: Pending conversation. Server-wide ownership, approximate byte-target retention, oldest-log visibility, optional S3 archival, upload on chunk completion, per-server export ownership in HA, and combined local/S3 exploration are confirmed.
 
 ## Dependencies and verification
 
 Local logging depends on [live settings](variables-and-secrets.md) and feeds [capacity guidance](benchmark.md). Optional remote archival follows [the common event/effect infrastructure](external-integrations.md) and a minimal [S3 connector](s3.md); it does not delay delivery of bounded local logs.
 
-Verify server ownership across many projects, convergence after brief overshoot, rotation/deletion races, lowering the target, oldest-age accuracy, empty history, restart, legacy archives, filter/cursor behavior, bounded histogram scans, and redaction. Test independent chunk/local-target settings, upload scheduling immediately after chunk closure, local retention after successful export, separate HA-member archives/export workers, server identity in records/manifests/UI, rename and key rotation preserving archive namespaces, S3 outages, duplicate/restarted uploads, bounded pending bytes, exported-state accuracy, and the selected pressure/remote-retention policy. Include admin E2E for local coverage and export status. Keep logs and telemetry outside application SQLite; audit retention is separate.
+Verify server ownership across many projects, convergence after brief overshoot, rotation/deletion races, lowering the target, oldest-age accuracy, empty history, restart, legacy archives, filter/cursor behavior, bounded histogram scans, and redaction. Test multi-member query fan-out, request-receiver coordination, S3-only history with identical filters, local/remote deduplication, merged pagination/histograms, partial responses and bounded downloads, independent chunk/local-target settings, upload scheduling immediately after chunk closure, local retention after successful export, separate HA-member archives/export workers, server identity in records/manifests/UI, rename and key rotation preserving archive namespaces, S3 outages, duplicate/restarted uploads, bounded pending bytes, exported-state accuracy, and the selected pressure/remote-retention policy. Include admin E2E for local coverage and export status. Keep logs and telemetry outside application SQLite; audit retention is separate.
 
 ## Implementation order
 

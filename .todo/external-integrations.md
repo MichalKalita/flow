@@ -76,7 +76,7 @@ Configure trusted destinations, redirect policy, timeouts, maximum response byte
 
 ## HA event and effect ownership
 
-The confirmed peer address/public-key pairing authenticates servers; replication and failover behavior still need decisions. If peers share a replicated project, the common event/job mechanism must coordinate ownership so only the authorized owner dispatches a given effect. Replicate accepted input, processing state, application data/audit, numeric sequence high-water marks, and completed effect state according to the chosen consistency contract.
+The confirmed deployment uses a primary and a standby, mutually trusted through configured public keys. Peer synchronization must work over one outbound-established bidirectional connection when only one member is reachable for inbound traffic. Every member has the same software, all projects, and full database replicas. Replication must not lose acknowledged data; successful writes and accepted business events wait for required durable replica confirmation. Promotion behavior still needs a decision. Only the deployment primary dispatches project handlers and effects for all projects. A standby applies complete replicated state without executing queued work or emitting another copy of already recorded events. Full-server promotion transfers that responsibility together; there is no per-project placement or active/active scheduler. Replicate each complete project database and the deployment program/configuration state at the acknowledged durability boundary, including accepted input, processing state, application data/audit, numeric sequence high-water marks, blobs, and completed effect state. Preserve project isolation within the fully replicated deployment.
 
 Do not create one independent event queue per replica that sends the same email/payment twice. Worker takeover needs explicit ownership epochs or equivalent stale-owner protection and destination idempotency/reconciliation where available. HA recovery must use the same retry and terminal policy as single-server operation. Event/job/effect diagnostics include the executing server name and stable instance identity, while preserving the recorded origin of accepted events and committed mutations. Identity labels are diagnostic metadata, not authority grants. See [HA scope](variables-and-secrets.md#ha-scope-and-open-architecture).
 
@@ -106,6 +106,8 @@ These are concrete use cases for one contract, not a requirement to finish every
 Answers: Pending conversation. The universal event mechanism, plugin-specific source work, retry limits, and terminal retain/delete choices are confirmed; syntax, defaults, and override rules are not.
 
 ## Dependencies and verification
+
+Reliability and preserving data take priority over throughput. In HA, source acceptance, handler completion, and external-effect state use the confirmed durable replication boundary; no business-event success may be acknowledged solely from an unreplicated primary commit.
 
 Depends on secure settings, schema migration/recovery, and bounded host resources. Deliver the universal event lifecycle before connectors that depend on it. The outbox and external-data endpoint contract follow, then S3 and the full email service.
 

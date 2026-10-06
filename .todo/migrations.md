@@ -10,6 +10,10 @@ Reload accepts compatible additions and rejects entity/field removal or changes 
 
 Seeds have an entity/numeric-ID ledger. A seed is initialized once; deleting it does not recreate it on reload. Explicit IDs are numeric and allocation remains above existing values. See [reload and initialization](../runtime/src/engine.rs), [hosted loading](../runtime/src/projects.rs), and [reload integration tests](../runtime/tests/projects.rs).
 
+## Recovery prerequisite
+
+Provide a verified [backup and restore workflow](backups.md) before activating destructive schema/data changes. A replica is not the historical restore point for a migration mistake. Check a usable backup and sufficient staging space; backup file creation without demonstrated restoration is insufficient.
+
 ## Local migration options
 
 1. Pause one project's work and migrate in place transactionally. Simple and safe for small changes, but large migrations interrupt service.
@@ -30,9 +34,9 @@ Coordinate database, cached program, configuration, and routing activation with 
 
 ## HA coordination
 
-Server pairing is configured through reciprocal addresses/public keys; the replication/failover model is still open. When a project is replicated, migration activation must coordinate with its writer ownership and replica schema/program versions. A replica must not resume writes or dispatch events using incompatible schema or stale committed sequence/event state. Apply the confirmed short final write pause consistently to the affected project across its participating replicas.
+The confirmed HA topology is a full-server primary and standby with reciprocal key trust and only one required reachable peer endpoint. Every member runs the same software and holds all projects with complete database replicas. Replication acknowledgement must preserve confirmed data without loss; promotion details remain open. Migration activation coordinates with the deployment primary and replica schema/program versions. A replica must not resume writes or dispatch events using incompatible schema or stale committed sequence/event state. Apply the confirmed short final write pause consistently to the affected project across its participating replicas.
 
-Replication, if enabled, must preserve data and audit together and retain migration recovery state. Keep the original server identity on replicated audit entries; identify the executing server on migration diagnostics without rewriting mutation provenance. It is distinct from transferring entities between separate projects. See [HA scope](variables-and-secrets.md#ha-scope-and-open-architecture).
+Full-server replication must preserve data and audit together and retain migration recovery state. Standbys receive the same project/migration generation and must not resume as a separately writable variant. Coordinate software upgrades so participating HA members run the required same software. Keep original server identity on replicated audit entries; label migration diagnostics with the executing server. Keep the original server identity on replicated audit entries; identify the executing server on migration diagnostics without rewriting mutation provenance. It is distinct from transferring entities between separate projects. See [HA scope](variables-and-secrets.md#ha-scope-and-open-architecture).
 
 ## Cross-project transfer
 

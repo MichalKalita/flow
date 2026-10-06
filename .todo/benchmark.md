@@ -1,5 +1,9 @@
 # Benchmark and capacity guidance
 
+## Product purpose
+
+Flow aims to provide reliable, easy-to-operate software for companies on inexpensive servers. Reliability and preserving data take priority over throughput. It is not a Kubernetes-style orchestrator or a platform intended for thousands of nodes. Capacity advice should improve the full server's reliability and use of available hardware rather than recommend sharding, scheduling clusters, or required infrastructure stacks.
+
 ## Requested outcome
 
 Assess CPU, RAM, storage performance, available disk space, and the workload's limiting resource. Guide administrators toward suitable request concurrency and log storage settings from the admin panel.
@@ -28,11 +32,15 @@ Start with bounded passive inventory. Optional active diagnostics can refine est
 
 ## Proposed admin workflow
 
-Inventory usable CPUs, memory limit, filesystem free space, application/WAL/audit sizes, and server-wide operational-log usage. Include the independently configured local byte target and chunk-size/export threshold, oldest retained timestamp/age, and pending S3 export bytes when export is enabled. Label measurements and recommendations with the readable server name and stable instance identity. Distinguish host facts from estimates and unavailable platform measurements.
+Inventory usable CPUs, memory limit, filesystem free space, application/WAL/audit sizes, and server-wide operational-log usage. Include the independently configured local byte target and chunk-size/export threshold, oldest retained timestamp/age, and pending S3 export bytes when export is enabled. Account for bounded remote log-query caching, full replica storage, and backup/restore staging, schedule, and retention. Label measurements and recommendations with the readable server name and stable instance identity. Distinguish host facts from estimates and unavailable platform measurements.
 
-Show current worker/admission overrides and the bounded default. Offer an isolated calibration profile with progress and cancellation. Measure admitted throughput, rejected requests, errors, latency histograms, CPU/RSS, and temporary-disk usage at a small set of concurrency levels. Stop at configured resource limits; leave production data untouched.
+Show current worker/admission overrides and the bounded default. Offer an isolated calibration profile with progress and cancellation. Measure admitted throughput, rejected requests, errors, latency histograms, replication durability/wait state when HA is enabled, CPU/RSS, and temporary-disk usage at a small set of concurrency levels. Stop at configured resource limits; leave production data untouched.
 
 Produce recommendations with headroom, not a single universal “best” number. Let the administrator review and apply the recommended settings as a validated candidate. Reserve space for databases, WAL, retained audit, accepted events, migrations, and backups before proposing the server-wide log budget. Treat that budget as an approximate long-term target with brief bounded overshoot, and report actual retained time coverage. Audit has no automatic retention today and must not be silently deleted to satisfy a benchmark recommendation.
+
+## Capacity of full-server HA replicas
+
+HA is a primary/standby copy of the entire deployment: identical software, all projects, and complete databases on every member. Assess whether each member can run the full workload after promotion and has space for all databases, audit, blobs, event state, and replication recovery. Do not recommend sharding projects or distributed scheduling as the way to satisfy capacity. Include replication overhead in bounded diagnostics while retaining member-local log targets and S3 export identity.
 
 ## Open decisions
 

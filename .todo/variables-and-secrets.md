@@ -18,7 +18,7 @@ Keep project namespaces isolated. Separate application settings from host contro
 
 ## Confirmed defaults and guided setup
 
-All server settings have defined defaults, and a setup/configuration wizard recommends suitable values. This includes server naming/identity, local log retention and chunk size, optional S3 archival, resource limits, peer/HA settings, and enabled feature configuration. Project settings participate through their declared types, defaults, constraints, and required inputs.
+All server settings have defined defaults, and a setup/configuration wizard recommends suitable values. This includes server naming/identity, local log retention and chunk size, optional S3 archival and archive search, backup/restore policy, resource limits, peer/HA settings, and enabled feature configuration. Project settings participate through their declared types, defaults, constraints, and required inputs.
 
 Provide a valid standalone starting configuration. Generate server identity and key material automatically. Optional external capabilities can default to disabled/unconfigured until required peer addresses, public keys, service destinations, or credentials are supplied; never invent valid external credentials or trusted peers. The exact numeric defaults are implementation choices still to be calibrated.
 
@@ -42,7 +42,7 @@ Represent a secret as an opaque capability usable only by authorized native/plug
 
 ## Confirmed server pairing
 
-For an HA deployment, configure the address and public key of server B on server A, and the address and public key of server A on server B. This explicit reciprocal trust pairs the servers. Each server retains its own private keys; no private key needs to be entered on the peer.
+For an HA deployment, configure trusted peer public keys reciprocally and provide a reachable peer endpoint for the connecting side. Only one member needs a publicly reachable inter-server endpoint; the other can initiate an outbound connection from behind NAT/firewall. Reciprocal trust does not require reciprocal inbound reachability. Each server retains its own private keys; no private key needs to be entered on the peer.
 
 Display the server's public identity key in full for copying into peer configuration. It is public pairing material, unlike the masked preview of project secrets. Authenticate possession of the corresponding private key before admitting the configured peer; an address or unverified presented public key alone is not sufficient.
 
@@ -62,22 +62,40 @@ Use a stable server identity key pair for peer authentication and appropriately 
 
 Initialize keys and the encrypted store safely, with concurrent-start protection and recoverable initialization state. If existing encrypted data is present but its key is missing or invalid, report a recovery error instead of silently generating a new key that cannot decrypt the data. Support explicit key rotation while preserving decryptability and configured peer trust.
 
-Establish an encrypted peer channel with mutual proof against the configured public keys. Keep this on a protected inter-server surface, separate from public application routes and the existing protected admin UI. Validate peer configuration candidates before activation; do not trust discovery results automatically. Pairing config, connection status, and fingerprints belong in protected server administration.
+Establish an encrypted peer channel with mutual proof against the configured public keys. Carry bidirectional communication over one established connection; either application role can initiate it when the network topology allows. Use bounded reconnect/backoff and resume synchronization from durable checkpoints. Do not require the listening side to open a new inbound connection to an unreachable dial-only member. Keep this on a protected inter-server surface, separate from public application routes and the existing protected admin UI. Validate peer configuration candidates before activation; do not trust discovery results automatically. Pairing config, connection status, and fingerprints belong in protected server administration.
 
-If configuration or secrets are replicated after the HA scope is decided, transfer them only over authenticated encrypted channels and protect them under the receiving server's own storage keys. Pairing is a host-level trust relationship; it does not implicitly grant cross-project application identities, permissions, or entity access.
+Replicate project configuration and secrets over authenticated encrypted channels and protect secrets under the receiving server's own storage keys. Keep each member's private identity/encryption keys and local log state private to that member. Pairing is a host-level trust relationship; it does not implicitly grant cross-project application identities, permissions, or entity access.
 
 ## HA scope and open architecture
 
-Reciprocal pairing is confirmed. The availability/replication model is not: decide whether nodes hold the same project data, which node may write, how failover happens, and what state is synchronized. Recommend one authoritative writer per replicated project as an initial design option; multiple servers can own different projects if explicitly configured.
+- **HA-1:** The deployment has one primary for the whole server and one or more standby members. A standby is prepared for full-server takeover; it is not an independently active writer for selected projects.
+- **HA-4:** Only one member needs public inter-server reachability. The other may dial out, with both directions of peer traffic using the established authenticated channel. Network listener/dialer roles are independent of primary/standby application roles.
 
-Data replication must preserve application mutations together with audit, committed numeric ID sequences, durable events, and effect completion state. Prevent concurrent ownership and duplicate external effects during disconnects/recovery. Program/schema migration and secret rotation must coordinate with the chosen replica model. Address/public-key exchange establishes trust, not data replication or leader election by itself.
+- **HA-2:** All HA members run the same software and host all the same projects. Each member holds a full replica of every project database. Replicate the deployment as a whole; do not shard projects/data, assign different projects to different members, or build a Kubernetes-like scheduler. Simplicity and availability are the goals, not distributed throughput.
+
+Keep project programs, schemas, application configuration/secrets, business data, blobs, audit, ID sequences, and durable event/effect state consistent across members. Replication preserves the same project's identities/IDs across its replicas; it does not merge identities or entities between different projects. Cluster membership explicitly authorizes full-deployment replication, while ordinary application access still uses each project's permissions.
+
+Server identity/private keys, peer endpoint settings, host resource settings, and operational logs remain member-local. Each member still archives only its own logs. Do not execute handlers or external effects merely while applying replicated committed state. Only the primary serves mutating application work and dispatches project jobs; promotion transfers that responsibility for the entire deployment. Read-serving and client ingress details still need implementation decisions.
+
+Promotion must establish exclusive primary ownership before accepting writes or effects. The trigger for promotion still needs a decision.
+
+- **HA-3:** Reliability and not losing data are the primary goals, ahead of throughput. Do not acknowledge successful application writes or accepted business-event input until the required primary/standby copies are durably committed under the replication protocol. Mere eventual full copying does not satisfy this requirement. When the required replica cannot confirm durability, stop acknowledging new writes and report the unavailable write state instead of silently continuing in a potentially lossy mode.
+
+Preserve data, atomic audit, numeric allocation state, configuration, and accepted event/effect state together at the acknowledged replication boundary. After reconnect, reconcile committed/uncertain operations without duplicating mutations or effects. Use request/event deduplication for retries after a response is lost. Safe promotion must prevent both disconnected members from accepting writes as primary. Specify and test the supported failure/recovery model rather than claiming full copies alone protect against every possible simultaneous disaster. The initial implementation should use a small fixed-role primary/standby model, not per-project placement or a general workload orchestrator.
+
+Define public application ingress separately from peer connectivity. An outbound peer connection solves synchronization reachability, but does not by itself keep applications publicly reachable after the only public member fails. Options include a stable public proxy/tunnel entrypoint or another explicitly reachable fallback. The ingress arrangement is an open deployment decision, not an implicit requirement that both HA members expose inbound ports.
+
+Full database replication must preserve application mutations together with audit, committed numeric ID sequences, durable events, and effect completion state. Prevent concurrent ownership and duplicate external effects during disconnects/recovery. Program/schema migration and secret rotation must coordinate with the chosen replica model. Address/public-key exchange establishes trust, not data replication or leader election by itself.
+
+## Backup recovery
+
+The user requires configurable backups that can actually restore the deployment. Key initialization, encryption, and server identity must support recovery on the original or a replacement server. See [backup contents, key recovery, and restoration](backups.md); do not generate a fresh undecryptable key and declare encrypted data restored.
 
 ## Open decisions
 
 - **CFG-2:** Which settings must apply live? Recommend live application settings, connector credentials, and logging settings; label settings requiring listener/process restart clearly.
-- **HA-1:** Should both peers serve the same projects concurrently, or should one act as the active server and the other as standby? Recommend one writer per replicated project first, with explicit ownership and safe takeover.
-- **HA-2:** Which state should pairing synchronize? Define projects/programs, application data/audit, ID sequences, event/effect state, configuration/secrets, and TLS material explicitly. Server operational logs remain local to each server unless remote access is explicitly configured.
-- **HA-3:** What data-loss and outage tolerance is acceptable for failover? Decide acknowledgement/replication and disconnect behavior before choosing automatic takeover.
+- **HA-5:** Should standby promotion be automatic or administrator-triggered? Recommend deciding safe ownership/fencing and disconnect behavior before enabling automatic promotion.
+- **HA-6:** How should public application traffic reach the standby after loss of the only public member? Define a stable proxy/tunnel or reachable fallback independently of the peer-link direction.
 
 Remaining answers: Pending conversation. Unanswered recommendations are not approved decisions.
 
@@ -85,7 +103,7 @@ Remaining answers: Pending conversation. Unanswered recommendations are not appr
 
 This is the first foundation for [routing/TLS](https.md), [external integrations](external-integrations.md), and [authentication](external%20auth.md). The protected admin listener remains the management surface; its HTTP console keeps ordinary application permissions.
 
-Verify server name/identity persistence, rename and key rotation without identity changes, distinct instances sharing one archive bucket, clone/duplicate-identity handling, server-key generation/reuse, concurrent first startup, missing/corrupt-key recovery, rejected unknown or mismatched peers, mutual authentication, restart and rotation, generated-default reuse, concurrent initialization, encryption-at-rest, project isolation, invalid-candidate rollback, restart recovery, rotation, masked-preview behavior for short and long values, absence of full secrets from preview responses, redaction, and version conflicts. Test the settings flow against the real runtime with an isolated database. Keep application mutation audit atomic; record configuration administration with redacted metadata and never secret values.
+Verify server name/identity persistence, rename and key rotation without identity changes, distinct instances sharing one archive bucket, clone/duplicate-identity handling, server-key generation/reuse, concurrent first startup, missing/corrupt-key recovery, rejected unknown or mismatched peers, mutual authentication, identical software/project inventory and full database copies, full-server primary/standby roles, no handlers/effects during replica application, a dial-only member behind NAT, both role/network-direction combinations, connection loss/resume, confirmed writes/events surviving primary loss, no success acknowledgement during required-replica disconnection, stale-owner rejection, ambiguous-response retry deduplication, public-ingress failover under the selected deployment contract, restart and rotation, generated-default reuse, concurrent initialization, encryption-at-rest, project isolation, invalid-candidate rollback, restart recovery, rotation, masked-preview behavior for short and long values, absence of full secrets from preview responses, redaction, and version conflicts. Test the settings flow against the real runtime with an isolated database. Keep application mutation audit atomic; record configuration administration with redacted metadata and never secret values.
 
 ## Implementation order
 
