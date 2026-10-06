@@ -48,6 +48,15 @@ export function LogsPage({
     `/api/logs?${query}`,
     live && !cursors.length ? interval : 0,
   );
+  const histogramQuery = new URLSearchParams(query);
+  histogramQuery.delete("before");
+  histogramQuery.set("histogram", "true");
+  const histogram = usePolling<{
+    histogram: { minute: number; count: number }[];
+    histogram_since: number;
+    histogram_until: number;
+    partial: boolean;
+  }>(api, `/api/logs?${histogramQuery}`, live ? interval : 0);
   const exportPage = () => {
     const url = URL.createObjectURL(
       new Blob([JSON.stringify(page.data?.entries ?? [], null, 2)], {
@@ -68,7 +77,7 @@ export function LogsPage({
             {live && !cursors.length ? "Live tail" : "Browsing history"}
           </Badge>
           <span class="muted ml-3 text-sm">
-            Memory buffer + rotating disk archives
+            Server log store + disk archives
           </span>
         </div>
         <div class="flex gap-2">
@@ -171,6 +180,55 @@ export function LogsPage({
           </span>
         </div>
         <ErrorBanner message={page.error} />
+        {histogram.data && (
+          <div class="log-histogram">
+            <p class="muted text-xs">
+              Matching logs ·{" "}
+              {range === "0" ? "last hour" : `last ${range} minutes`}
+              {histogram.data.partial ? " · partial scan" : ""}
+            </p>
+            <svg
+              viewBox="0 0 600 70"
+              role="img"
+              aria-label="Matching log volume by minute"
+              preserveAspectRatio="none"
+            >
+              {histogram.data.histogram.map((point) => {
+                const duration = Math.max(
+                  60,
+                  histogram.data!.histogram_until -
+                    histogram.data!.histogram_since,
+                );
+                const maximum = Math.max(
+                  1,
+                  ...histogram.data!.histogram.map((point) => point.count),
+                );
+                const height = (point.count / maximum) * 60;
+                return (
+                  <rect
+                    key={point.minute}
+                    x={Math.max(
+                      0,
+                      ((point.minute * 60 - histogram.data!.histogram_since) /
+                        duration) *
+                        600,
+                    )}
+                    y={65 - height}
+                    width={Math.max(1, (600 * 60) / duration - 1)}
+                    height={height}
+                    fill="currentColor"
+                  >
+                    <title>
+                      {new Date(point.minute * 60000).toLocaleTimeString()} ·{" "}
+                      {point.count} logs
+                    </title>
+                  </rect>
+                );
+              })}
+            </svg>
+          </div>
+        )}
+        <ErrorBanner message={histogram.error} />
         <div class="table-wrap">
           <table class="log-table">
             <thead>
@@ -219,6 +277,9 @@ export function LogsPage({
                   </td>
                   <td class="muted">
                     {log.kind}
+                    {typeof log.server_name === "string" && (
+                      <small class="table-subtitle">{log.server_name}</small>
+                    )}
                     {typeof log.project === "string" && (
                       <small class="table-subtitle">{log.project}</small>
                     )}

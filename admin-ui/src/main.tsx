@@ -28,7 +28,6 @@ const pages = [
     title: "Applications",
     description: "Ready-to-use tools for your everyday work.",
     icon: "overview",
-    group: "YOUR SERVER",
   },
   {
     id: "server",

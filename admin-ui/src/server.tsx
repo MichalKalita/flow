@@ -11,6 +11,9 @@ export type ServerSettings = {
   setup_complete: boolean;
   revision: number;
   backup_keep: number;
+  log_target_bytes: number;
+  log_chunk_bytes: number;
+  logs: { log_disk_bytes: number | null; oldest_log_time: string | null };
   defaults: {
     tokio_workers: number;
     tokio_blocking: number;
@@ -167,6 +170,8 @@ export function ServerPage({ api }: { api: Api }) {
   const settings = usePolling<ServerSettings>(api, "/api/settings");
   const [name, setName] = useState("");
   const [keep, setKeep] = useState(7);
+  const [logTarget, setLogTarget] = useState(1024);
+  const [logChunk, setLogChunk] = useState(50);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -174,6 +179,8 @@ export function ServerPage({ api }: { api: Api }) {
     if (settings.data) {
       setName(settings.data.name);
       setKeep(settings.data.backup_keep);
+      setLogTarget(settings.data.log_target_bytes / 1048576);
+      setLogChunk(settings.data.log_chunk_bytes / 1048576);
     }
   }, [settings.data]);
   const save = async (event: Event) => {
@@ -189,6 +196,8 @@ export function ServerPage({ api }: { api: Api }) {
           revision: settings.data.revision,
           name,
           backup_keep: keep,
+          log_target_bytes: Math.round(logTarget * 1048576),
+          log_chunk_bytes: Math.round(logChunk * 1048576),
         }),
       });
       settings.refresh();
@@ -226,6 +235,33 @@ export function ServerPage({ api }: { api: Api }) {
             value={keep}
             onInput={(event) => setKeep(Number(event.currentTarget.value))}
           />
+          <label htmlFor="log-target">Local log storage (MiB)</label>
+          <input
+            id="log-target"
+            type="number"
+            min={1}
+            max={102400}
+            value={logTarget}
+            onInput={(event) => setLogTarget(Number(event.currentTarget.value))}
+            required
+          />
+          <small>
+            Older log chunks are removed to stay near this limit. Recommended:
+            1024 MiB.
+          </small>
+          <label htmlFor="log-chunk">Log chunk size (MiB)</label>
+          <input
+            id="log-chunk"
+            type="number"
+            min={1}
+            max={logTarget}
+            value={logChunk}
+            onInput={(event) => setLogChunk(Number(event.currentTarget.value))}
+            required
+          />
+          <small>
+            Independent of the total storage limit. Recommended: 50 MiB.
+          </small>
           <button class="button-primary" disabled={busy || !settings.data}>
             {busy ? "Saving…" : "Save settings"}
           </button>
@@ -241,6 +277,18 @@ export function ServerPage({ api }: { api: Api }) {
             <dl class="server-details">
               <dt>Server identity</dt>
               <dd>{settings.data.instance}</dd>
+              <dt>Local logs</dt>
+              <dd>
+                {settings.data.logs?.log_disk_bytes == null
+                  ? "Unavailable"
+                  : `${(settings.data.logs.log_disk_bytes / 1048576).toFixed(1)} MiB`}
+              </dd>
+              <dt>Oldest local log</dt>
+              <dd>
+                {settings.data.logs?.oldest_log_time
+                  ? `${new Date(settings.data.logs.oldest_log_time).toLocaleString()} (${Math.max(0, Math.floor((Date.now() - Date.parse(settings.data.logs.oldest_log_time)) / 60000))} minutes old)`
+                  : "No logs yet"}
+              </dd>
               <dt>Workers</dt>
               <dd>{settings.data.defaults.tokio_workers}</dd>
               <dt>Concurrent requests</dt>

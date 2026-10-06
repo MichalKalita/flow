@@ -159,6 +159,11 @@ pub fn system_overview(projects: &Projects) -> Value {
     result
 }
 pub fn system_logs(projects: &Projects, query: &BTreeMap<String, String>) -> Value {
+    if projects.system.shared_logs() {
+        return crate::log_store::query(&projects.system, query).unwrap_or_else(
+            |_| json!({"entries":[],"partial":true,"error":"Server log storage is unavailable"}),
+        );
+    }
     let before = query
         .get("before")
         .and_then(|s| s.parse::<u64>().ok())

@@ -77,6 +77,17 @@ pub fn query(
     observer: &Observability,
     filters: &BTreeMap<String, String>,
 ) -> std::io::Result<Value> {
+    let scope = observer.log_scope();
+    let histogram_mode = filters
+        .get("histogram")
+        .is_some_and(|value| value == "true");
+    let now = chrono::Utc::now().timestamp();
+    let histogram_start = filters
+        .get("since")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(now - 3600)
+        .clamp(now - 21600, now);
+    let mut histogram = BTreeMap::<i64, u64>::new();
     let cursor = filters.get("before").map(String::as_str).unwrap_or("");
     let mut parts = cursor.split('/');
     let before = parts
@@ -98,7 +109,13 @@ pub fn query(
         .unwrap_or_default();
     let since = filters.get("since").and_then(|s| s.parse::<i64>().ok());
     let matches = |event: &Value| {
-        for key in ["kind", "level", "endpoint"] {
+        if scope
+            .as_ref()
+            .is_some_and(|project| event["project"].as_str() != Some(project.as_str()))
+        {
+            return false;
+        }
+        for key in ["kind", "level", "endpoint", "server"] {
             if let Some(value) = filters.get(key).filter(|v| !v.is_empty())
                 && event[key].as_str() != Some(value)
             {
@@ -146,8 +163,22 @@ pub fn query(
             return false;
         }
         event["sequence"] = json!(sequence);
+        if scope.is_some() && event["local_endpoint"].is_string() {
+            event["endpoint"] = event["local_endpoint"].clone();
+        }
         if matches(&event) {
-            rows.push(event);
+            if histogram_mode {
+                if let Some(time) = event["time"]
+                    .as_str()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|time| time.timestamp())
+                    && (histogram_start..=now).contains(&time)
+                {
+                    *histogram.entry(time / 60).or_default() += 1;
+                }
+            } else {
+                rows.push(event);
+            }
         }
         next = Some(
             location
@@ -169,35 +200,47 @@ pub fn query(
     let mut found = resume.is_none();
     let mut continuation = None;
     if !full && let Some(directory) = directory {
-        for name in crate::observability::log_file_names() {
-            let path = directory.join(name);
-            let mut file = match File::open(Path::new(&path)) {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
-            };
-            let metadata = file.metadata()?;
-            let id = file_id(&metadata);
-            if !found && resume.is_some_and(|(wanted, _)| wanted != id) {
-                continue;
-            }
-            let position = if !found {
-                found = true;
-                resume.unwrap().1.min(metadata.len())
-            } else {
-                metadata.len()
-            };
-            let (stopped, position) =
-                reverse_file(&mut file, position, &mut budget, |event, offset| {
-                    visit(event, Some((id, offset)))
-                })?;
-            if stopped {
-                full = true;
+        let directories = std::iter::once((directory, None)).chain(
+            observer
+                .legacy_directory()
+                .map(|path| (path, scope.clone())),
+        );
+        for (directory, legacy_project) in directories {
+            if full || budget == 0 {
                 break;
             }
-            if budget == 0 {
-                continuation = Some(format!("{before}/{id}/{position}"));
-                break;
+            for path in crate::observability::log_files(&directory)? {
+                let mut file = match File::open(Path::new(&path)) {
+                    Ok(f) => f,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+                let metadata = file.metadata()?;
+                let id = file_id(&metadata);
+                if !found && resume.is_some_and(|(wanted, _)| wanted != id) {
+                    continue;
+                }
+                let position = if !found {
+                    found = true;
+                    resume.unwrap().1.min(metadata.len())
+                } else {
+                    metadata.len()
+                };
+                let (stopped, position) =
+                    reverse_file(&mut file, position, &mut budget, |mut event, offset| {
+                        if let Some(project) = &legacy_project {
+                            event["project"] = json!(project);
+                        }
+                        visit(event, Some((id, offset)))
+                    })?;
+                if stopped {
+                    full = true;
+                    break;
+                }
+                if budget == 0 {
+                    continuation = Some(format!("{before}/{id}/{position}"));
+                    break;
+                }
             }
         }
     }
@@ -210,6 +253,6 @@ pub fn query(
         None
     };
     Ok(
-        json!({"entries":rows,"next_cursor":next,"scan_limited":scan_limited,"cursor_expired":!found,"scanned_bytes":SCAN_BUDGET-budget,"source":"memory and rotating JSONL files"}),
+        json!({"entries":rows,"next_cursor":next,"scan_limited":scan_limited,"cursor_expired":!found,"scanned_bytes":SCAN_BUDGET-budget,"source":"memory and rotating JSONL files","histogram":histogram.into_iter().map(|(minute,count)|json!({"minute":minute,"count":count})).collect::<Vec<_>>(),"histogram_since":histogram_start,"histogram_until":now,"partial":scan_limited || !found}),
     )
 }

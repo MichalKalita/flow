@@ -230,3 +230,130 @@ fn bounded_archive_scan_resumes_to_find_older_matches() {
     drop(observer);
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[test]
+fn server_owned_logs_preserve_project_metrics_identity_and_read_only_legacy_history() {
+    use std::collections::BTreeMap;
+    let path = std::env::temp_dir().join(format!("flow-shared-logs-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(path.join("project-a")).unwrap();
+    std::fs::write(
+        path.join("project-a/application.1.jsonl"),
+        "{\"sequence\":1,\"kind\":\"legacy\",\"time\":\"2020-01-01T00:00:00Z\"}\n",
+    )
+    .unwrap();
+    let root = Observability::disk(path.join("server")).unwrap();
+    root.identity("instance-a", "Original name");
+    let first = Observability::scoped(path.join("project-a"), root.clone(), "a").unwrap();
+    let second = Observability::scoped(path.join("project-b"), root.clone(), "b").unwrap();
+    first.request("GET /health", 200, Duration::from_millis(1), "a-request");
+    root.identity("instance-a", "New name");
+    second.request("GET /health", 200, Duration::from_millis(1), "b-request");
+    first.flush().unwrap();
+    second.flush().unwrap();
+    root.flush().unwrap();
+    assert!(!path.join("project-a/application.jsonl").exists());
+    assert!(!path.join("project-b/application.jsonl").exists());
+    assert_eq!(first.snapshot()["endpoints"]["GET /health"]["count"], 1);
+    assert_eq!(second.snapshot()["endpoints"]["GET /health"]["count"], 1);
+    let system = flow_runtime::log_store::query(&root, &BTreeMap::new()).unwrap();
+    assert_eq!(system["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(system["entries"][0]["server_name"], "New name");
+    assert_eq!(system["entries"][1]["server_name"], "Original name");
+    assert_eq!(system["entries"][1]["endpoint"], "GET /a/health");
+    let project = flow_runtime::log_store::query(&first, &BTreeMap::new()).unwrap();
+    assert_eq!(project["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(project["entries"][0]["project"], "a");
+    assert_eq!(project["entries"][0]["endpoint"], "GET /health");
+    assert_eq!(project["entries"][1]["kind"], "legacy");
+    first.close();
+    second.close();
+    root.close();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn retention_converges_after_lowering_target_and_cursor_survives_immutable_rotation() {
+    use flow_runtime::observability::LogPolicy;
+    use std::collections::BTreeMap;
+    let path = std::env::temp_dir().join(format!("flow-retention-{}", uuid::Uuid::new_v4()));
+    let observer = Observability::disk(&path).unwrap();
+    observer
+        .policy(LogPolicy {
+            target_bytes: 8192,
+            chunk_bytes: 1024,
+        })
+        .unwrap();
+    for n in 0..30 {
+        observer.log(json!({"kind":"test","number":n,"padding":"x".repeat(256)}));
+    }
+    observer.flush().unwrap();
+    let resources = observer.resources();
+    assert!(resources["log_disk_bytes"].as_u64().unwrap() <= 8192);
+    let oldest = resources["oldest_log_time"].as_str().unwrap();
+    assert!(chrono::DateTime::parse_from_rfc3339(oldest).is_ok());
+    let files = flow_runtime::observability::log_files(&path).unwrap();
+    assert!(files.iter().any(|path| {
+        path.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("segment")
+    }));
+    let page =
+        flow_runtime::log_store::query(&observer, &BTreeMap::from([("limit".into(), "5".into())]))
+            .unwrap();
+    let cursor = page["next_cursor"].as_str().unwrap().to_owned();
+    observer
+        .policy(LogPolicy {
+            target_bytes: 2048,
+            chunk_bytes: 512,
+        })
+        .unwrap();
+    observer.flush().unwrap();
+    assert!(observer.resources()["log_disk_bytes"].as_u64().unwrap() <= 2048);
+    let next =
+        flow_runtime::log_store::query(&observer, &BTreeMap::from([("before".into(), cursor)]))
+            .unwrap();
+    assert!(
+        next["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["number"].as_u64().unwrap() < 25)
+    );
+    observer.close();
+    let restarted = Observability::disk(&path).unwrap();
+    assert!(restarted.resources()["oldest_log_time"].is_string());
+    restarted.close();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn histogram_counts_filtered_archived_logs_beyond_a_page_without_duplicate_memory_rows() {
+    use std::collections::BTreeMap;
+    let path = std::env::temp_dir().join(format!("flow-log-histogram-{}", uuid::Uuid::new_v4()));
+    let root = Observability::disk(&path).unwrap();
+    for n in 0..350 {
+        root.log(json!({"kind":if n%2==0 {"request"} else {"io"}}));
+    }
+    root.flush().unwrap();
+    let histogram = flow_runtime::log_store::query(
+        &root,
+        &BTreeMap::from([
+            ("histogram".into(), "true".into()),
+            ("kind".into(), "request".into()),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        histogram["histogram"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|point| point["count"].as_u64().unwrap())
+            .sum::<u64>(),
+        175
+    );
+    assert_eq!(histogram["partial"], false);
+    root.close();
+    std::fs::remove_dir_all(path).unwrap();
+}

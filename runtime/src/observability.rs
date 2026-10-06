@@ -2,8 +2,8 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::{self, OpenOptions},
-    io::{BufWriter, Write},
-    path::PathBuf,
+    io::{BufRead, BufReader, BufWriter, Read, Write},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -17,10 +17,86 @@ pub const LOG_BUFFER_LIMIT: usize = 200;
 pub const LOG_ROTATE_BYTES: u64 = 256 * 1024 * 1024;
 pub const LOG_ARCHIVE_COUNT: u32 = 3;
 pub const LOG_DISK_LIMIT_BYTES: u64 = LOG_ROTATE_BYTES * (LOG_ARCHIVE_COUNT as u64 + 1);
-pub fn log_file_names() -> Vec<String> {
-    let mut names = vec!["application.jsonl".into()];
-    names.extend((1..=LOG_ARCHIVE_COUNT).map(|i| format!("application.{i}.jsonl")));
-    names
+pub const LOG_CHUNK_BYTES: u64 = 50 * 1024 * 1024;
+pub const LOG_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+#[derive(Clone, Copy)]
+pub struct LogPolicy {
+    pub target_bytes: u64,
+    pub chunk_bytes: u64,
+}
+impl Default for LogPolicy {
+    fn default() -> Self {
+        Self {
+            target_bytes: LOG_DISK_LIMIT_BYTES,
+            chunk_bytes: LOG_CHUNK_BYTES,
+        }
+    }
+}
+pub fn log_files(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut segments = Vec::new();
+    match fs::read_dir(path) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("application.segment.")
+                    && name.ends_with(".jsonl")
+                    && entry.file_type()?.is_file()
+                {
+                    segments.push(entry.path());
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    }
+    segments.sort_by(|a, b| b.cmp(a));
+    let mut files = vec![path.join("application.jsonl")];
+    files.extend(segments);
+    files.extend((1..=LOG_ARCHIVE_COUNT).map(|n| path.join(format!("application.{n}.jsonl"))));
+    Ok(files)
+}
+fn cleanup(path: &Path, policy: LogPolicy) -> std::io::Result<()> {
+    let files = log_files(path)?;
+    let mut total = 0u64;
+    let mut closed = Vec::new();
+    for file in files {
+        match fs::metadata(&file) {
+            Ok(metadata) => {
+                total = total.saturating_add(metadata.len());
+                if file.file_name() != Some(std::ffi::OsStr::new("application.jsonl")) {
+                    closed.push((file, metadata.len()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    for (file, bytes) in closed.into_iter().rev() {
+        if total <= policy.target_bytes {
+            break;
+        }
+        fs::remove_file(file)?;
+        total = total.saturating_sub(bytes);
+    }
+    Ok(())
+}
+fn oldest(path: &Path) -> Option<String> {
+    for file in log_files(path).ok()?.into_iter().rev() {
+        let Ok(file) = fs::File::open(file) else {
+            continue;
+        };
+        let mut line = String::new();
+        if BufReader::new(file.take(65536))
+            .read_line(&mut line)
+            .is_ok()
+            && let Ok(event) = serde_json::from_str::<Value>(&line)
+            && let Some(time) = event["time"].as_str()
+        {
+            return Some(time.to_owned());
+        }
+    }
+    None
 }
 #[derive(Clone, Default)]
 pub struct Observability(Arc<Mutex<Data>>);
@@ -33,11 +109,16 @@ struct Data {
     metrics: BTreeMap<String, Metric>,
     logs: VecDeque<Value>,
     writer: Option<mpsc::SyncSender<Command>>,
+    writer_thread: Option<std::thread::JoinHandle<()>>,
     dropped: u64,
     storage_errors: u64,
     queued_bytes: usize,
     queued_events: usize,
     directory: Option<PathBuf>,
+    sink: Option<(Observability, String)>,
+    shared_logs: bool,
+    identity: Option<(String, String)>,
+    policy: LogPolicy,
     service: crate::telemetry::Service,
     work: BTreeMap<String, Metric>,
     log_sequence: u64,
@@ -133,20 +214,78 @@ impl Metric {
     }
 }
 impl Observability {
+    pub fn policy(&self, policy: LogPolicy) -> std::io::Result<()> {
+        if policy.chunk_bytes == 0
+            || policy.chunk_bytes > policy.target_bytes
+            || policy.target_bytes / policy.chunk_bytes > 512
+        {
+            return Err(std::io::Error::other("Invalid log storage limits"));
+        }
+        self.0.lock().unwrap().policy = policy;
+        Ok(())
+    }
     pub fn close(&self) {
-        if let Ok(mut data) = self.0.lock() {
-            data.writer = None;
+        let (writer, worker) = {
+            let mut data = self.0.lock().unwrap();
             data.directory = None;
+            (data.writer.take(), data.writer_thread.take())
+        };
+        drop(writer);
+        if let Some(worker) = worker {
+            let _ = worker.join();
         }
     }
 
+    pub fn scoped(
+        path: impl Into<PathBuf>,
+        sink: Observability,
+        project: &str,
+    ) -> std::io::Result<Self> {
+        sink.0.lock().unwrap().shared_logs = true;
+        Self::disk_inner(path.into(), Some((sink, project.to_owned())))
+    }
+    pub fn shared_logs(&self) -> bool {
+        self.0.lock().unwrap().shared_logs
+    }
+    pub fn server_id(&self) -> Option<String> {
+        let data = self.0.lock().unwrap();
+        if let Some((sink, _)) = &data.sink {
+            let sink = sink.clone();
+            drop(data);
+            return sink.server_id();
+        }
+        data.identity.as_ref().map(|(instance, _)| instance.clone())
+    }
+    pub fn identity(&self, instance: &str, name: &str) {
+        self.0.lock().unwrap().identity = Some((instance.to_owned(), name.to_owned()));
+    }
+    pub fn log_scope(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .sink
+            .as_ref()
+            .map(|(_, project)| project.clone())
+    }
+    pub fn legacy_directory(&self) -> Option<PathBuf> {
+        let data = self.0.lock().unwrap();
+        data.sink.as_ref().and(data.directory.clone())
+    }
     pub fn disk(path: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let path = path.into();
+        Self::disk_inner(path.into(), None)
+    }
+    fn disk_inner(path: PathBuf, sink: Option<(Observability, String)>) -> std::io::Result<Self> {
         fs::create_dir_all(&path)?;
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path.join("application.jsonl"))?;
+        let log = if sink.is_none() {
+            Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.join("application.jsonl"))?,
+            )
+        } else {
+            None
+        };
         let this = Self::default();
         // Restore bounded aggregates. Malformed snapshots fail startup rather than silently resetting counters.
         match fs::read(path.join("metrics.json")) {
@@ -206,13 +345,18 @@ impl Observability {
             Err(e) => return Err(e),
         }
         this.0.lock().unwrap().directory = Some(path.clone());
+        this.0.lock().unwrap().sink = sink;
         let (tx, rx) = mpsc::sync_channel::<Command>(LOG_QUEUE_LIMIT);
         this.0.lock().unwrap().writer = Some(tx);
         let worker = Arc::downgrade(&this.0);
-        std::thread::spawn(move || {
-            let mut log = BufWriter::with_capacity(64 * 1024, log);
+        let thread = std::thread::spawn(move || {
+            let mut log = log.map(|file| BufWriter::with_capacity(64 * 1024, file));
             let mut last_log_flush = Instant::now();
-            let mut size = log.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
+            let mut size = log
+                .as_ref()
+                .and_then(|log| log.get_ref().metadata().ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
             let mut last = Instant::now();
             loop {
                 let event = rx.recv_timeout(Duration::from_secs(1));
@@ -220,6 +364,31 @@ impl Observability {
                     break;
                 };
                 let mut failed = false;
+                let rotation = (|| -> std::io::Result<()> {
+                    let Some(log) = log.as_mut() else {
+                        return Ok(());
+                    };
+                    let policy = shared.lock().unwrap().policy;
+                    if size >= policy.chunk_bytes {
+                        log.flush()?;
+                        let segment = format!(
+                            "application.segment.{:020}.{}.jsonl",
+                            chrono::Utc::now().timestamp_micros(),
+                            uuid::Uuid::new_v4()
+                        );
+                        fs::rename(path.join("application.jsonl"), path.join(segment))?;
+                        *log = BufWriter::with_capacity(
+                            64 * 1024,
+                            OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(path.join("application.jsonl"))?,
+                        );
+                        size = 0;
+                    }
+                    Ok(())
+                })();
+                failed |= rotation.is_err();
                 if let Ok(Command::Log(ref event)) = event {
                     {
                         let mut data = shared.lock().unwrap();
@@ -229,39 +398,21 @@ impl Observability {
                         data.queued_events = data.queued_events.saturating_sub(1);
                     }
                     let result = (|| -> std::io::Result<()> {
-                        if size >= LOG_ROTATE_BYTES {
-                            log.flush()?;
-                            for i in (1..=LOG_ARCHIVE_COUNT).rev() {
-                                let from = if i == 1 {
-                                    path.join("application.jsonl")
-                                } else {
-                                    path.join(format!("application.{}.jsonl", i - 1))
-                                };
-                                let to = path.join(format!("application.{i}.jsonl"));
-                                match fs::rename(from, to) {
-                                    Ok(()) => (),
-                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                            log = BufWriter::with_capacity(
-                                64 * 1024,
-                                OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(path.join("application.jsonl"))?,
-                            );
-                            size = 0;
-                        }
+                        let Some(log) = log.as_mut() else {
+                            return Ok(());
+                        };
                         let line = event.to_string();
                         writeln!(log, "{line}")?;
                         size += line.len() as u64 + 1;
                         Ok(())
                     })();
-                    failed = result.is_err();
+                    failed |= result.is_err();
                 }
                 if last_log_flush.elapsed() >= Duration::from_secs(1) {
-                    failed |= log.flush().is_err();
+                    failed |= log.as_mut().is_some_and(|log| log.flush().is_err());
+                    if log.is_some() {
+                        failed |= cleanup(&path, shared.lock().unwrap().policy).is_err();
+                    }
                     last_log_flush = Instant::now();
                 }
                 let disconnected = matches!(event, Err(mpsc::RecvTimeoutError::Disconnected));
@@ -276,7 +427,15 @@ impl Observability {
                     })();
                     failed |= result.is_err();
                     if let Ok(Command::Flush(ref reply)) = event {
-                        let result = result.and_then(|()| log.flush());
+                        let result = result
+                            .and_then(|()| log.as_mut().map(|log| log.flush()).unwrap_or(Ok(())))
+                            .and_then(|()| {
+                                if log.is_some() {
+                                    cleanup(&path, shared.lock().unwrap().policy)
+                                } else {
+                                    Ok(())
+                                }
+                            });
                         let _ = reply.send(result);
                     }
                     last = Instant::now();
@@ -289,6 +448,7 @@ impl Observability {
                 }
             }
         });
+        this.0.lock().unwrap().writer_thread = Some(thread);
         Ok(this)
     }
     pub fn flush(&self) -> std::io::Result<()> {
@@ -304,8 +464,27 @@ impl Observability {
         Ok(())
     }
     pub fn log(&self, mut event: Value) {
+        let sink = self.0.lock().unwrap().sink.clone();
+        if let Some((sink, project)) = sink {
+            event["project"] = json!(project);
+            if let Some(endpoint) = event["endpoint"].as_str().map(str::to_owned) {
+                event["local_endpoint"] = json!(endpoint);
+                if let Some((method, path)) = endpoint.split_once(' ') {
+                    event["endpoint"] = json!(format!("{method} /{project}{path}"));
+                }
+            }
+            sink.log(event);
+            return;
+        }
         event["time"] = json!(chrono::Utc::now().to_rfc3339());
         let mut data = self.0.lock().unwrap();
+        if let Some((instance, name)) = &data.identity {
+            event["server"] = json!(instance);
+            event["server_name"] = json!(name);
+        }
+        if event.get("project").is_none() {
+            event["project"] = json!("system");
+        }
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let minimum =
             (data.log_sequence + 1).max(chrono::Utc::now().timestamp_micros().max(0) as u64);
@@ -322,6 +501,13 @@ impl Observability {
             } else {
                 "info"
             });
+        }
+        let bytes = std::mem::size_of::<Value>() + crate::resources::heap_bytes(&event);
+        if event.to_string().len() > 65536
+            || data.queued_bytes.saturating_add(bytes) > LOG_QUEUE_BYTES
+        {
+            data.dropped += 1;
+            return;
         }
         if let Some(tx) = &data.writer {
             if tx.try_send(Command::Log(event.clone())).is_err() {
@@ -396,10 +582,7 @@ impl Observability {
                 .map(crate::resources::heap_bytes)
                 .sum::<usize>();
         let disk = d.directory.as_ref().and_then(|path| {
-            let log_files = log_file_names()
-                .into_iter()
-                .map(|name| path.join(name))
-                .collect::<Vec<_>>();
+            let log_files = log_files(path).ok()?;
             let log_disk = log_files
                 .iter()
                 .map(crate::resources::file_bytes)
@@ -425,7 +608,11 @@ impl Observability {
             "disk_bytes": disk.map(|(_, total)| total),
             "log_buffer_limit": LOG_BUFFER_LIMIT,
             "log_queue_limit": LOG_QUEUE_LIMIT,
-            "log_disk_limit_bytes": LOG_DISK_LIMIT_BYTES,
+            "log_disk_limit_bytes": if d.sink.is_none() {d.policy.target_bytes}else{0},
+            "log_chunk_bytes": d.policy.chunk_bytes,
+            "log_queue_limit_bytes": LOG_QUEUE_BYTES,
+            "shared_log_owner":d.sink.is_some(),
+            "oldest_log_time": if d.sink.is_none() { d.directory.as_ref().and_then(|path|oldest(path)) } else {None},
             "history_minutes": HISTORY,
             "estimate_note": "Estimates include collection capacity and payloads; exclude allocator overhead, fragmentation, active requests, thread stacks and shared runtime allocations."
         })
@@ -448,6 +635,11 @@ impl Observability {
     }
     pub fn log_source(&self) -> (Vec<Value>, Option<PathBuf>) {
         let data = self.0.lock().unwrap();
+        if let Some((sink, _)) = &data.sink {
+            let sink = sink.clone();
+            drop(data);
+            return sink.log_source();
+        }
         (
             data.logs.iter().rev().cloned().collect(),
             data.directory.clone(),

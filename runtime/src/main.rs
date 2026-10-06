@@ -112,6 +112,20 @@ async fn run() -> Result<bool, Box<dyn std::error::Error>> {
     let observer = Observability::disk(
         std::env::var("FLOW_OBSERVABILITY_DIR").unwrap_or_else(|_| "data/observability".into()),
     )?;
+    let identity = server.status()?;
+    observer.identity(
+        identity["instance"].as_str().unwrap_or(""),
+        identity["name"].as_str().unwrap_or(""),
+    );
+    observer.policy(flow_runtime::observability::LogPolicy {
+        target_bytes: identity["log_target_bytes"].as_u64().unwrap(),
+        chunk_bytes: identity["log_chunk_bytes"].as_u64().unwrap(),
+    })?;
+    println!(
+        "Flow server {} ({})",
+        identity["name"].as_str().unwrap_or(""),
+        identity["instance"].as_str().unwrap_or("")
+    );
     if args.is_empty() {
         std::fs::create_dir_all(source)?;
     }

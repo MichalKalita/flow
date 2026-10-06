@@ -73,11 +73,11 @@ Native plugins implement `Payment.createUrl`, `Image.resize` and `Files.put`;
 external plugin implementations are not yet supported. Certificate authentication
 is rejected over the unsecured public transport.
 
-## Fotografie a pluginy
+## Photos and plugins
 
-`POST /api/products/{productId}/photo` přijímá JSON s `photo` jako base64 PNG/JPEG, volitelně `width` a `height`. Rozměry a byte limit se kontrolují skutečným dekódováním. `Image.resize` zachová poměr stran, `Files.put` uloží PNG BLOB spolu s entitami `File` a `Photo` v jedné SQLite transakci. Pluginy mají vlastní pozitivní `INVOKE` granty; právo na volání nepřeskočí práva k entitám ani polím argumentů.
+`POST /api/products/{productId}/photo` accepts a base64 PNG/JPEG `photo` and optional `width` and `height`. Decoding checks dimensions and byte limits. `Image.resize` preserves the aspect ratio. `Files.put` commits the PNG blob and its File/Photo entities in one SQLite transaction. Plugin INVOKE grants do not bypass entity or argument-field permissions.
 
-Seedovaný katalogový administrátor má JWT subject `idp:catalog-admin`. Uživatel bez role `CATALOG_ADMIN` nemůže fotografii uložit. Výsledné `File.url` vede na `/api/files/{id}`; download znovu ověří aktuální `READ File` před čtením BLOBu. Neautorizovaný upload nezanechá metadata ani soubor.
+The seeded catalog administrator has subject `idp:catalog-admin`. Upload requires CATALOG_ADMIN. `File.url` points to `/api/files/{id}`, where downloads recheck READ File. Denied uploads leave no metadata or file.
 
 ## MQTT and WebSocket
 
@@ -115,18 +115,15 @@ service key is `automation-key-long-enough-123456789`, configured by
 permissions roll back the entire publish. Event chains are capped at 256 per
 transaction.
 
-## Jádro
+## Runtime core
 
-- Obecný parser hranatých forem, JSON řetězce, limity vstupu, uzlů a zanoření.
-- Brandovaná ID, nominální deklarace typů, konečné rozsahy čísel, scale a limity seznamů. Čísla používají přesnou aritmetiku s velkými integers; neukládají se jako float.
-- Typované vstupy a výstupy, odmítnutí neznámých vstupních polí, defaulty, inverse a streamové reference.
-- Pozitivní granty ze strany aktéra, více grantů jako OR, explicitní `[includes ...]`, vlastnictví, role, vztahy, pole a předchozí/navržený stav transakce. Bez grantu je přístup odepřen. Permissions mohou číst potřebné závislosti bez zpřístupnění jejich hodnot klientovi.
-- Při autorizaci se identita a její vazby připnou k původnímu stavu. Nově napsaná role tedy nemůže autorizovat zápis ve stejné transakci. Zápisy se provedou až po autorizaci a ověření výstupu, jinak se transakce vrátí zpět.
-- Projekce načítá jednotlivé potřebné sloupce a závislosti pravidel, nikdy `SELECT *`. Neprovádí optimalizaci na minimální počet SQL dotazů. SQLite požadavky se serializují.
+The parser handles bracket forms and JSON strings with input, node, and nesting limits. Numeric IDs carry entity brands. Numbers use exact rational arithmetic, finite ranges, and declared scale. Inputs/outputs reject unknown fields and validate defaults, inverses, and stream references.
 
-Kontrola programu nyní ověřuje schéma, podporované konstrukce, arity, reference a cykly vazeb. Úplné statické odvozování všech typů výrazů ještě není implementováno; dynamické výsledky se kontrolují za běhu a jejich chyba nesmí způsobit částečný zápis. Negativní odkazy na další permissions se konzervativně odmítají. `Context` obsahuje pouze důvěryhodný aktuální čas. Nativní `USE` s pluginovým release není zatím přeneseno.
+Permissions are positive grants, combined with OR, covering ownership, roles, relations, fields, and previous/proposed transaction state. Missing grants deny access. Permission dependencies can be read without exposing their values to clients. Authentication and roles are pinned before writes, so a newly assigned role cannot authorize the same transaction. Authorization and output validation precede commit; failures roll back. Projection reads required columns and rule dependencies rather than SELECT *. SQLite work is serialized per project.
 
-## Ověření
+Compilation checks supported forms, arity, schema references, and relation cycles. Complete static inference remains pending; dynamic outputs are validated at runtime. Negative permission references are conservatively rejected. Context contains a trusted current time. Native USE with versioned plugin releases is not yet implemented.
+
+## Verification
 
 ```sh
 cargo fmt --check
@@ -134,7 +131,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Integrační testy pokrývají objednávky, rollback, vlastnictví, autentizaci, práva zařízení, přesná čísla, úzkou projekci a restart SQLite, streamovou retenci, přenos MQTT → WebSocket a odebrání práv u aktivních odběrů. Formát syntaxe popisuje [LANGUAGE.md](LANGUAGE.md).
+Integration tests cover transactions, rollback, ownership, authentication, device permissions, exact numbers, narrow projection, SQLite restart, stream retention, MQTT/WebSocket interoperability, and revoked active subscriptions. See [LANGUAGE.md](LANGUAGE.md).
 
 ## Built-in observability and administration
 
@@ -149,7 +146,7 @@ Set `FLOW_HTTP_ADMISSION=unlimited` to disable the application HTTP admission
 semaphore. Numeric values retain a configured concurrent-request limit, and
 omitting the setting retains CPU/RAM-based admission.
 
-Set `FLOW_ADMIN_TOKEN` to a secret of at least 32 bytes before starting the server.
+Use the local setup wizard, or explicitly set `FLOW_ADMIN_TOKEN` to a secret of at least 32 bytes.
 The admin dashboard listens on `127.0.0.1:9090`; `FLOW_ADMIN_BIND` changes its
 address. Non-loopback addresses require the explicit opt-in
 `FLOW_ADMIN_ALLOW_REMOTE=1`; token authentication and the separate admin listener
@@ -194,7 +191,7 @@ SQLite operation spans cover the entire operation, including authentication,
 transaction execution and commit/rollback; nested read/apply spans give more
 specific timings. Request IDs are returned in `X-Request-ID`. Logs exclude
 request bodies, credentials and plugin arguments. The dashboard retains the
-last 200 events in memory as a live cache; older entries remain in rotating disk files.
+last 200 server events in memory as a live cache; older entries remain in server-owned disk segments. Projects keep separate telemetry, but send new operational logs to one server writer. Existing project archives remain available read-only through project log queries.
 Log explorer filters by text, kind, level, endpoint, status and time, and pages
 back through archives. Each query scans at most 4 MiB and returns at most 200 rows;
 a continuation cursor resumes bounded scans. Archive rotation preserves cursors
@@ -202,12 +199,9 @@ until the underlying file is removed. Details show request IDs for correlation.
 Audit filters entity, action and transport, with before/after snapshots decoded
 to their logical JSON values, including records created by older versions.
 
-A single background writer uses a bounded 512-event in-memory queue and a 64 KiB write
-buffer, flushed every second. That queue is backpressure, not log retention: it holds
-events waiting to hit disk. At 256 MiB, the log rotates through three archives
-(approximately 1 GiB total, plus at most one event). A full queue drops disk log
-entries instead of blocking request execution; the dashboard reports dropped
-logs and storage errors. Logging failures do not undo successful business data.
+One server log writer uses a 512-event queue with an independent 8 MiB memory cap, a 64 KiB write buffer, and a one-second flush/cleanup cadence. Individual records are bounded to 64 KiB. The default local target is 1 GiB and the independent chunk threshold is 50 MiB. Closed segments have immutable names; cleanup removes oldest closed chunks toward the target. Brief overshoot is permitted. Server settings can lower the target during operation; idle cleanup rotates an oversized active chunk too. Full queues drop operational records and report the loss rather than blocking application commits.
+
+Every new log includes project, stable server instance, and readable server name at emission. Renaming does not rewrite history. Application responses include X-Flow-Server alongside X-Request-ID. Server settings show actual oldest local timestamp/age. The explorer provides a filtered one-minute histogram over 15 minutes, one hour, or six hours; bounded incomplete scans are labeled partial. Remote archive upload/search and peer aggregation remain planned. Legacy project archives remain outside the new server target until a later explicit migration.
 
 ### Metrics and resource usage
 

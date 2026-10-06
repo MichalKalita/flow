@@ -164,7 +164,7 @@ impl ServerState {
                 state.read_document(&database)?;
             } else {
                 let short = &state.instance[..8];
-                let defaults = json!({"name":format!("flow-{short}"),"setup_complete":false,"admin_token":STANDARD.encode(random::<48>()?),"secrets":{},"variables":{},"backup_keep":7});
+                let defaults = json!({"name":format!("flow-{short}"),"setup_complete":false,"admin_token":STANDARD.encode(random::<48>()?),"secrets":{},"variables":{},"backup_keep":7,"log_target_bytes":crate::observability::LOG_DISK_LIMIT_BYTES,"log_chunk_bytes":crate::observability::LOG_CHUNK_BYTES});
                 state.write_document(&database, 1, &defaults)?;
             }
             database.execute_batch("COMMIT")?;
@@ -275,7 +275,7 @@ impl ServerState {
             Sha256::digest(STANDARD.decode(&self.public_key).map_err(|_| crypto())?)
         );
         Ok(
-            json!({"instance":self.instance,"name":document["name"],"public_key":self.public_key,"fingerprint":fingerprint,"setup_complete":document["setup_complete"],"revision":revision,"backup_keep":document["backup_keep"],"defaults":{"tokio_workers":crate::resources::tokio_worker_threads(),"tokio_blocking":crate::resources::tokio_blocking_threads(),"http_admission":crate::resources::http_admission()},"secrets":document["secrets"].as_object().ok_or_else(crypto)?.iter().map(|(name,value)|json!({"name":name,"preview":masked(value.as_str().unwrap_or(""))})).collect::<Vec<_>>()}),
+            json!({"instance":self.instance,"name":document["name"],"public_key":self.public_key,"fingerprint":fingerprint,"setup_complete":document["setup_complete"],"revision":revision,"backup_keep":document["backup_keep"],"log_target_bytes":document["log_target_bytes"].as_u64().unwrap_or(crate::observability::LOG_DISK_LIMIT_BYTES),"log_chunk_bytes":document["log_chunk_bytes"].as_u64().unwrap_or(crate::observability::LOG_CHUNK_BYTES),"defaults":{"tokio_workers":crate::resources::tokio_worker_threads(),"tokio_blocking":crate::resources::tokio_blocking_threads(),"http_admission":crate::resources::http_admission()},"secrets":document["secrets"].as_object().ok_or_else(crypto)?.iter().map(|(name,value)|json!({"name":name,"preview":masked(value.as_str().unwrap_or(""))})).collect::<Vec<_>>()}),
         )
     }
 
@@ -283,10 +283,16 @@ impl ServerState {
         let fields = input
             .as_object()
             .ok_or_else(|| Error::new("invalid_input", "Expected settings object"))?;
-        if fields
-            .keys()
-            .any(|key| !["revision", "name", "backup_keep"].contains(&key.as_str()))
-        {
+        if fields.keys().any(|key| {
+            ![
+                "revision",
+                "name",
+                "backup_keep",
+                "log_target_bytes",
+                "log_chunk_bytes",
+            ]
+            .contains(&key.as_str())
+        }) {
             return Err(Error::new("invalid_input", "Unknown server setting"));
         }
         let revision = fields
@@ -294,6 +300,13 @@ impl ServerState {
             .and_then(Value::as_i64)
             .ok_or_else(|| Error::new("invalid_input", "Settings revision is required"))?;
         self.change(Some(revision), |document| {
+            let target = input.get("log_target_bytes").unwrap_or(&document["log_target_bytes"]).as_u64().unwrap_or(crate::observability::LOG_DISK_LIMIT_BYTES);
+            let chunk = input.get("log_chunk_bytes").unwrap_or(&document["log_chunk_bytes"]).as_u64().unwrap_or(crate::observability::LOG_CHUNK_BYTES);
+            if ["log_target_bytes","log_chunk_bytes"].iter().any(|key|input.get(*key).is_some_and(|value|value.as_u64().is_none())) || !(1048576..=107374182400).contains(&target) || !(1048576..=target).contains(&chunk) || target / chunk > 512 {
+                return Err(Error::new("invalid_input", "Log chunks must be at least 1 MiB and fit the local target, with at most 512 chunks"));
+            }
+            document["log_target_bytes"]=json!(target);
+            document["log_chunk_bytes"]=json!(chunk);
             if let Some(name) = fields.get("name") {
                 validate_name(name.as_str().unwrap_or(""))?;
                 document["name"] = name.clone();

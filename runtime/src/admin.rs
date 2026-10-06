@@ -467,7 +467,10 @@ fn server(state: &Admin) -> crate::Result<Arc<crate::server_state::ServerState>>
 
 async fn settings(State(state): State<Admin>) -> Response {
     match server(&state).and_then(|server| server.status()) {
-        Ok(value) => Json(value).into_response(),
+        Ok(mut value) => {
+            value["logs"] = state.projects.system.resources();
+            Json(value).into_response()
+        }
         Err(error) => failure(error),
     }
 }
@@ -477,7 +480,23 @@ async fn save_settings(State(state): State<Admin>, Json(input): Json<Value>) -> 
         Ok(server) => server,
         Err(error) => return failure(error),
     };
-    match tokio::task::spawn_blocking(move || server.update_settings(&input)).await {
+    let observer = state.projects.system.clone();
+    match tokio::task::spawn_blocking(move || {
+        let value = server.update_settings(&input)?;
+        observer.identity(
+            value["instance"].as_str().unwrap_or(""),
+            value["name"].as_str().unwrap_or(""),
+        );
+        observer
+            .policy(crate::observability::LogPolicy {
+                target_bytes: value["log_target_bytes"].as_u64().unwrap(),
+                chunk_bytes: value["log_chunk_bytes"].as_u64().unwrap(),
+            })
+            .map_err(|_| crate::Error::new("configuration", "Invalid log settings"))?;
+        Ok::<_, crate::Error>(value)
+    })
+    .await
+    {
         Ok(Ok(value)) => Json(value).into_response(),
         Ok(Err(error)) => failure(error),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

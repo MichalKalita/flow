@@ -260,9 +260,12 @@ impl Projects {
                     ) {
                         runtime.gate = Some(self.gate.clone());
                         runtime.frontend = frontend.clone();
-                        runtime.observability =
-                            Observability::disk(self.data.join(format!("{name}-observability")))
-                                .map_err(io)?;
+                        runtime.observability = Observability::scoped(
+                            self.data.join(format!("{name}-observability")),
+                            self.system.clone(),
+                            &name,
+                        )
+                        .map_err(io)?;
                         save_cache()?;
                         return Ok(Arc::new(Mutex::new(runtime)));
                     }
@@ -285,9 +288,12 @@ impl Projects {
                     runtime.reload(&source, config)?;
                     runtime.gate = Some(self.gate.clone());
                     runtime.frontend = frontend.clone();
-                    runtime.observability =
-                        Observability::disk(self.data.join(format!("{name}-observability")))
-                            .map_err(io)?;
+                    runtime.observability = Observability::scoped(
+                        self.data.join(format!("{name}-observability")),
+                        self.system.clone(),
+                        &name,
+                    )
+                    .map_err(io)?;
                     save_cache()?;
                     return Ok(Arc::new(Mutex::new(runtime)));
                 }
@@ -300,9 +306,12 @@ impl Projects {
                 )?;
                 runtime.gate = Some(self.gate.clone());
                 runtime.frontend = frontend.clone();
-                runtime.observability =
-                    Observability::disk(self.data.join(format!("{name}-observability")))
-                        .map_err(io)?;
+                runtime.observability = Observability::scoped(
+                    self.data.join(format!("{name}-observability")),
+                    self.system.clone(),
+                    &name,
+                )
+                .map_err(io)?;
                 save_cache()?;
                 Ok(Arc::new(Mutex::new(runtime)))
             })();
@@ -354,8 +363,10 @@ impl Projects {
                                     .map(|value| crate::frontend::validate(&runtime.program, value))
                                     .transpose()
                                     .ok()?;
-                                runtime.observability = Observability::disk(
+                                runtime.observability = Observability::scoped(
                                     self.data.join(format!("{name}-observability")),
+                                    self.system.clone(),
+                                    &name,
                                 )
                                 .ok()?;
                                 Some(Arc::new(Mutex::new(runtime)))

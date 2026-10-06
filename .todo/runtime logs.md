@@ -8,9 +8,9 @@ The admin interface must provide search, severity labels, a histogram, and the t
 
 ## Current implementation
 
-The existing implementation uses separate project observers/directories plus a host observer. It has a 200-event memory cache and bounded 512-event writer queue per observer, rotating JSONL files at 256 MiB with three archives. Project archive queries scan at most 4 MiB and return at most 200 entries; combined system browsing uses recent buffers. The UI already filters severity, kind, endpoint, status, text, and time.
+New operational logs now use one server writer and immutable closed segments. Project-tagged records include persistent server identity and the readable name at emission. Project telemetry remains separate. Defaults are a 1 GiB local target, independently sized 50 MiB chunks, a 512-record / 8 MiB queue, and one-second cleanup/flush. Protected administration changes limits live and shows actual oldest timestamp/age. Bounded local search and filtered minute histograms use the same predicates; incomplete scans are labeled partial.
 
-This is the starting point, not the requested final storage model. Consolidate operational logs into the common server service; keep project identity in each record. Project application databases, mutation audit, and telemetry isolation remain separate concerns. See [observability](../runtime/src/observability.rs), [archive queries](../runtime/src/log_store.rs), [the explorer](../admin-ui/src/logs.tsx), and [tests](../runtime/tests/observability.rs).
+Legacy per-project JSONL archives are retained read-only in project-specific queries. They are not included in the new server retention target; an explicit history migration remains outstanding. Remote destinations, immediate closed-chunk export, remote/peer search, and configurable verbosity remain outstanding. See [observability](../runtime/src/observability.rs), [archive queries](../runtime/src/log_store.rs), and [tests](../runtime/tests/observability.rs).
 
 ## Confirmed retention behavior
 

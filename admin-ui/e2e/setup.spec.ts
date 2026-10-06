@@ -71,6 +71,10 @@ test("first setup creates a persistent owner without a manual admin token", asyn
       .getByRole("button", { name: "Save changes", exact: true })
       .click();
     await expect(contacts.getByText("12345", { exact: true })).toBeVisible();
+    await contacts.screenshot({
+      path: "/tmp/flow-contacts.png",
+      fullPage: true,
+    });
     await page.getByRole("link", { name: "Backups", exact: true }).click();
     await page
       .getByRole("button", { name: "Create backup", exact: true })
@@ -124,6 +128,8 @@ test("first setup creates a persistent owner without a manual admin token", asyn
       .click();
     await expect(page.getByLabel("Server name")).toHaveValue("Office server");
     await page.getByLabel("Server name").fill("Office renamed");
+    await page.getByLabel("Local log storage (MiB)").fill("8");
+    await page.getByLabel("Log chunk size (MiB)").fill("1");
     await page
       .getByRole("button", { name: "Save settings", exact: true })
       .click();
@@ -155,6 +161,13 @@ test("first setup creates a persistent owner without a manual admin token", asyn
       .getByRole("link", { name: "Server settings", exact: true })
       .click();
     await expect(page.getByLabel("Server name")).toHaveValue("Office renamed");
+    await expect(page.getByLabel("Local log storage (MiB)")).toHaveValue("8");
+    await expect(page.getByLabel("Log chunk size (MiB)")).toHaveValue("1");
+    await expect(page.getByText("minutes old", { exact: false })).toBeVisible();
+    await page.screenshot({
+      path: "/tmp/flow-server-settings.png",
+      fullPage: true,
+    });
     await contacts.reload();
     await expect(
       contacts.getByRole("heading", { name: "Ada Lovelace", exact: true }),

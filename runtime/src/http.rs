@@ -177,6 +177,11 @@ pub(crate) async fn dispatch(
     response
         .headers_mut()
         .insert("x-request-id", id.parse().unwrap());
+    if let Some(instance) = observer.server_id()
+        && let Ok(value) = instance.parse()
+    {
+        response.headers_mut().insert("x-flow-server", value);
+    }
     response
 }
 async fn dispatch_inner(State(runtime): State<Arc<Mutex<Runtime>>>, request: Request) -> Response {
