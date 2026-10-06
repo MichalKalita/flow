@@ -392,6 +392,72 @@ impl Projects {
             .retain(|name, _| found.contains(name));
         Ok(())
     }
+    pub fn set_project_secret(&self, project: &str, name: &str, value: &str) -> Result<()> {
+        let _maintenance = self
+            .maintenance
+            .try_lock()
+            .map_err(|_| Error::new("conflict", "Project maintenance is already running"))?;
+        let server = self
+            .server
+            .as_ref()
+            .ok_or_else(|| Error::new("configuration", "Server secret storage is unavailable"))?;
+        if !name_valid(project) {
+            return Err(Error::new("invalid_input", "Invalid project name"));
+        }
+        let Some(runtime) = self.get(project) else {
+            return server.set_secret(project, name, value);
+        };
+        let mut runtime = runtime
+            .lock()
+            .map_err(|_| Error::new("internal", "Runtime lock failed"))?;
+        runtime.require_available()?;
+        let mut config = runtime.configuration();
+        if self.default_name().is_none() {
+            let cache: Value = serde_json::from_slice(
+                &std::fs::read(self.data.join(format!("{project}-active.json"))).map_err(io)?,
+            )?;
+            for (section, jwt) in [("jwt_secrets", true), ("event_credentials", false)] {
+                if let Some(bindings) = cache["manifest"][section].as_object() {
+                    for (alias, binding) in bindings {
+                        if binding["secret"].as_str() == Some(name) {
+                            if jwt {
+                                config
+                                    .jwt_keys
+                                    .insert(alias.clone(), value.as_bytes().to_vec());
+                            } else {
+                                config
+                                    .event_credentials
+                                    .insert(alias.clone(), format!("ApiKey {value}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(error) = runtime.validate_configuration(&config) {
+            if let Ok((root, _)) = self.roots() {
+                std::fs::write(
+                    root.join(format!("{project}-error.txt")),
+                    format!("Secret configuration: {error}\n"),
+                )
+                .map_err(io)?;
+            }
+            return Err(error);
+        }
+        // Holding the active runtime lock makes persistence and activation one
+        // observable boundary. A crash after persistence reopens the new key.
+        server.set_secret(project, name, value)?;
+        runtime.activate_configuration(config);
+        if let Ok((root, _)) = self.roots() {
+            let error_path = root.join(format!("{project}-error.txt"));
+            if std::fs::read_to_string(&error_path)
+                .is_ok_and(|error| error.starts_with("Secret configuration:"))
+            {
+                std::fs::remove_file(error_path).map_err(io)?;
+            }
+        }
+        Ok(())
+    }
     fn project_config(&self, name: &str, source: &str, manifest: &Value) -> Result<Config> {
         let program = crate::program::Program::compile(source)?;
         let mut config = self.config.clone();

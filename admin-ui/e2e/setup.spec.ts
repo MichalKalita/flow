@@ -189,6 +189,50 @@ test("first setup creates a persistent owner without a manual admin token", asyn
       contacts.getByRole("heading", { name: "Ada Lovelace", exact: true }),
     ).toBeVisible();
     await expect(contacts.getByText("12345", { exact: true })).toBeVisible();
+    await page
+      .getByText("Advanced: change an application secret", { exact: true })
+      .click();
+    await page
+      .getByLabel("Application", { exact: true })
+      .selectOption("contacts");
+    await page
+      .getByLabel("Secret name", { exact: true })
+      .fill("backup-jwt-user");
+    await page
+      .getByLabel("New secret value", { exact: true })
+      .fill("too short");
+    await page
+      .getByRole("button", { name: "Save secret", exact: true })
+      .click();
+    await expect(page.getByRole("alert")).toContainText(
+      "JWT key must have at least 32 bytes",
+    );
+    await contacts.reload();
+    await expect(
+      contacts.getByRole("heading", { name: "Ada Lovelace", exact: true }),
+    ).toBeVisible();
+    await page
+      .getByLabel("New secret value", { exact: true })
+      .fill("fictional browser rotated signing key longer than 32 bytes");
+    await page
+      .getByRole("button", { name: "Save secret", exact: true })
+      .click();
+    await expect(
+      page.getByText("Secret saved and active.", { exact: false }),
+    ).toBeVisible();
+    await contacts.reload();
+    await expect(
+      contacts.getByLabel("Access code", { exact: true }),
+    ).toBeVisible();
+    await page.getByRole("link", { name: "Applications", exact: true }).click();
+    const reopened = page.waitForEvent("popup");
+    await page.getByRole("button", { name: "Open", exact: true }).click();
+    await expect(
+      (await reopened).getByRole("heading", {
+        name: "Ada Lovelace",
+        exact: true,
+      }),
+    ).toBeVisible();
   } finally {
     server.kill("SIGINT");
     await stopped(server);

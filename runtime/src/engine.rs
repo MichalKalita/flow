@@ -139,34 +139,7 @@ impl Runtime {
     }
     fn open_inner(source: &str, path: &str, config: Config, reload: bool) -> Result<Self> {
         let program = Program::compile(source)?;
-        for (alias, key) in &config.jwt_keys {
-            if key.len() < 32
-                || !program
-                    .auth
-                    .iter()
-                    .any(|a| a.alias == *alias && a.mode == "jwt")
-            {
-                return Err(Error::new(
-                    "configuration",
-                    "JWT key must have at least 32 bytes and match a declared adapter",
-                ));
-            };
-        }
-        for operation in &program.operations {
-            if let Some(event) = &operation.event
-                && !config
-                    .event_credentials
-                    .contains_key(&format!("{}:{}", event.adapter, event.actor_id))
-            {
-                return Err(Error::new(
-                    "configuration",
-                    format!(
-                        "Missing verified event actor {}:{}",
-                        event.adapter, event.actor_id
-                    ),
-                ));
-            }
-        }
+        validate_program_configuration(&program, &config)?;
         for (name, method) in &program.plugins {
             let expected = match name.as_str() {
                 "Payment.createUrl" | "Image.resize" => "pure",
@@ -351,6 +324,39 @@ impl Runtime {
             suspended: false,
             gate: None,
         })
+    }
+    pub(crate) fn validate_configuration(&self, config: &Config) -> Result<()> {
+        self.require_available()?;
+        validate_program_configuration(&self.program, config)?;
+        for operation in &self.program.operations {
+            if let Some(event) = &operation.event {
+                let credential =
+                    &config.event_credentials[&format!("{}:{}", event.adapter, event.actor_id)];
+                let (_, actor) = authenticate_candidates(
+                    &self.program,
+                    &self.db,
+                    config,
+                    Some(credential),
+                    std::slice::from_ref(&event.adapter),
+                )
+                .map_err(|_| {
+                    Error::new(
+                        "configuration",
+                        "New secret does not authorize the configured event actor",
+                    )
+                })?;
+                if actor.id()? != event.actor_id {
+                    return Err(Error::new(
+                        "configuration",
+                        "Event credential does not match declared actor",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn activate_configuration(&mut self, config: Config) {
+        self.config = config;
     }
     pub(crate) fn suspend(&mut self) -> Result<()> {
         self.suspended = true;
@@ -1136,6 +1142,37 @@ fn lookup(db: &Connection, auth: &crate::program::Auth, value: &str) -> Result<O
         )
         .optional()?;
     Ok(id.map(|id| Value::reference(&auth.entity, &id)))
+}
+fn validate_program_configuration(program: &Program, config: &Config) -> Result<()> {
+    for (alias, key) in &config.jwt_keys {
+        if key.len() < 32
+            || !program
+                .auth
+                .iter()
+                .any(|a| a.alias == *alias && a.mode == "jwt")
+        {
+            return Err(Error::new(
+                "configuration",
+                "JWT key must have at least 32 bytes and match a declared adapter",
+            ));
+        };
+    }
+    for operation in &program.operations {
+        if let Some(event) = &operation.event
+            && !config
+                .event_credentials
+                .contains_key(&format!("{}:{}", event.adapter, event.actor_id))
+        {
+            return Err(Error::new(
+                "configuration",
+                format!(
+                    "Missing verified event actor {}:{}",
+                    event.adapter, event.actor_id
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 fn authenticate(
     p: &Program,

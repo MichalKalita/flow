@@ -109,3 +109,7 @@ Verify server name/identity persistence, rename and key rotation without identit
 ## Implementation order
 
 See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
+
+## Delivered live-secret slice
+
+Protected administration can change project secrets with masked previews. Active manifest consumers are validated before encrypted persistence and activated under the project runtime lock without restart. Invalid JWT/event credentials retain working configuration and write a project error. Integration and browser tests cover invalid replacement, immediate session invalidation/new access, persistence across restart, and unchanged application audit. General typed variables, all consumer classes, HA pairing/replication, and complete secret lifecycle remain outstanding.

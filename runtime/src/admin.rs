@@ -509,8 +509,9 @@ async fn save_secret(State(state): State<Admin>, Json(input): Json<Value>) -> Re
         Ok(server) => server,
         Err(error) => return failure(error),
     };
+    let projects = state.projects.clone();
     match tokio::task::spawn_blocking(move || {
-        server.set_secret(
+        projects.set_project_secret(
             input["project"].as_str().unwrap_or(""),
             input["name"].as_str().unwrap_or(""),
             input["value"].as_str().unwrap_or(""),

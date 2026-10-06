@@ -186,6 +186,40 @@ export function ServerPage({ api }: { api: Api }) {
   const [logChunk, setLogChunk] = useState(50);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [secretProject, setSecretProject] = useState("");
+  const [secretName, setSecretName] = useState("");
+  const [secretValue, setSecretValue] = useState("");
+  const [secretNotice, setSecretNotice] = useState("");
+  const projects = usePolling<{
+    projects: { name: string; active: boolean }[];
+  }>(api, "/api/projects", 0);
+  const saveSecret = async (event: Event) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setSecretNotice("");
+    try {
+      await api("/api/settings/secret", {
+        method: "POST",
+        body: JSON.stringify({
+          project: secretProject,
+          name: secretName,
+          value: secretValue,
+        }),
+      });
+      setSecretValue("");
+      settings.refresh();
+      setSecretNotice(
+        "Secret saved and active. Existing sessions using this key may need to sign in again.",
+      );
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Unable to save this secret.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (settings.data) {
@@ -374,6 +408,54 @@ export function ServerPage({ api }: { api: Api }) {
             >
               <code class="server-key">{settings.data.public_key}</code>
               <p class="mono">{settings.data.fingerprint}</p>
+            </Panel>
+          </details>
+          <details>
+            <summary>Advanced: change an application secret</summary>
+            <Panel
+              title="Application secret"
+              description="A new value is checked before replacing a key used by a running application."
+            >
+              <form class="server-form" onSubmit={saveSecret}>
+                <label htmlFor="secret-project">Application</label>
+                <select
+                  id="secret-project"
+                  value={secretProject}
+                  onChange={(event) =>
+                    setSecretProject(event.currentTarget.value)
+                  }
+                  required
+                >
+                  <option value="">Choose an application</option>
+                  {projects.data?.projects.map((project) => (
+                    <option key={project.name} value={project.name}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+                <label htmlFor="secret-name">Secret name</label>
+                <input
+                  id="secret-name"
+                  value={secretName}
+                  onInput={(event) => setSecretName(event.currentTarget.value)}
+                  required
+                  maxLength={64}
+                  autoComplete="off"
+                />
+                <label htmlFor="secret-value">New secret value</label>
+                <input
+                  id="secret-value"
+                  type="password"
+                  value={secretValue}
+                  onInput={(event) => setSecretValue(event.currentTarget.value)}
+                  required
+                  autoComplete="new-password"
+                />
+                <button class="button-primary" disabled={busy}>
+                  Save secret
+                </button>
+                {secretNotice && <p role="status">{secretNotice}</p>}
+              </form>
             </Panel>
           </details>
           {settings.data.secrets.length > 0 && (
