@@ -195,9 +195,7 @@ test("first setup creates a persistent owner without a manual admin token", asyn
     await page
       .getByLabel("Application", { exact: true })
       .selectOption("contacts");
-    await page
-      .getByLabel("Secret name", { exact: true })
-      .fill("backup-jwt-user");
+    await page.getByLabel("Secret name", { exact: true }).fill("signing");
     await page
       .getByLabel("New secret value", { exact: true })
       .fill("too short");

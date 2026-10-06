@@ -62,6 +62,22 @@ fn digest(path: &Path) -> Result<(u64, String)> {
     }
     Ok((total, format!("{:x}", hash.finalize())))
 }
+fn space_preflight(path: &Path, bytes: u64) -> Result<()> {
+    let required = bytes
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
+        .ok_or_else(invalid)?;
+    if crate::resources::disk_space(path)
+        .and_then(|disk| disk["available_bytes"].as_u64())
+        .is_some_and(|available| available < required)
+    {
+        return Err(Error::new(
+            "storage",
+            "Not enough available disk space for recovery staging and working headroom",
+        ));
+    }
+    Ok(())
+}
 fn record(root: &Path, relative: &str) -> Result<Value> {
     let path = root.join(relative);
     sync_file(&path)?;
@@ -149,6 +165,19 @@ pub fn create(projects: &Projects) -> Result<Value> {
             .iter()
             .map(|(_, runtime)| runtime.lock().map_err(storage))
             .collect::<Result<Vec<_>>>()?;
+        // Load already refuses a 33rd project. The manifest reader rejects a
+        // larger project list, so a capture of the running set stays restorable.
+        let mut estimate = 4 * 1024 * 1024u64;
+        for runtime in &guards {
+            let logical = runtime.storage_resources()["sqlite"]["logical_bytes"]
+                .as_u64()
+                .ok_or_else(|| Error::new("storage", "Application snapshot size is unavailable"))?;
+            estimate = estimate
+                .checked_add(logical)
+                .and_then(|bytes| bytes.checked_add(5 * 1024 * 1024))
+                .ok_or_else(invalid)?;
+        }
+        space_preflight(&staging, estimate)?;
         let mut files = Vec::new();
         let mut names = Vec::new();
         let mut secrets = Vec::new();
@@ -158,8 +187,13 @@ pub fn create(projects: &Projects) -> Result<Value> {
             let mut settings = cache["manifest"].clone();
             let config = runtime.configuration();
             for (alias, key) in config.jwt_keys {
-                let secret_name = format!("backup-jwt-{alias}");
                 let value = String::from_utf8(key).map_err(|_| invalid())?;
+                if let Some(reference) = settings["jwt_secrets"][&alias]["secret"].as_str()
+                    && server.secret(name, reference)?.as_deref() == Some(value.as_str())
+                {
+                    continue;
+                }
+                let secret_name = format!("backup-jwt-{alias}");
                 secrets.push((name.clone(), secret_name.clone(), value));
                 settings["jwt_secrets"][alias] = json!({"secret":secret_name});
             }
@@ -169,6 +203,11 @@ pub fn create(projects: &Projects) -> Result<Value> {
                     .strip_prefix("ApiKey ")
                     .ok_or_else(invalid)?
                     .to_owned();
+                if let Some(reference) = settings["event_credentials"][&actor]["secret"].as_str()
+                    && server.secret(name, reference)?.as_deref() == Some(value.as_str())
+                {
+                    continue;
+                }
                 secrets.push((name.clone(), secret_name.clone(), value));
                 settings["event_credentials"][actor] = json!({"secret":secret_name});
             }
@@ -272,6 +311,16 @@ impl Drop for RestoredBackup {
 pub fn prepare(path: &Path, password: &str, parent: &Path) -> Result<RestoredBackup> {
     let manifest = manifest(path)?;
     fs::create_dir_all(parent).map_err(storage)?;
+    let bytes = manifest["files"]
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .try_fold(0u64, |total, file| {
+            total
+                .checked_add(file["bytes"].as_u64().ok_or_else(invalid)?)
+                .ok_or_else(invalid)
+        })?;
+    space_preflight(parent, bytes)?;
     let directory = parent.join(format!(".restore-{}", uuid::Uuid::new_v4()));
     private_directory(&directory)?;
     let restored = RestoredBackup {

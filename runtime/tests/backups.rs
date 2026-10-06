@@ -468,3 +468,269 @@ fn committed_program_generation_survives_missing_cache_and_is_the_backup_source(
         runtime.lock().unwrap().observability.close();
     }
 }
+
+#[test]
+fn backups_preserve_vault_references_and_freeze_external_credentials_for_portable_restore() {
+    use flow_runtime::catalog;
+    let directory = Directory::new();
+    let projects = setup(&directory);
+    let installed =
+        catalog::install(&projects, "contacts", &uuid::Uuid::new_v4().to_string()).unwrap();
+    let authorization = installed["authorization"].as_str().unwrap();
+    let saved = backups::create(&projects).unwrap();
+    let artifact = directory
+        .0
+        .join("backups")
+        .join(saved["id"].as_str().unwrap());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(artifact.join("projects/contacts/project.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["jwt_secrets"]["user"]["secret"], "signing");
+    let target = directory.0.join("vault-restored");
+    backups::restore_fresh(&artifact, "fictional recovery password", &target).unwrap();
+    let state = Arc::new(ServerState::open(&target.join("server")).unwrap());
+    assert!(
+        state
+            .secret("contacts", "backup-jwt-user")
+            .unwrap()
+            .is_none()
+    );
+    let restored = Projects::load_with_server(
+        &target.join("projects"),
+        &target.join("databases"),
+        Config::default(),
+        Observability::default(),
+        Some(state),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .get("contacts")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute("Contacts", json!({}), Some(authorization))
+            .unwrap(),
+        json!([])
+    );
+    for (_, runtime) in restored.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+    for (_, runtime) in projects.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+
+    let external = Directory::new();
+    fs::create_dir_all(external.0.join("projects/one")).unwrap();
+    fs::write(
+        external.0.join("projects/one/application.flow"),
+        include_str!("../src/catalog/contacts.flow").replace("PROJECT_NAME", "one"),
+    )
+    .unwrap();
+    let state = Arc::new(ServerState::open(&external.0.join("server")).unwrap());
+    state
+        .enroll("External credential test", "fictional recovery password")
+        .unwrap();
+    let mut config = Config::default();
+    config.jwt_keys.insert(
+        "user".into(),
+        b"fictional external signing key longer than 32 bytes".to_vec(),
+    );
+    let projects = Projects::load_with_server(
+        &external.0.join("projects"),
+        &external.0.join("data"),
+        config,
+        Observability::default(),
+        Some(state.clone()),
+    )
+    .unwrap();
+    let runtime = projects.get("one").unwrap();
+    let issued = runtime
+        .lock()
+        .unwrap()
+        .issue_admin_jwt("user", "owner", 3600)
+        .unwrap();
+    let saved = backups::create(&projects).unwrap();
+    assert!(state.secret("one", "backup-jwt-user").unwrap().is_none());
+    let artifact = external
+        .0
+        .join("backups")
+        .join(saved["id"].as_str().unwrap());
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(artifact.join("projects/one/project.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["jwt_secrets"]["user"]["secret"], "backup-jwt-user");
+    let target = external.0.join("external-restored");
+    backups::restore_fresh(&artifact, "fictional recovery password", &target).unwrap();
+    let state = Arc::new(ServerState::open(&target.join("server")).unwrap());
+    let restored = Projects::load_with_server(
+        &target.join("projects"),
+        &target.join("databases"),
+        Config::default(),
+        Observability::default(),
+        Some(state),
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .get("one")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute("Contacts", json!({}), issued["authorization"].as_str())
+            .unwrap(),
+        json!([])
+    );
+    for (_, runtime) in restored.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+    for (_, runtime) in projects.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn oversized_restore_is_rejected_before_copying_or_replacing_working_data() {
+    let directory = Directory::new();
+    let projects = setup(&directory);
+    let saved = backups::create(&projects).unwrap();
+    let artifact = directory
+        .0
+        .join("backups")
+        .join(saved["id"].as_str().unwrap());
+    let path = artifact.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let available = flow_runtime::resources::disk_space(&directory.0).unwrap()["available_bytes"]
+        .as_u64()
+        .unwrap();
+    manifest["files"][0]["bytes"] = json!(available.saturating_add(1));
+    manifest.as_object_mut().unwrap().remove("signature");
+    manifest["signature"] = json!(
+        projects
+            .server
+            .as_ref()
+            .unwrap()
+            .sign_backup_manifest(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap()
+    );
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let staging = directory.0.join("restore-staging");
+    assert_eq!(
+        backups::prepare(&artifact, "fictional recovery password", &staging)
+            .err()
+            .unwrap()
+            .code,
+        "storage"
+    );
+    assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+    assert_eq!(
+        projects
+            .get("one")
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute("Items", json!({}), None)
+            .unwrap(),
+        json!([])
+    );
+    manifest["files"][0]["bytes"] = json!(u64::MAX);
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert_eq!(
+        backups::prepare(&artifact, "fictional recovery password", &staging)
+            .err()
+            .unwrap()
+            .code,
+        "invalid_input"
+    );
+    assert_eq!(fs::read_dir(&staging).unwrap().count(), 0);
+    for (_, runtime) in projects.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+}
+
+#[test]
+fn oversized_project_set_never_publishes_an_unrestorable_backup() {
+    let directory = Directory::new();
+    let root = directory.0.join("projects");
+    for number in 0..33 {
+        let project = root.join(format!("p{number:02}"));
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("application.flow"), APP).unwrap();
+    }
+    let state = Arc::new(ServerState::open(&directory.0.join("server")).unwrap());
+    state
+        .enroll("Backup limits", "fictional recovery password")
+        .unwrap();
+    let projects = Projects::load_with_server(
+        &root,
+        &directory.0.join("data"),
+        Config::default(),
+        Observability::default(),
+        Some(state),
+    )
+    .unwrap();
+    assert_eq!(projects.active().len(), 32);
+    assert!(projects.get("p32").is_none());
+    assert_eq!(
+        fs::read_to_string(root.join("p32-error.txt")).unwrap(),
+        "At most 32 projects can be loaded\n"
+    );
+    let runtime = projects.get("p00").unwrap();
+    runtime
+        .lock()
+        .unwrap()
+        .execute("Add", json!({"title":"Retained"}), None)
+        .unwrap();
+    let saved = backups::create(&projects).unwrap();
+    let artifact = directory
+        .0
+        .join("backups")
+        .join(saved["id"].as_str().unwrap());
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(artifact.join("manifest.json")).unwrap()).unwrap();
+    manifest["projects"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("p32"));
+    manifest.as_object_mut().unwrap().remove("signature");
+    manifest["signature"] = json!(
+        projects
+            .server
+            .as_ref()
+            .unwrap()
+            .sign_backup_manifest(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap()
+    );
+    fs::write(
+        artifact.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let staging = directory.0.join("restore-staging");
+    assert_eq!(
+        backups::prepare(&artifact, "fictional recovery password", &staging)
+            .err()
+            .unwrap()
+            .code,
+        "invalid_input"
+    );
+    assert!(!staging.join(".restore-anything").exists());
+    assert_eq!(
+        fs::read_dir(&staging)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        runtime
+            .lock()
+            .unwrap()
+            .execute("Items", json!({}), None)
+            .unwrap()[0]["title"],
+        "Retained"
+    );
+    for (_, runtime) in projects.active() {
+        runtime.lock().unwrap().observability.close();
+    }
+}
