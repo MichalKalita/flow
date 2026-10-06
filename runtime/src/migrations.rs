@@ -1,3 +1,6 @@
+//! Applies versioned field renames before a new program generation becomes active.
+//! A failed step restores the previous generation and does not replay a finished step.
+
 use crate::{Error, Result, program::Program, syntax::Node};
 use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};

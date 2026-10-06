@@ -1,3 +1,6 @@
+//! Records the active program source with the schema it activated.
+//! A failed activation keeps the previous generation.
+
 use crate::{Error, Result};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};

@@ -1,3 +1,6 @@
+//! Reports host CPU, memory, and disk, and suggests log limits from that inventory.
+//! Does not run a load test or change settings by itself.
+
 use crate::{Result, projects::Projects, resources};
 use serde_json::{Value, json};
 const MIB: u64 = 1048576;

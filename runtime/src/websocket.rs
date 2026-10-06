@@ -1,3 +1,6 @@
+//! WebSocket transport for declared stream and operation access.
+//! Uses the same project selection and grants as HTTP.
+
 use crate::{Error, engine::Runtime};
 use axum::extract::ws::{Message, WebSocket};
 use serde_json::{Value, json};

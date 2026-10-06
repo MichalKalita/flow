@@ -1,3 +1,6 @@
+//! Installs a bundled application template into its own project folder and database.
+//! Validates the program before publication. Does not share identities across projects.
+
 use crate::{
     Error, Result,
     engine::{Config, Runtime},

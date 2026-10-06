@@ -1,3 +1,6 @@
+//! Builds the operator summaries the admin UI shows for logs, audit, and health.
+//! Reads bounded windows. Does not store telemetry in the application database.
+
 use crate::projects::Projects;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

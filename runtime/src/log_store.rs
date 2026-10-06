@@ -1,3 +1,6 @@
+//! Stores server logs outside the application database, in bounded chunks.
+//! Supports filtered reads and retention. Does not export logs to remote storage.
+
 use crate::observability::Observability;
 use serde_json::{Value, json};
 use std::{

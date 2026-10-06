@@ -1,3 +1,6 @@
+//! In-process spans, counters, and log events for one server.
+//! Keeps history bounded. Does not write credentials, tokens, or request bodies.
+
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},

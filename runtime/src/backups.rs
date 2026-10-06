@@ -1,3 +1,7 @@
+//! Captures and restores one whole server on local disk.
+//! Checks destination space, signs the manifest, and keeps recovery keys encrypted.
+//! Does not schedule backups or copy them to a remote store.
+
 use crate::{
     Error, Result,
     engine::{Config, Runtime},

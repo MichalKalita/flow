@@ -1,3 +1,6 @@
+//! Parses a `.flow` source file into lists, symbols, strings, and numbers.
+//! Drops comments and whitespace. Does not type-check or execute.
+
 use crate::{Error, Result};
 
 #[derive(Clone, Debug, PartialEq)]

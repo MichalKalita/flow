@@ -1,3 +1,6 @@
+//! Persistent server identity, encryption keys, settings, and project secrets.
+//! Stores secrets encrypted. Does not log secret values.
+
 use crate::{Error, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ring::{

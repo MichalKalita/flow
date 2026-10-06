@@ -1,3 +1,6 @@
+//! Dispatches public HTTP to declared operations for one project.
+//! Applies the same grants as every other transport. Does not expose the admin database editor.
+
 use crate::{Error, Result, engine::Runtime};
 use axum::{
     Router,

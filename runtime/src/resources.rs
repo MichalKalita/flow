@@ -1,3 +1,6 @@
+//! Reads host parallelism, memory, and free disk, and sizes worker and admission limits.
+//! Optional environment overrides win over the measured defaults.
+
 use crate::engine::Runtime;
 use serde_json::{Value, json};
 use std::{fs, path::Path};

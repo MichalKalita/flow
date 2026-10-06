@@ -1,3 +1,7 @@
+//! HTTP API for the protected admin listener.
+//! Setup, settings, logs, audit, and the privileged record editor live here.
+//! The public port must not expose these routes.
+
 use crate::{engine::Runtime, http};
 use axum::{
     Json, Router,

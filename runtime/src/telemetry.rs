@@ -1,3 +1,6 @@
+//! Process-local counters and gauges for the admin dashboard.
+//! Samples stay bounded. This is not an external monitoring stack.
+
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},

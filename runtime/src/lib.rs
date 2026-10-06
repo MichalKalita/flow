@@ -1,3 +1,7 @@
+//! Flow runtime library.
+//! One process hosts isolated projects, each with its own program and SQLite database.
+//! Public transports call the engine. The admin listener is separate.
+
 pub mod admin;
 pub mod audit;
 pub mod engine;

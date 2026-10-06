@@ -1,3 +1,6 @@
+//! Serves the generated application page for a project that grants it.
+//! Uses the project's existing user authentication. Does not bypass permission checks.
+
 use crate::{
     Error, Result,
     engine::Runtime,

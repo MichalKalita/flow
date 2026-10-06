@@ -1,3 +1,6 @@
+//! Native image and file helpers used by programs.
+//! Writes file bytes and their records in the caller's transaction.
+
 use crate::{Error, Result};
 use image::{ImageFormat, ImageReader, imageops::FilterType};
 use std::io::Cursor;

@@ -1,3 +1,6 @@
+//! Process entry. Loads configuration, starts transports, and serves hosted projects.
+//! Keeps the admin listener separate from the public port.
+
 use flow_runtime::{
     admin,
     engine::{Config, Runtime},

@@ -1,3 +1,6 @@
+//! Writes one audit row in the same SQLite transaction as an application change.
+//! A rollback must leave no committed audit record.
+
 use crate::{Result, engine::Runtime, program::Program};
 use rusqlite::Connection;
 use serde_json::{Value, json};

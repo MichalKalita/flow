@@ -1,3 +1,6 @@
+//! MQTT transport. The CONNECT username selects the project.
+//! Publishes and subscribes only through declared operations and the same grants as HTTP.
+
 use crate::{Error, Result, engine::Runtime};
 use std::{
     collections::{BTreeMap, BTreeSet},

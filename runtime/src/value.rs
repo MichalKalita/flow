@@ -1,3 +1,6 @@
+//! Runtime values: records, lists, exact decimals, and branded positive ids.
+//! Ids stay numeric. Type safety does not use text prefixes.
+
 use crate::{Error, Result};
 use num_bigint::BigInt;
 use num_rational::BigRational;

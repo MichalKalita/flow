@@ -1,3 +1,7 @@
+//! Loads each hosted project from its own folder and database.
+//! Validates a full reload candidate before replacing the running program.
+//! A failed reload keeps the last working program and its data.
+
 use crate::{
     Error, Result,
     engine::{Config, Runtime},
