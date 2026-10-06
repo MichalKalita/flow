@@ -14,6 +14,7 @@ Each topic distinguishes requested outcomes, current implementation, recommendat
 - Failure handling is configurable throughout the system, including retry limits and the terminal choice to retain or delete failed input/work.
 - Email receipt limits, including individual message size, must be configurable.
 - Supply one bootstrap encryption key at deployment; manage project secrets through protected administration without SSH. Back up the key separately from encrypted data.
+- Protected administration may show a masked secret preview with a few leading and trailing characters. Do not send the full stored value to the browser for masking; mask short values fully where necessary.
 - A short final pause of writes to the affected project is acceptable for schema migration cutover. Preparation happens while the old version remains active.
 
 ## Invariants for every phase
@@ -79,7 +80,7 @@ Follow the email document's sub-milestones through receipt, submission/delivery,
 
 Resolve the earliest choices first, while continuing design work independent of the answer:
 
-1. **CFG-2–3:** live settings boundary and secret reveal behavior. **CFG-1 is answered: a deployment-supplied bootstrap key and project secret administration.**
+1. **CFG-2:** live settings boundary. **CFG-1 is answered: a deployment-supplied bootstrap key and project secret administration. CFG-3 is answered: allow a masked preview showing a few first and last characters.**
 2. **LOG-1–3 / CAP-1–3:** host retention policy, diagnostic safety, capacity targets, and applying guidance.
 3. **MIG-2–3:** transfer deletion and seed-triggered events. **MIG-1 is answered: a short final write pause is allowed.**
 4. **TLS-1–3:** aliases, wildcard requirements, and domain ownership/configuration.

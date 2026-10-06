@@ -22,15 +22,17 @@ The original idea `[secret TOKEN [default [randomString [length 20]]]]` is illus
 
 Validate a complete candidate before activation. Failed candidate validation must preserve the active configuration and last working program. Concurrent initialization must not generate multiple committed defaults. Coordinate persisted configuration versions, program activation, and recovery so a crash cannot expose a half-applied candidate.
 
-Represent a secret as an opaque capability usable only by authorized native/plugin consumers. Do not expose it through ordinary query projection, errors, logs, cached source, or admin read APIs. The editor should show presence/version and support replacement, not display plaintext by default. Key rotation requires an explicit overlap/revocation policy for credentials already in use.
+Represent a secret as an opaque capability usable only by authorized native/plugin consumers. Do not expose the full value through ordinary query projection, errors, logs, cached source, or admin read APIs. The protected settings editor supports replacement and a masked preview showing a few leading and trailing characters, with the middle hidden. Generate the preview on the server; do not send the full secret to the browser merely to mask it there. Fully mask short values when showing both ends would reveal the entire value or too much of it. Keep previews out of operational logs and ordinary application APIs. Key rotation requires an explicit overlap/revocation policy for credentials already in use.
 
-## Confirmed decision
+## Confirmed decisions
 
 - **CFG-1:** Supply one bootstrap encryption key at deployment, for example through an environment variable. Manage ordinary project secrets through the protected administration interface without SSH. Back up the bootstrap key separately from encrypted data.
 
+- **CFG-3:** Allow a simple masked preview of stored project secrets in protected administration: a few initial and final characters, with the middle hidden. Full-value reveal is not required by this decision. The exact preview length is an implementation detail; short secrets must remain fully masked where necessary.
+
 ## Open decisions
+
 - **CFG-2:** Which settings must apply live? Recommend live application settings, connector credentials, and logging settings; label settings requiring listener/process restart clearly.
-- **CFG-3:** Should an administrator ever reveal a stored secret? Recommend write-only management, with a one-time display only for newly issued credentials when necessary.
 
 Remaining answers: Pending conversation. Unanswered recommendations are not approved decisions.
 
@@ -38,7 +40,7 @@ Remaining answers: Pending conversation. Unanswered recommendations are not appr
 
 This is the first foundation for [routing/TLS](https.md), [external integrations](external-integrations.md), and [authentication](external%20auth.md). The protected admin listener remains the management surface; its HTTP console keeps ordinary application permissions.
 
-Verify generated-default reuse, concurrent initialization, encryption-at-rest, project isolation, invalid-candidate rollback, restart recovery, rotation, redaction, and version conflicts. Test the settings flow against the real runtime with an isolated database. Keep application mutation audit atomic; record configuration administration with redacted metadata and never secret values.
+Verify generated-default reuse, concurrent initialization, encryption-at-rest, project isolation, invalid-candidate rollback, restart recovery, rotation, masked-preview behavior for short and long values, absence of full secrets from preview responses, redaction, and version conflicts. Test the settings flow against the real runtime with an isolated database. Keep application mutation audit atomic; record configuration administration with redacted metadata and never secret values.
 
 ## Implementation order
 
