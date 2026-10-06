@@ -1,14 +1,63 @@
-# Migrations
+# Migrations and seeds
 
+## Requested outcome
 
-We need some way how to migrate data when structure is changed, it must be completed before app launches itself, but previous version should be running, maybe not using migrated content in that time, its ok
+Migrate incompatible schemas and data before activating the new program, while the previous program continues operating during preparation. Support explicit entity/data transfer between projects. Distinguish test seeds from production seeds and prevent repeated insertion.
 
+## Current implementation
 
-We need ability to migrate entities to other projects, entity will be copied to other project and some way labeled from where it should be migrated, and target project will copy all data.
+Reload accepts compatible additions and rejects entity/field removal or changes to stored types and constraints. Candidate schema changes and seed inserts are transactional; failed reloads retain the last working program, preserve data/audit, and write the project error file. The cached validated program supports recovery after restart.
+
+Seeds have an entity/numeric-ID ledger. A seed is initialized once; deleting it does not recreate it on reload. Explicit IDs are numeric and allocation remains above existing values. See [reload and initialization](../runtime/src/engine.rs), [hosted loading](../runtime/src/projects.rs), and [reload integration tests](../runtime/tests/projects.rs).
+
+## Local migration options
+
+1. Pause one project's work and migrate in place transactionally. Simple and safe for small changes, but large migrations interrupt service.
+2. Prepare a candidate database from a consistent snapshot, transform and validate it while the old version remains active, then reconcile writes and cut over. Recommend this for changes requiring lengthy preparation.
+3. Use expand/backfill/contract changes against a schema compatible with both programs. Useful for some changes, but requires explicit compatibility rules and more stages.
+
+Do not switch to a stale snapshot after the old program has accepted new writes. The user has confirmed that a short final pause of project writes is acceptable. Prepare while the old version runs, then pause writes, reconcile changes, validate, and cut over. Fully uninterrupted writes are not required for the initial migration design.
+
+A consistent SQLite snapshot should use a supported backup mechanism, not copying only a live main database file. See [SQLite's backup API](https://www.sqlite.org/backup.html).
+
+## Proposed activation protocol
+
+Declare source and target schema versions, an immutable migration identifier/checksum, bounded transformations, and pre/postconditions. Preview changed entities, references, expected storage, and incompatibilities. Validate the complete candidate program and migrated values, uniqueness, references, ID sequences, and schema before activation.
+
+Keep the old database/program authoritative until cutover. Account for writes during preparation; pause/drain project handlers and streaming writers consistently when required. Commit each authoritative application mutation together with its audit. Candidate preparation must not manufacture committed business-change audit entries in the active store. Preserve audit lineage and sequence high-water marks in the candidate, including sequences above deleted IDs.
+
+Coordinate database, cached program, configuration, and routing activation with a durable recovery state. Recover to one known authoritative generation after a crash. On failure, retain the previous working project and its data/audit and write the project error file. Once the new version has accepted writes, switching back is not equivalent to restoring an old backup; require an explicit reverse migration or recovery procedure.
+
+## Cross-project transfer
+
+Use an explicit source/target mapping and a versioned transfer job. Export only authorized fields and dependent records. Allocate target-local numeric IDs transactionally and maintain provenance separately as source project, entity, numeric source ID, and transfer version. Rewrite references through the mapping; never assume identical numeric IDs represent shared identity.
+
+Recommend copy-and-validate first, followed by optional source removal as a separate authorized phase. Different databases do not provide one automatic atomic transaction. Persist checkpoints and deduplicate imports so retries do not duplicate data; audit target writes and any source deletions in their respective transactions. Preview reference closure, conflicts, streams/blobs, and event behavior before execution.
 
 ## Seeds
 
-Ability to mark what is test data, what is production data, and prevent write data twice.
+Introduce explicit production/bootstrap and test/demo seed groups. Recommend excluding test seeds from production by default. Preserve once-only behavior; changes to bootstrap data should be versioned migrations rather than silent reseeding.
 
+Retain fixed positive numeric IDs where stable bootstrap references require them. An existing row with that ID is not permission to overwrite it. Recommend insert-once with conflict reporting; intentional updates use a migration with preconditions. Advance sequences transactionally and never reuse committed allocations after deletion.
 
-I am not sure here: Fix ids, seeds should be possible to run event when ids are there? Maybe its bad behavior.
+Seed-generated events, if enabled, must use the same committed-event lifecycle as all other sources. Recommend no seed-triggered business events by default, with explicit opt-in and deduplication. This choice is not confirmed yet.
+
+## Confirmed decision
+
+- **MIG-1:** A short final pause of project writes is acceptable. The old version remains available during preparation; pause only the affected project for final reconciliation and activation.
+
+## Open decisions
+- **MIG-2:** Should transfer remove source data automatically? Recommend copying first and making deletion a separate explicit phase.
+- **MIG-3:** Should seeds trigger ordinary project events? Recommend disabled by default, with explicit opt-in using the universal event mechanism.
+
+Answers: Pending conversation.
+
+## Dependencies and verification
+
+Local migration metadata and recovery precede [the unified event lifecycle](external-integrations.md). Transfers can follow the common job/plugin contract and an explicit general cross-project configuration model; they do not require shared accounts.
+
+Verify incompatible-schema rejection, candidate rollback, writes during preparation, crash at each cutover stage, audit lineage, deleted-ID sequence preservation, seed conflicts/restarts, transfer remapping, duplicate retries, and partial transfer recovery. Use isolated databases and include active HTTP/MQTT/WebSocket work during migration tests.
+
+## Implementation order
+
+See [the shared implementation plan](implementation-plan.md) for delivery order, dependencies, milestones, and the decision queue.
